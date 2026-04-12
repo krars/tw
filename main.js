@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.12";
+  const VERSION = "0.10.16";
   const LOG_PREFIX = "[ScriptMM]";
   const MULTI_TAB_PRESENCE_KEY = "scriptmm.active_instances.v1";
   const MULTI_TAB_HEARTBEAT_INTERVAL_MS = 3000;
@@ -52,7 +52,8 @@
   const COMMAND_UNITS_TOLERANCE_RATIO = 0.2;
   const COMMAND_CHECK_GRACE_MS = 15000;
   const TIMING_POINT_TOLERANCE_MS = 400;
-  const HUB_SYNC_INTERVAL_DEFAULT_MS = 10000;
+  const HUB_SYNC_INTERVAL_LEGACY_DEFAULT_MS = 10000;
+  const HUB_SYNC_INTERVAL_DEFAULT_MS = 70000;
   const HUB_SYNC_INTERVAL_MIN_MS = 3000;
   const HUB_SYNC_INTERVAL_MAX_MS = 120000;
   const HUB_COMMANDS_REFRESH_MIN_INTERVAL_MS = 9000;
@@ -100,6 +101,7 @@
   ]);
   const UI_MIGRATION_KEYS = Object.freeze({
     favoritesEnabledDefaultOn: "favorites_enabled_default_on_2026_04_12",
+    hubPollDefault70Sec: "hub_poll_default_70sec_2026_04_12",
   });
 
   const UNIT_BASE_MINUTES_FALLBACK = {
@@ -2470,8 +2472,8 @@
       !Array.isArray(migrationStateRaw)
         ? migrationStateRaw
         : {};
-    const migrationKey = UI_MIGRATION_KEYS.favoritesEnabledDefaultOn;
-    if (!migrationState[migrationKey]) {
+    const favoritesMigrationKey = UI_MIGRATION_KEYS.favoritesEnabledDefaultOn;
+    if (!migrationState[favoritesMigrationKey]) {
       const shouldEnableFavorites =
         raw &&
         typeof raw === "object" &&
@@ -2481,7 +2483,32 @@
         normalized.favoritesEnabled = true;
         saveJson(STORAGE_KEYS.uiSettings, normalized);
       }
-      migrationState[migrationKey] = new Date(getServerNowMs()).toISOString();
+      migrationState[favoritesMigrationKey] = new Date(
+        getServerNowMs(),
+      ).toISOString();
+      saveJson(STORAGE_KEYS.uiMigrations, migrationState);
+    }
+    const hubPollMigrationKey = UI_MIGRATION_KEYS.hubPollDefault70Sec;
+    if (!migrationState[hubPollMigrationKey]) {
+      const hasRawHubPollInterval =
+        raw &&
+        typeof raw === "object" &&
+        !Array.isArray(raw) &&
+        Object.prototype.hasOwnProperty.call(raw, "hubPollIntervalMs");
+      const rawHubPollIntervalMs = hasRawHubPollInterval
+        ? Math.round(Number(raw.hubPollIntervalMs))
+        : null;
+      const shouldApplyDefault70Sec =
+        !hasRawHubPollInterval ||
+        !Number.isFinite(rawHubPollIntervalMs) ||
+        rawHubPollIntervalMs === HUB_SYNC_INTERVAL_LEGACY_DEFAULT_MS;
+      if (shouldApplyDefault70Sec) {
+        normalized.hubPollIntervalMs = HUB_SYNC_INTERVAL_DEFAULT_MS;
+        saveJson(STORAGE_KEYS.uiSettings, normalized);
+      }
+      migrationState[hubPollMigrationKey] = new Date(
+        getServerNowMs(),
+      ).toISOString();
       saveJson(STORAGE_KEYS.uiMigrations, migrationState);
     }
     state.uiSettings = normalized;
@@ -3389,16 +3416,10 @@
           matchedArrivalMs,
         )
       : false;
-    const typeMatchedByEvidence = isCommandTypeCompatibleForManeuver(
-      { action },
-      { type: matchedCommandType },
-    );
     if (hasMatchEvidence) {
-      if (timingMatchedByEvidence && typeMatchedByEvidence) {
-        status = MANEUVER_STATUS.success;
-      } else {
-        status = MANEUVER_STATUS.timingMiss;
-      }
+      status = timingMatchedByEvidence
+        ? MANEUVER_STATUS.success
+        : MANEUVER_STATUS.timingMiss;
     }
     const resolvedFromVillageId = resolveScheduledCommandFromVillageId({
       fromVillageId,
@@ -3783,16 +3804,10 @@
           matchedArrivalMs,
         )
       : false;
-    const typeMatchedByEvidence = isCommandTypeCompatibleForManeuver(
-      { action },
-      { type: matchedCommandType },
-    );
     if (hasMatchEvidence) {
-      if (timingMatchedByEvidence && typeMatchedByEvidence) {
-        status = MANEUVER_STATUS.success;
-      } else {
-        status = MANEUVER_STATUS.timingMiss;
-      }
+      status = timingMatchedByEvidence
+        ? MANEUVER_STATUS.success
+        : MANEUVER_STATUS.timingMiss;
     }
 
     return {
@@ -3991,20 +4006,15 @@
 
       const matchedCommandId = cleanText(matchedCommand.id);
       if (matchedCommandId) usedCommandIds.add(matchedCommandId);
-      const typeMatched = isCommandTypeCompatibleForManeuver(
-        maneuver,
-        matchedCommand,
-      );
       const timingMatched = isTimingMatchedForManeuver(
         maneuver,
         matchedCommand,
       );
       const matchedArrivalMs = toFiniteEpochMs(matchedCommand.etaEpochMs);
       const matchedType = cleanText(matchedCommand.type) || null;
-      const resolvedStatus =
-        timingMatched && typeMatched
-          ? MANEUVER_STATUS.success
-          : MANEUVER_STATUS.timingMiss;
+      const resolvedStatus = timingMatched
+        ? MANEUVER_STATUS.success
+        : MANEUVER_STATUS.timingMiss;
       finalized.push({
         ...maneuver,
         status: resolvedStatus,
@@ -4033,7 +4043,29 @@
     const archiveEntries = finalized
       .map((entry) => buildArchivedManeuverEntry(entry, nowMs))
       .filter(Boolean);
-    state.scheduledCommands = active;
+    const finalizedIds = new Set(
+      finalized
+        .map((entry) => cleanText(entry && entry.id))
+        .filter(Boolean)
+        .map((value) => String(value)),
+    );
+    const mergedActiveMap = new Map();
+    purgeStaleScheduledCommands(readJson(STORAGE_KEYS.scheduledCommands)).forEach(
+      (entry) => {
+        const key = String(cleanText(entry && entry.id) || "");
+        if (!key || finalizedIds.has(key)) return;
+        mergedActiveMap.set(key, entry);
+      },
+    );
+    active.forEach((entry) => {
+      const key = String(cleanText(entry && entry.id) || "");
+      if (!key || finalizedIds.has(key)) return;
+      mergedActiveMap.set(key, entry);
+    });
+    state.scheduledCommands = Array.from(mergedActiveMap.values()).sort(
+      (a, b) =>
+        Number((a && a.departureMs) || 0) - Number((b && b.departureMs) || 0),
+    );
     if (archiveEntries.length) {
       appendArchivedManeuvers(archiveEntries);
     }
@@ -9061,6 +9093,10 @@
 #scriptmm-overlay-root .smm-slice-table th,#scriptmm-overlay-root .smm-slice-table td{border:1px solid #dcc89f;padding:2px 4px;text-align:center;white-space:nowrap;background:#fff8e6}
 #scriptmm-overlay-root .smm-slice-table thead th{position:sticky;top:0;z-index:1;background:#f0dfbb;color:#4f320c}
 #scriptmm-overlay-root .smm-plan-comment-cell{text-align:left;white-space:normal;line-height:1.25;min-width:110px;max-width:260px}
+#scriptmm-overlay-root .smm-plan-comment-wrap{display:flex;align-items:flex-start;gap:6px}
+#scriptmm-overlay-root .smm-plan-comment-text{flex:1 1 auto;min-width:0;word-break:break-word}
+#scriptmm-overlay-root .smm-plan-comment-edit{width:18px;height:18px;min-width:18px;padding:0;border:1px solid #b99656;border-radius:5px;cursor:pointer;background:linear-gradient(180deg,#fff6de 0%,#ecd7ab 100%);background-repeat:no-repeat;background-position:center;background-size:12px 12px;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%235a3a10' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 20h9'/%3E%3Cpath d='M16.5 3.5a2.12 2.12 0 1 1 3 3L7 19l-4 1 1-4z'/%3E%3C/svg%3E")}
+#scriptmm-overlay-root .smm-plan-comment-edit:hover{filter:brightness(1.06)}
 #scriptmm-overlay-root .smm-unit-toggle,.smm-msg-inline-panel .smm-unit-toggle{position:relative;display:inline-flex;align-items:center;justify-content:center;width:20px;height:16px;padding:0;margin:0;border:0;background:transparent;cursor:pointer}
 #scriptmm-overlay-root .smm-unit-toggle:hover,.smm-msg-inline-panel .smm-unit-toggle:hover{filter:brightness(1.1)}
 #scriptmm-overlay-root .smm-unit-toggle.is-disabled,.smm-msg-inline-panel .smm-unit-toggle.is-disabled{opacity:.35;filter:grayscale(1)}
@@ -11928,6 +11964,7 @@
     stopCountdownTicker();
     ui.list.innerHTML = "";
     maybeShowMultiTabWarning({ force: false, statusTarget: ui });
+    syncScheduledCommandsFromStorage();
     state.scheduledCommands = purgeStaleScheduledCommands(
       state.scheduledCommands,
     );
@@ -11961,7 +11998,6 @@
         const resolvedGoUrl =
           cleanText(command.goUrl) || resolveScheduledCommandGoUrl(command) || "";
         const departureMs = Number(command.departureMs);
-        const arrivalAtMs = Number(getPlanArrivalEpochMs(command));
         const timing = resolveTimingForScheduledCommand(command);
         const timingCenter = computeTimingCenterCopyValue(timing);
         const timingCopyValue = timingCenter;
@@ -11973,11 +12009,11 @@
         const typeLabel = getManeuverTypeLabel(command.action);
         const statusLabel = getManeuverStatusLabel(command.status);
         const commentText = cleanText(command.comment);
+        const commentButtonTitle = commentText
+          ? "Изменить комментарий"
+          : "Добавить комментарий";
         const departureText = Number.isFinite(departureMs)
           ? formatDateTimeShort(departureMs)
-          : "—";
-        const arrivalText = Number.isFinite(arrivalAtMs)
-          ? formatDateTimeShortWithMs(arrivalAtMs)
           : "—";
         const countdownDataAttr = Number.isFinite(departureMs)
           ? String(departureMs)
@@ -11993,12 +12029,17 @@
   <td>${escapeHtml(command.fromVillageCoord || command.fromVillageId || "?")}</td>
   <td>${escapeHtml(command.targetCoord || "?")}</td>
   <td>${escapeHtml(departureText)}</td>
-  <td>${escapeHtml(arrivalText)}</td>
   <td${timingCellAttrs}>${escapeHtml(timing.timingLabel || "—")}</td>
   <td>${escapeHtml(statusLabel)}</td>
   ${
     hasCommentColumn
-      ? `<td class="smm-plan-comment-cell">${escapeHtml(commentText || "—")}</td>`
+      ? `<td class="smm-plan-comment-cell"><div class="smm-plan-comment-wrap"><span class="smm-plan-comment-text">${escapeHtml(
+          commentText || "—",
+        )}</span><button type="button" class="smm-plan-comment-edit" data-cmd-id="${escapeHtml(
+          command.id || "",
+        )}" title="${escapeHtml(commentButtonTitle)}" aria-label="${escapeHtml(
+          commentButtonTitle,
+        )}"></button></div></td>`
       : ""
   }
   <td><span class="smm-plan-countdown" data-departure-ms="${escapeHtml(countdownDataAttr)}">${escapeHtml(
@@ -12035,7 +12076,6 @@
           <th>Откуда</th>
           <th>Куда</th>
           <th>Выход</th>
-          <th>Приход</th>
           <th>Тайминг</th>
           <th>Статус</th>
           ${hasCommentColumn ? "<th>Комментарий</th>" : ""}
@@ -12896,6 +12936,56 @@
         return av - bv;
       return String((a && a.id) || "").localeCompare(String((b && b.id) || ""));
     });
+  };
+  const upsertScheduledCommandWithStorageSync = (rawCommand) => {
+    const normalized = normalizeScheduledCommand(rawCommand);
+    if (!normalized) return null;
+    const normalizedId = cleanText(normalized.id);
+    if (!normalizedId) return null;
+    const latestCommands = syncScheduledCommandsFromStorage();
+    const mergedCommands = mergeScheduledCommandsById(latestCommands, [
+      normalized,
+    ]);
+    state.scheduledCommands = mergedCommands;
+    saveScheduledCommands();
+    const persistedCommands = mergeScheduledCommandsById(
+      purgeStaleScheduledCommands(readJson(STORAGE_KEYS.scheduledCommands)),
+      state.scheduledCommands,
+    );
+    state.scheduledCommands = persistedCommands;
+    return (
+      persistedCommands.find(
+        (command) =>
+          String(cleanText(command && command.id) || "") ===
+          String(normalizedId),
+      ) || normalized
+    );
+  };
+  const updateScheduledCommandCommentById = (commandId, comment) => {
+    const safeId = cleanText(commandId);
+    if (!safeId) return null;
+    const safeComment = cleanText(comment) || null;
+    const latestCommands = syncScheduledCommandsFromStorage();
+    const updatedCommands = (Array.isArray(latestCommands) ? latestCommands : [])
+      .map((command) => normalizeScheduledCommand(command))
+      .filter(Boolean)
+      .map((command) => {
+        if (String(cleanText(command.id) || "") !== String(safeId)) {
+          return command;
+        }
+        return normalizeScheduledCommand({
+          ...command,
+          comment: safeComment,
+        });
+      })
+      .filter(Boolean);
+    const updatedCommand = updatedCommands.find(
+      (command) => String(cleanText(command && command.id) || "") === String(safeId),
+    );
+    if (!updatedCommand) return null;
+    state.scheduledCommands = updatedCommands;
+    saveScheduledCommands();
+    return updatedCommand;
   };
 
   const loadHubPlanFromHubAsync = async ({
@@ -19108,13 +19198,19 @@ ${panelHtml}`;
         );
         return true;
       }
-      state.scheduledCommands.push(normalized);
-      saveScheduledCommands();
+      const savedCommand = upsertScheduledCommandWithStorageSync(normalized);
+      if (!savedCommand) {
+        setMessageInlinePanelStatus(
+          panelNode,
+          "Не удалось сохранить приказ в план.",
+        );
+        return true;
+      }
       state.hubPlanLastFingerprint = buildScheduledCommandsFingerprint(
         state.scheduledCommands,
       );
-      const scheduleStatusText = `Запланировано: ${normalized.fromVillageCoord || normalized.fromVillageId || "?"} → ${
-        normalized.targetCoord || "?"
+      const scheduleStatusText = `Запланировано: ${savedCommand.fromVillageCoord || savedCommand.fromVillageId || "?"} → ${
+        savedCommand.targetCoord || "?"
       }, юнитов ${unitKeys.length}.${plannerComment ? " Комментарий сохранён." : ""}`;
       const rerendered = rerenderMessageInlinePanel(panelNode, {
         incomingId,
@@ -21194,6 +21290,60 @@ ${panelHtml}`;
         return;
       }
 
+      const planCommentEditButton = event.target.closest(".smm-plan-comment-edit");
+      if (planCommentEditButton) {
+        maybeShowMultiTabWarning({ force: true, statusTarget: state.ui });
+        const commandId = cleanText(
+          planCommentEditButton.getAttribute("data-cmd-id") ||
+            planCommentEditButton
+              .closest(".smm-plan-cmd-row")
+              ?.getAttribute("data-cmd-id"),
+        );
+        if (!commandId) {
+          setStatus(state.ui, "Не удалось определить запись плана.");
+          return;
+        }
+        syncScheduledCommandsFromStorage();
+        const command = (
+          Array.isArray(state.scheduledCommands) ? state.scheduledCommands : []
+        )
+          .map((item) => normalizeScheduledCommand(item))
+          .find(
+            (item) =>
+              String(cleanText(item && item.id) || "") === String(commandId),
+          );
+        if (!command) {
+          setStatus(state.ui, "Запись плана не найдена.");
+          return;
+        }
+        const commentResult = await askFavoriteCommentDialog({
+          title: "Комментарий к приказу:",
+          initialValue: cleanText(command.comment) || "",
+        });
+        if (!commentResult || commentResult.canceled) {
+          return;
+        }
+        const updatedCommand = updateScheduledCommandCommentById(
+          commandId,
+          commentResult.comment,
+        );
+        if (!updatedCommand) {
+          setStatus(state.ui, "Не удалось обновить комментарий.");
+          return;
+        }
+        state.hubPlanLastFingerprint = buildScheduledCommandsFingerprint(
+          state.scheduledCommands,
+        );
+        renderActiveTab(state.ui);
+        setStatus(
+          state.ui,
+          cleanText(updatedCommand.comment)
+            ? "Комментарий обновлён."
+            : "Комментарий очищен.",
+        );
+        return;
+      }
+
       const planGoButton = event.target.closest(".smm-plan-go-btn");
       if (planGoButton) {
         maybeShowMultiTabWarning({ force: true, statusTarget: state.ui });
@@ -21490,8 +21640,11 @@ ${panelHtml}`;
             return;
           }
 
-          state.scheduledCommands.push(normalized);
-          saveScheduledCommands();
+          const savedCommand = upsertScheduledCommandWithStorageSync(normalized);
+          if (!savedCommand) {
+            setStatus(state.ui, "Не удалось сохранить приказ в план.");
+            return;
+          }
           state.hubPlanLastFingerprint = buildScheduledCommandsFingerprint(
             state.scheduledCommands,
           );
@@ -21509,8 +21662,8 @@ ${panelHtml}`;
           }
           setStatus(
             state.ui,
-            `Запланировано: ${normalized.fromVillageCoord || normalized.fromVillageId || "?"} → ${
-              normalized.targetCoord || "?"
+            `Запланировано: ${savedCommand.fromVillageCoord || savedCommand.fromVillageId || "?"} → ${
+              savedCommand.targetCoord || "?"
             }, юнитов ${unitKeys.length}.${plannerComment ? " Комментарий сохранён." : ""}`,
           );
           return;
