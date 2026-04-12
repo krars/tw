@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.4";
+  const VERSION = "0.10.5";
   const LOG_PREFIX = "[ScriptMM]";
   const SPEED_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
   const MAX_FETCHES_PER_SECOND = 4;
@@ -11211,7 +11211,7 @@
 
     if (departureCell) {
       departureCell.textContent = hasDeparture
-        ? formatTimeOnly(departureMs)
+        ? formatTimeWithMs(departureMs)
         : "—";
     }
 
@@ -11284,7 +11284,7 @@
     }
     if (departureCell) {
       departureCell.textContent = hasDeparture
-        ? formatTimeOnly(departureMs)
+        ? formatTimeWithMs(departureMs)
         : "—";
     }
     if (countdownNode) {
@@ -11573,7 +11573,7 @@
   }
   <td class="smm-slice-depart" data-role="depart">${escapeHtml(
     Number.isFinite(Number(row.bestDepartureMs))
-      ? formatTimeOnly(row.bestDepartureMs)
+      ? formatTimeWithMs(row.bestDepartureMs)
       : "—",
   )}</td>
   <td class="smm-slice-timer"><span class="smm-plan-countdown" data-role="countdown"${
@@ -11800,7 +11800,7 @@
         const statusLabel = getManeuverStatusLabel(command.status);
         const commentText = cleanText(command.comment);
         const departureText = Number.isFinite(departureMs)
-          ? formatDateTimeShort(departureMs)
+          ? formatDateTimeShortWithMs(departureMs)
           : "—";
         const countdownDataAttr = Number.isFinite(departureMs)
           ? String(departureMs)
@@ -16210,7 +16210,7 @@
     defaultSigilPercent,
   )}"></td>
   <td class="smm-slice-depart" data-role="depart">${escapeHtml(
-    Number.isFinite(departureMs) ? formatTimeOnly(departureMs) : "—",
+    Number.isFinite(departureMs) ? formatTimeWithMs(departureMs) : "—",
   )}</td>
   <td class="smm-slice-timer"><span class="smm-plan-countdown" data-role="countdown"${
     Number.isFinite(departureMs)
@@ -16612,11 +16612,11 @@
         const typeLabel = getManeuverTypeLabel(entry.action);
         const statusLabel = getManeuverStatusLabel(entry.status);
         const departureText = Number.isFinite(Number(entry.departureMs))
-          ? formatDateTimeShort(entry.departureMs)
+          ? formatDateTimeShortWithMs(entry.departureMs)
           : "—";
         const matchedArrivalMs = toFiniteEpochMs(entry.matchedArrivalMs);
         const arrivalText = Number.isFinite(matchedArrivalMs)
-          ? formatDateTimeShort(matchedArrivalMs)
+          ? formatDateTimeShortWithMs(matchedArrivalMs)
           : entry.matchedArrivalText || "—";
         const commandTypeLabel =
           entry.matchedCommandTypeLabel ||
