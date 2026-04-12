@@ -16013,8 +16013,8 @@
   };
 
   const closeNearestSlicesDialog = ({ flushDeferredRerender = true } = {}) => {
-    if (!state.ui || !state.ui.list) return false;
-    const dialog = state.ui.list.querySelector(".smm-nearest-dialog-backdrop");
+    if (!state.ui || !state.ui.root) return false;
+    const dialog = state.ui.root.querySelector(".smm-nearest-dialog-backdrop");
     if (!dialog) return false;
     dialog.remove();
     if (flushDeferredRerender) {
@@ -16256,7 +16256,7 @@
 </div>`;
   };
   const openNearestSlicesDialog = async ({ source = "incomings" } = {}) => {
-    if (!state.ui || !state.ui.list) return false;
+    if (!state.ui || !state.ui.root) return false;
     const sourceValue = cleanText(source);
     const sourceKey =
       sourceValue === "tribe"
@@ -16267,7 +16267,7 @@
     closeNearestSlicesDialog({ flushDeferredRerender: false });
     setStatus(state.ui, "Ближайшие срезы: считаю варианты...");
     const renderDialogWithPayload = (payload, statusText = null) => {
-      if (!state.ui || !state.ui.list) return false;
+      if (!state.ui || !state.ui.root) return false;
       const backdrop = document.createElement("div");
       backdrop.className = "smm-nearest-dialog-backdrop";
       backdrop.setAttribute("data-nearest-source", sourceKey);
@@ -16275,7 +16275,7 @@
         payload,
         { source: sourceKey },
       )}</section>`;
-      state.ui.list.appendChild(backdrop);
+      state.ui.root.appendChild(backdrop);
       initSliceRows(backdrop);
       syncAllVillageGroupSelects(backdrop);
       scheduleApplySliceScrollLimits(backdrop);
@@ -16316,8 +16316,8 @@
 
     void ensureMessageRuntimeDataLoaded({ cacheOnly: false })
       .then((runtimeReady) => {
-        if (!runtimeReady || !state.ui || !state.ui.list) return;
-        const dialog = state.ui.list.querySelector(
+        if (!runtimeReady || !state.ui || !state.ui.root) return;
+        const dialog = state.ui.root.querySelector(
           '.smm-nearest-dialog-backdrop[data-nearest-source="' +
             String(sourceKey).replace(/"/g, '\\"') +
             '"]',
@@ -20634,7 +20634,7 @@ ${panelHtml}`;
         setStatus(state.ui, `Вкладка: ${TOP_TAB_LABELS[tab] || tab}`);
       });
     }
-    state.ui.list.addEventListener("click", async (event) => {
+    state.ui.root.addEventListener("click", async (event) => {
       const nearestOpenButton = event.target.closest(
         ".smm-nearest-open-btn[data-nearest-source]",
       );
@@ -21342,7 +21342,7 @@ ${panelHtml}`;
       activateIncomingPlanAction(incomingId, action, null, sourceTab);
     });
 
-    state.ui.list.addEventListener("input", (event) => {
+    state.ui.root.addEventListener("input", (event) => {
       const tribeSearchInput = event.target.closest(".smm-tribe-search-input");
       if (tribeSearchInput) {
         state.tribeSearchQuery = cleanText(tribeSearchInput.value) || "";
@@ -21382,7 +21382,7 @@ ${panelHtml}`;
       updateSliceRowState(row);
       updateCountdownNodes();
     });
-    state.ui.list.addEventListener("change", (event) => {
+    state.ui.root.addEventListener("change", (event) => {
       const tribeOwnerSelect = event.target.closest(".smm-tribe-owner-select");
       if (tribeOwnerSelect) {
         const nextOwnerNick =
