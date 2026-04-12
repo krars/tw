@@ -34,6 +34,7 @@
     hiddenIncomings: "scriptmm.hidden_incomings.v1",
     hiddenVillageGroups: "scriptmm.hidden_village_groups.v1",
     favorites: "scriptmm.favorites.v1",
+    uiMigrations: "scriptmm.ui_migrations.v1",
   };
   const SUPPORT_COMMAND_DETAILS_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
   const COMMAND_ROUTE_DETAILS_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
@@ -75,7 +76,7 @@
     forceSigilPercent: null,
     hubPollIntervalMs: HUB_SYNC_INTERVAL_DEFAULT_MS,
     nearestSliceWindowMs: NEAREST_SLICE_LOOKAHEAD_DEFAULT_MS,
-    favoritesEnabled: false,
+    favoritesEnabled: true,
     plannerCommentEnabled: false,
   });
   const UI_BOOLEAN_SETTING_KEYS = new Set([
@@ -89,6 +90,9 @@
     "favoritesEnabled",
     "plannerCommentEnabled",
   ]);
+  const UI_MIGRATION_KEYS = Object.freeze({
+    favoritesEnabledDefaultOn: "favorites_enabled_default_on_2026_04_12",
+  });
 
   const UNIT_BASE_MINUTES_FALLBACK = {
     spear: 18,
@@ -2328,7 +2332,29 @@
     };
   };
   const loadUiSettings = () => {
-    const normalized = normalizeUiSettings(readJson(STORAGE_KEYS.uiSettings));
+    const raw = readJson(STORAGE_KEYS.uiSettings);
+    const normalized = normalizeUiSettings(raw);
+    const migrationStateRaw = readJson(STORAGE_KEYS.uiMigrations);
+    const migrationState =
+      migrationStateRaw &&
+      typeof migrationStateRaw === "object" &&
+      !Array.isArray(migrationStateRaw)
+        ? migrationStateRaw
+        : {};
+    const migrationKey = UI_MIGRATION_KEYS.favoritesEnabledDefaultOn;
+    if (!migrationState[migrationKey]) {
+      const shouldEnableFavorites =
+        raw &&
+        typeof raw === "object" &&
+        !Array.isArray(raw) &&
+        raw.favoritesEnabled === false;
+      if (shouldEnableFavorites) {
+        normalized.favoritesEnabled = true;
+        saveJson(STORAGE_KEYS.uiSettings, normalized);
+      }
+      migrationState[migrationKey] = new Date(getServerNowMs()).toISOString();
+      saveJson(STORAGE_KEYS.uiMigrations, migrationState);
+    }
     state.uiSettings = normalized;
     return normalized;
   };
