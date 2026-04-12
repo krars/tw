@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.9";
+  const VERSION = "0.10.10";
   const LOG_PREFIX = "[ScriptMM]";
   const SPEED_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
   const MAX_FETCHES_PER_SECOND = 4;
@@ -13180,7 +13180,12 @@
     return values;
   };
 
-  const isCommandArrivalInWindow = (command, windowInfo, arrivalCandidatesRaw) => {
+  const isCommandArrivalInWindow = (
+    command,
+    windowInfo,
+    arrivalCandidatesRaw,
+    options = {},
+  ) => {
     if (!command || !windowInfo) return false;
     const arrivalCandidates = Array.isArray(arrivalCandidatesRaw)
       ? arrivalCandidatesRaw
@@ -13189,6 +13194,12 @@
       isEpochInWindow(epochMs, windowInfo.startMs, windowInfo.endMs),
     );
     if (byEpoch) return true;
+    const allowDayFallback = !(
+      options &&
+      typeof options === "object" &&
+      options.allowDayFallback === false
+    );
+    if (!allowDayFallback) return false;
     const dayRange = resolveWindowDayRangeFromWindowInfo(windowInfo);
     if (!dayRange) return false;
     const dayCandidates = getCommandArrivalDayMsCandidates(
@@ -13197,6 +13208,14 @@
     );
     return dayCandidates.some((dayMs) => isDayMsInsideRange(dayMs, dayRange));
   };
+  const isCommandArrivalInSliceConflictWindow = (
+    command,
+    windowInfo,
+    arrivalCandidatesRaw,
+  ) =>
+    isCommandArrivalInWindow(command, windowInfo, arrivalCandidatesRaw, {
+      allowDayFallback: false,
+    });
 
   const extractEpochMsCandidatesFromCommand = (command) => {
     const candidates = [];
@@ -13353,7 +13372,7 @@
       const commandTarget = cleanText(command && (command.targetCoord || command.target));
       if (!hasCoordTokenIntersection(targetCoord, commandTarget)) return;
       const arrivalCandidates = extractEpochMsCandidatesFromCommand(command);
-      const isMatchedByTime = isCommandArrivalInWindow(
+      const isMatchedByTime = isCommandArrivalInSliceConflictWindow(
         command,
         localWindowInfo,
         arrivalCandidates,
@@ -13368,7 +13387,7 @@
         const hasTargetTokens = buildCoordTokens(commandTarget).size > 0;
         if (hasTargetTokens) return;
         const arrivalCandidates = extractEpochMsCandidatesFromCommand(command);
-        const isMatchedByTime = isCommandArrivalInWindow(
+        const isMatchedByTime = isCommandArrivalInSliceConflictWindow(
           command,
           localWindowInfo,
           arrivalCandidates,
@@ -13901,7 +13920,7 @@
     };
     supportCommands.forEach((command) => {
       const arrivalCandidates = extractEpochMsCandidatesFromCommand(command);
-      const inWindow = isCommandArrivalInWindow(
+      const inWindow = isCommandArrivalInSliceConflictWindow(
         command,
         windowInfo,
         arrivalCandidates,
@@ -14055,8 +14074,6 @@
     const normalizedCachedCommands = getSliceConflictCommandCandidates();
     if (!normalizedCachedCommands.length) return null;
     const matched = [];
-    const matchedUnknownTarget = [];
-    const matchedByTimeOnly = [];
     const matchedByTargetGrace = [];
     const summedUnits = {};
     const collectUnits = (command) => {
@@ -14075,7 +14092,7 @@
       const hasTargetTokens = buildCoordTokens(commandTarget).size > 0;
       if (!hasCoordTokenIntersection(windowInfo.targetCoord, commandTarget)) return;
       const arrivalCandidates = extractEpochMsCandidatesFromCommand(command);
-      const inWindow = isCommandArrivalInWindow(
+      const inWindow = isCommandArrivalInSliceConflictWindow(
         command,
         windowInfo,
         arrivalCandidates,
@@ -14083,7 +14100,6 @@
       if (!inWindow) return;
       matched.push(command);
       collectUnits(command);
-      if (!hasTargetTokens) matchedUnknownTarget.push(command);
     });
     if (!matched.length) {
       const strictStart = toFiniteEpochMs(windowInfo.startMs);
@@ -14101,7 +14117,7 @@
           const commandTarget = cleanText(command.targetCoord || command.target);
           if (!hasCoordTokenIntersection(windowInfo.targetCoord, commandTarget)) return;
           const arrivalCandidates = extractEpochMsCandidatesFromCommand(command);
-          const inWindow = isCommandArrivalInWindow(
+          const inWindow = isCommandArrivalInSliceConflictWindow(
             command,
             graceWindow,
             arrivalCandidates,
@@ -14113,49 +14129,12 @@
         });
       }
     }
-    if (!matched.length) {
-      normalizedCachedCommands.forEach((command) => {
-        if (!command) return;
-        const nature = getTribeTimelineEntryNature(command);
-        if (nature !== "support") return;
-        const commandTarget = cleanText(command.targetCoord || command.target);
-        const hasTargetTokens = buildCoordTokens(commandTarget).size > 0;
-        if (hasTargetTokens) return;
-        const arrivalCandidates = extractEpochMsCandidatesFromCommand(command);
-        const inWindow = isCommandArrivalInWindow(
-          command,
-          windowInfo,
-          arrivalCandidates,
-        );
-        if (!inWindow) return;
-        matched.push(command);
-        matchedUnknownTarget.push(command);
-        collectUnits(command);
-      });
-    }
-    if (!matched.length) {
-      normalizedCachedCommands.forEach((command) => {
-        if (!command) return;
-        const nature = getTribeTimelineEntryNature(command);
-        if (nature !== "support") return;
-        const arrivalCandidates = extractEpochMsCandidatesFromCommand(command);
-        const inWindow = isCommandArrivalInWindow(
-          command,
-          windowInfo,
-          arrivalCandidates,
-        );
-        if (!inWindow) return;
-        matched.push(command);
-        matchedByTimeOnly.push(command);
-        collectUnits(command);
-      });
-    }
     if (!matched.length) return null;
     return {
       ...windowInfo,
       matchedCount: matched.length,
-      unknownTargetCount: matchedUnknownTarget.length,
-      timeOnlyCount: matchedByTimeOnly.length,
+      unknownTargetCount: 0,
+      timeOnlyCount: 0,
       targetGraceCount: matchedByTargetGrace.length,
       summedUnits,
       unitsHtml: formatPlanUnitsIconsHtml(summedUnits),
@@ -14215,7 +14194,7 @@
         hasCoordTokenIntersection(snapshot.window.targetCoord, targetCoord)
       ) {
         snapshot.targetRows += 1;
-        const inWindow = isCommandArrivalInWindow(
+        const inWindow = isCommandArrivalInSliceConflictWindow(
           command,
           snapshot.window,
           arrivalCandidates,
@@ -14228,7 +14207,7 @@
       }
       if (nature === "support" && snapshot.hasWindow) {
         const hasTargetTokens = buildCoordTokens(targetCoord).size > 0;
-        const inWindowByAnyTarget = isCommandArrivalInWindow(
+        const inWindowByAnyTarget = isCommandArrivalInSliceConflictWindow(
           command,
           snapshot.window,
           arrivalCandidates,
@@ -14299,14 +14278,14 @@
         windowTargetCoord,
         commandTargetCoord,
       );
-      const inWindowStrict = isCommandArrivalInWindow(
+      const inWindowStrict = isCommandArrivalInSliceConflictWindow(
         command,
         windowInfo,
         arrivalCandidates,
       );
       const inWindowPlus50ms =
         Number.isFinite(windowStartMs) && Number.isFinite(windowEndMs)
-          ? isCommandArrivalInWindow(
+          ? isCommandArrivalInSliceConflictWindow(
               command,
               {
                 ...windowInfo,
@@ -16425,15 +16404,28 @@
       cacheOnly: true,
     });
     if (runtimeReadyFromCache) {
-      const payload = buildNearestSliceRowsData({ source: sourceKey });
-      const lookaheadMinutes = Math.max(
-        1,
-        toInt(payload && payload.lookaheadMinutes) || getNearestSliceWindowMinutes(),
-      );
-      renderDialogWithPayload(
-        payload,
-        `Ближайшие срезы: ${payload.rows.length} вариантов в ближайшие ${lookaheadMinutes} мин.`,
-      );
+      try {
+        const payload = buildNearestSliceRowsData({ source: sourceKey });
+        const lookaheadMinutes = Math.max(
+          1,
+          toInt(payload && payload.lookaheadMinutes) || getNearestSliceWindowMinutes(),
+        );
+        renderDialogWithPayload(
+          payload,
+          `Ближайшие срезы: ${payload.rows.length} вариантов в ближайшие ${lookaheadMinutes} мин.`,
+        );
+      } catch (error) {
+        const text = cleanText(error && error.message) || "unknown";
+        const fallbackPayload = {
+          lookaheadMinutes: getNearestSliceWindowMinutes(),
+          eligibleIncomingCount: 0,
+          rows: [],
+        };
+        renderDialogWithPayload(
+          fallbackPayload,
+          `Ближайшие срезы: ошибка построения таблицы (${text}).`,
+        );
+      }
       return true;
     }
 
@@ -16457,7 +16449,17 @@
             '"]',
         );
         if (!dialog) return;
-        const payload = buildNearestSliceRowsData({ source: sourceKey });
+        let payload = null;
+        try {
+          payload = buildNearestSliceRowsData({ source: sourceKey });
+        } catch (error) {
+          const text = cleanText(error && error.message) || "unknown";
+          setStatus(
+            state.ui,
+            `Ближайшие срезы: ошибка построения таблицы (${text}).`,
+          );
+          return;
+        }
         const lookaheadMinutes = Math.max(
           1,
           toInt(payload && payload.lookaheadMinutes) || getNearestSliceWindowMinutes(),
