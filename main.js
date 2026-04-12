@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.10";
+  const VERSION = "0.10.11";
   const LOG_PREFIX = "[ScriptMM]";
   const SPEED_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
   const MAX_FETCHES_PER_SECOND = 4;
@@ -21283,90 +21283,115 @@ ${panelHtml}`;
 
       const scheduleButton = event.target.closest(".smm-schedule-btn");
       if (scheduleButton) {
-        const row = scheduleButton.closest(".smm-slice-row");
-        if (!row) return;
-        syncScheduledCommandsFromStorage();
-        const selection = collectSliceRowSelection(row);
-        const units = selection.units || {};
-        const unitKeys = Object.keys(units);
-        const departureMs = Number(
-          getSliceRowDisplayedDepartureMs(row, selection.departureMs),
-        );
-        if (!unitKeys.length || !Number.isFinite(departureMs)) {
-          setStatus(
-            state.ui,
-            "Нельзя запланировать: выбери юниты, которые успевают.",
+        event.preventDefault();
+        event.stopPropagation();
+        try {
+          const row = scheduleButton.closest(".smm-slice-row");
+          if (!row) return;
+          syncScheduledCommandsFromStorage();
+          const selection = collectSliceRowSelection(row);
+          const units = selection.units || {};
+          const unitKeys = Object.keys(units);
+          const departureMs = Number(
+            getSliceRowDisplayedDepartureMs(row, selection.departureMs),
           );
-          return;
-        }
-
-        const fromVillageId = cleanText(row.getAttribute("data-village-id"));
-        const fromVillageCoord = cleanText(
-          row.getAttribute("data-village-coord"),
-        );
-        const targetCoord = cleanText(row.getAttribute("data-target-coord"));
-        const incomingId = cleanText(row.getAttribute("data-incoming-id"));
-        const incomingEtaMs = Number(row.getAttribute("data-eta-ms"));
-        const action = cleanText(row.getAttribute("data-action")) || "slice";
-        let plannerComment = null;
-        if (getUiSetting("plannerCommentEnabled")) {
-          const commentResult = await askFavoriteCommentDialog({
-            title: "Добавь комментарий:",
-          });
-          if (!commentResult || commentResult.canceled) {
-            setStatus(state.ui, "Планирование отменено.");
+          if (!unitKeys.length || !Number.isFinite(departureMs)) {
+            setStatus(
+              state.ui,
+              "Нельзя запланировать: выбери юниты, которые успевают.",
+            );
             return;
           }
-          plannerComment = cleanText(commentResult.comment) || null;
-        }
-        const timing = buildTimingPayload({
-          action,
-          incomingId,
-          targetCoord,
-          incomingEtaMs,
-        });
-        const goUrl = cleanText(
-          row.querySelector(".smm-go-btn")?.getAttribute("data-url"),
-        );
-        const normalized = normalizeScheduledCommand({
-          id: createScheduledCommandId(),
-          createdAtMs: getServerNowMs(),
-          fromVillageId,
-          fromVillageCoord,
-          targetCoord,
-          incomingId,
-          incomingEtaMs,
-          action,
-          actionLabel: PLAN_ACTION_LABELS[action] || action,
-          timingType: timing.timingType,
-          timingLabel: timing.timingLabel,
-          timingGapMs: timing.timingGapMs,
-          timingStartMs: timing.timingStartMs,
-          timingEndMs: timing.timingEndMs,
-          timingPointMs: timing.timingPointMs,
-          departureMs,
-          units,
-          comment: plannerComment,
-          goUrl,
-        });
-        if (!normalized) {
-          setStatus(state.ui, "Не удалось сохранить приказ в план.");
+
+          const fromVillageId = cleanText(row.getAttribute("data-village-id"));
+          const fromVillageCoord = cleanText(
+            row.getAttribute("data-village-coord"),
+          );
+          const targetCoord = cleanText(row.getAttribute("data-target-coord"));
+          const incomingId = cleanText(row.getAttribute("data-incoming-id"));
+          const incomingEtaMs = Number(row.getAttribute("data-eta-ms"));
+          const action = cleanText(row.getAttribute("data-action")) || "slice";
+          let plannerComment = null;
+          if (getUiSetting("plannerCommentEnabled")) {
+            const commentResult = await askFavoriteCommentDialog({
+              title: "Добавь комментарий:",
+            });
+            if (!commentResult || commentResult.canceled) {
+              setStatus(state.ui, "Планирование отменено.");
+              return;
+            }
+            plannerComment = cleanText(commentResult.comment) || null;
+          }
+          const timing = buildTimingPayload({
+            action,
+            incomingId,
+            targetCoord,
+            incomingEtaMs,
+          });
+          const goUrl = cleanText(
+            row.querySelector(".smm-go-btn")?.getAttribute("data-url"),
+          );
+          const normalized = normalizeScheduledCommand({
+            id: createScheduledCommandId(),
+            createdAtMs: getServerNowMs(),
+            fromVillageId,
+            fromVillageCoord,
+            targetCoord,
+            incomingId,
+            incomingEtaMs,
+            action,
+            actionLabel: PLAN_ACTION_LABELS[action] || action,
+            timingType: timing.timingType,
+            timingLabel: timing.timingLabel,
+            timingGapMs: timing.timingGapMs,
+            timingStartMs: timing.timingStartMs,
+            timingEndMs: timing.timingEndMs,
+            timingPointMs: timing.timingPointMs,
+            departureMs,
+            units,
+            comment: plannerComment,
+            goUrl,
+          });
+          if (!normalized) {
+            setStatus(state.ui, "Не удалось сохранить приказ в план.");
+            return;
+          }
+
+          state.scheduledCommands.push(normalized);
+          saveScheduledCommands();
+          state.hubPlanLastFingerprint = buildScheduledCommandsFingerprint(
+            state.scheduledCommands,
+          );
+          const nearestDialogOpen = Boolean(
+            state.ui &&
+              state.ui.root &&
+              state.ui.root.querySelector(".smm-nearest-dialog-backdrop"),
+          );
+          if (state.ui) {
+            if (nearestDialogOpen) {
+              state.pendingActiveTabRerender = true;
+            } else {
+              renderActiveTab(state.ui);
+            }
+          }
+          setStatus(
+            state.ui,
+            `Запланировано: ${normalized.fromVillageCoord || normalized.fromVillageId || "?"} → ${
+              normalized.targetCoord || "?"
+            }, юнитов ${unitKeys.length}.${plannerComment ? " Комментарий сохранён." : ""}`,
+          );
+          return;
+        } catch (error) {
+          setStatus(
+            state.ui,
+            `Ошибка планирования: ${formatErrorText(error)}`,
+          );
+          safe(() => {
+            console.error("[ScriptMM][schedule][nearest]", error);
+            return true;
+          }, false);
           return;
         }
-
-        state.scheduledCommands.push(normalized);
-        saveScheduledCommands();
-        state.hubPlanLastFingerprint = buildScheduledCommandsFingerprint(
-          state.scheduledCommands,
-        );
-        renderActiveTab(state.ui);
-        setStatus(
-          state.ui,
-          `Запланировано: ${normalized.fromVillageCoord || normalized.fromVillageId || "?"} → ${
-            normalized.targetCoord || "?"
-          }, юнитов ${unitKeys.length}.${plannerComment ? " Комментарий сохранён." : ""}`,
-        );
-        return;
       }
 
       const goButton = event.target.closest(".smm-go-btn");
