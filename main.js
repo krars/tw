@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.7";
+  const VERSION = "0.10.9";
   const LOG_PREFIX = "[ScriptMM]";
   const SPEED_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
   const MAX_FETCHES_PER_SECOND = 4;
@@ -2917,6 +2917,38 @@
     }
     saveFavoriteEntries();
     return true;
+  };
+  const resolveFavoriteEntryIdByIncomingId = (incomingIdRaw) => {
+    const incomingId = cleanText(incomingIdRaw);
+    if (!incomingId) return null;
+    const findInEntries = (entriesRaw) => {
+      const entries = Array.isArray(entriesRaw) ? entriesRaw : [];
+      let matchedId = null;
+      entries.forEach((entryRaw) => {
+        if (matchedId) return;
+        const entry = normalizeFavoriteEntry(entryRaw);
+        if (!entry) return;
+        const entryId = cleanText(entry.id);
+        const sourceIncomingId = cleanText(entry.sourceIncomingId);
+        if (
+          String(entryId || "") === String(incomingId) ||
+          String(sourceIncomingId || "") === String(incomingId)
+        ) {
+          matchedId = entryId || null;
+        }
+      });
+      return matchedId;
+    };
+
+    const fromState = findInEntries(state.favoritesEntries);
+    if (fromState) return fromState;
+
+    const fromStorage = purgeStaleFavoriteEntries(
+      readJson(STORAGE_KEYS.favorites),
+      getServerNowMs(),
+    );
+    state.favoritesEntries = fromStorage;
+    return findInEntries(fromStorage);
   };
   const getIncomingVillageGroupHideKeys = (itemRaw) => {
     const item = itemRaw && typeof itemRaw === "object" ? itemRaw : {};
@@ -13929,6 +13961,17 @@
     };
   };
 
+  const hasActiveHubBackgroundLoading = () =>
+    Boolean(
+      state.refreshInProgress ||
+        state.hubSyncInFlight ||
+        state.hubQueryLoading ||
+        state.hubOwnQueriesLoading ||
+        state.hubMassLoading ||
+        state.hubTribeLoading ||
+        state.hubPlanLoading,
+    );
+
   const buildAllySliceConflictSummaryByWindowAsync = async (
     windowInfo,
     { source = null } = {},
@@ -13937,26 +13980,62 @@
     const sourceTag = cleanText(source) || "unknown";
     const effectiveWindow =
       normalizeSliceConflictWindowForCheck(windowInfo) || windowInfo;
-    try {
-      const networkResult = await buildAllySliceConflictSummaryByInfoVillageWindow(
-        effectiveWindow,
-      );
-      logSliceConflictDebug(`${sourceTag}_network_lookup`, networkResult.debug);
-      logSliceConflictDebug(`${sourceTag}_window_effective`, {
-        targetCoord: cleanText(effectiveWindow && effectiveWindow.targetCoord) || null,
-        timingLabel: cleanText(effectiveWindow && effectiveWindow.timingLabel) || null,
-        startMs: toFiniteEpochMs(effectiveWindow && effectiveWindow.startMs),
-        endMs: toFiniteEpochMs(effectiveWindow && effectiveWindow.endMs),
-        clamped: Boolean(effectiveWindow && effectiveWindow.conflictWindowClamped),
-        originalStartMs: toFiniteEpochMs(
-          effectiveWindow && effectiveWindow.conflictWindowOriginalStartMs,
-        ),
-        originalEndMs: toFiniteEpochMs(
-          effectiveWindow && effectiveWindow.conflictWindowOriginalEndMs,
-        ),
+    const cacheFirstSummary = buildAllySliceConflictSummaryByWindow(effectiveWindow);
+    logSliceConflictDebug(`${sourceTag}_cache_priority`, {
+      conflictFound: Boolean(cacheFirstSummary),
+      matchedCount: Math.max(
+        0,
+        toInt(cacheFirstSummary && cacheFirstSummary.matchedCount) || 0,
+      ),
+    });
+    if (cacheFirstSummary) {
+      return cacheFirstSummary;
+    }
+
+    if (hasActiveHubBackgroundLoading()) {
+      logSliceConflictDebug(`${sourceTag}_network_lookup_skipped_busy`, {
+        refreshInProgress: Boolean(state.refreshInProgress),
+        hubSyncInFlight: Boolean(state.hubSyncInFlight),
+        hubQueryLoading: Boolean(state.hubQueryLoading),
+        hubOwnQueriesLoading: Boolean(state.hubOwnQueriesLoading),
+        hubMassLoading: Boolean(state.hubMassLoading),
+        hubTribeLoading: Boolean(state.hubTribeLoading),
+        hubPlanLoading: Boolean(state.hubPlanLoading),
       });
-      if (networkResult.usedNetwork) {
-        return networkResult.summary;
+      return null;
+    }
+
+    const networkLookupTimeoutMs = 3500;
+    try {
+      const networkResult = await Promise.race([
+        buildAllySliceConflictSummaryByInfoVillageWindow(effectiveWindow),
+        sleep(networkLookupTimeoutMs).then(() => ({
+          usedNetwork: false,
+          timedOut: true,
+          summary: null,
+          debug: { reason: "timeout", timeoutMs: networkLookupTimeoutMs },
+        })),
+      ]);
+      logSliceConflictDebug(`${sourceTag}_network_lookup`, networkResult.debug);
+      if (!networkResult || !networkResult.timedOut) {
+        logSliceConflictDebug(`${sourceTag}_window_effective`, {
+          targetCoord:
+            cleanText(effectiveWindow && effectiveWindow.targetCoord) || null,
+          timingLabel:
+            cleanText(effectiveWindow && effectiveWindow.timingLabel) || null,
+          startMs: toFiniteEpochMs(effectiveWindow && effectiveWindow.startMs),
+          endMs: toFiniteEpochMs(effectiveWindow && effectiveWindow.endMs),
+          clamped: Boolean(effectiveWindow && effectiveWindow.conflictWindowClamped),
+          originalStartMs: toFiniteEpochMs(
+            effectiveWindow && effectiveWindow.conflictWindowOriginalStartMs,
+          ),
+          originalEndMs: toFiniteEpochMs(
+            effectiveWindow && effectiveWindow.conflictWindowOriginalEndMs,
+          ),
+        });
+        if (networkResult.usedNetwork) {
+          return networkResult.summary;
+        }
       }
     } catch (error) {
       logSliceConflictDebug(`${sourceTag}_network_lookup_error`, {
@@ -14367,6 +14446,8 @@
         targetGraceCount,
         hasUnitsHtml: Boolean(cleanText(unitsHtml) && cleanText(unitsHtml) !== "—"),
       });
+      const favoriteId = cleanText(summary && summary.favoriteId) || null;
+      const canDeleteFavorite = Boolean(favoriteId);
       backdrop.innerHTML = `
 <div class="smm-confirm-dialog-card" role="dialog" aria-modal="true">
   <div class="smm-confirm-dialog-title">Уже идёт срез соплеменников</div>
@@ -14396,7 +14477,9 @@
   }
   <div class="smm-confirm-dialog-text">Суммарно: ${unitsHtml}</div>
   <div class="smm-confirm-dialog-actions">
-    <button type="button" class="smm-btn smm-confirm-cancel-btn">Отменить отправку</button>
+    <button type="button" class="smm-btn smm-confirm-cancel-btn">${
+      canDeleteFavorite ? "Удалить из избранного" : "Отменить отправку"
+    }</button>
     <button type="button" class="smm-btn smm-confirm-yes-btn">Отправить всё равно</button>
   </div>
 </div>`;
@@ -14410,23 +14493,46 @@
           "linear-gradient(165deg,#f7f3e8 0%,#efe6d0 52%,#e8dcc0 100%)";
         card.style.boxShadow = "0 18px 60px rgba(0,0,0,.3)";
       }
-      const close = (accepted) => {
+      const close = ({
+        accepted = false,
+        favoriteRemoved = false,
+        favoriteId: closedFavoriteId = null,
+      } = {}) => {
         if (backdrop && backdrop.parentNode)
           backdrop.parentNode.removeChild(backdrop);
         logSliceConflictDebug("modal_close", {
           accepted: Boolean(accepted),
+          favoriteRemoved: Boolean(favoriteRemoved),
+          favoriteId: cleanText(closedFavoriteId) || null,
           targetCoord: coordText,
           timingLabel: timingText,
         });
-        resolve(Boolean(accepted));
+        resolve({
+          accepted: Boolean(accepted),
+          favoriteRemoved: Boolean(favoriteRemoved),
+          favoriteId: cleanText(closedFavoriteId) || null,
+        });
       };
       backdrop.addEventListener("click", (event) => {
-        if (event.target === backdrop) close(false);
+        if (event.target === backdrop) close({ accepted: false });
       });
       const yesButton = backdrop.querySelector(".smm-confirm-yes-btn");
       const cancelButton = backdrop.querySelector(".smm-confirm-cancel-btn");
-      if (yesButton) yesButton.addEventListener("click", () => close(true));
-      if (cancelButton) cancelButton.addEventListener("click", () => close(false));
+      if (yesButton) yesButton.addEventListener("click", () => close({ accepted: true }));
+      if (cancelButton) {
+        cancelButton.addEventListener("click", () => {
+          if (!canDeleteFavorite || !favoriteId) {
+            close({ accepted: false });
+            return;
+          }
+          const removed = removeFavoriteEntryById(favoriteId);
+          close({
+            accepted: false,
+            favoriteRemoved: removed,
+            favoriteId,
+          });
+        });
+      }
       root.appendChild(backdrop);
     });
 
@@ -16130,9 +16236,6 @@
           cleanText(row.villageCoord || row.villageName) || "?";
         const targetCoord =
           cleanText(incoming.targetCoord || incoming.target) || "?";
-        const originCoord =
-          cleanText(incoming.originCoord || incoming.origin) || "?";
-        const routeText = `${originCoord} → ${targetCoord}`;
         const incomingEtaMs = toFiniteEpochMs(
           incoming && (incoming.etaEpochMs || incoming.arrivalEpochMs),
         );
@@ -16210,7 +16313,6 @@
           defaultSigilPercent,
         )}">
   <td class="smm-nearest-context">${escapeHtml(contextText)}</td>
-  <td class="smm-nearest-route">${escapeHtml(routeText)}</td>
   ${
     hasCommentColumn
       ? `<td class="smm-nearest-comment">${escapeHtml(favoriteComment)}</td>`
@@ -16269,7 +16371,6 @@
     <thead>
       <tr>
         <th>Контекст</th>
-        <th>Атака</th>
         ${hasCommentColumn ? "<th>Комментарий</th>" : ""}
         <th>Деревня</th>
         ${unitHeader}
@@ -18987,10 +19088,28 @@ ${panelHtml}`;
       });
       logSliceConflictDebug("go_click_message_inline_full", fullDump);
       if (conflictSummary) {
-        const accepted = await askSliceConflictProceedDialog({
-          summary: conflictSummary,
+        const favoriteId = resolveFavoriteEntryIdByIncomingId(
+          cleanText(row && row.getAttribute("data-incoming-id")),
+        );
+        const decision = await askSliceConflictProceedDialog({
+          summary:
+            conflictSummary && typeof conflictSummary === "object"
+              ? { ...conflictSummary, favoriteId }
+              : conflictSummary,
         });
-        if (!accepted) {
+        if (!decision || !decision.accepted) {
+          if (decision && decision.favoriteId) {
+            if (state.ui && state.activeTab === "favorites") {
+              renderActiveTab(state.ui);
+            }
+            setMessageInlinePanelStatus(
+              panelNode,
+              decision.favoriteRemoved
+                ? "Удалено из избранного. Отправка отменена."
+                : "Отправка отменена: запись в избранном не найдена.",
+            );
+            return true;
+          }
           setMessageInlinePanelStatus(
             panelNode,
             "Отправка отменена: в это окно уже идёт срез соплеменников.",
@@ -21003,10 +21122,28 @@ ${panelHtml}`;
         });
         logSliceConflictDebug("go_click_plan_full", fullDump);
         if (planConflictSummary) {
-          const accepted = await askSliceConflictProceedDialog({
-            summary: planConflictSummary,
+          const favoriteId = resolveFavoriteEntryIdByIncomingId(
+            cleanText(scheduledCommand && scheduledCommand.incomingId),
+          );
+          const decision = await askSliceConflictProceedDialog({
+            summary:
+              planConflictSummary && typeof planConflictSummary === "object"
+                ? { ...planConflictSummary, favoriteId }
+                : planConflictSummary,
           });
-          if (!accepted) {
+          if (!decision || !decision.accepted) {
+            if (decision && decision.favoriteId) {
+              if (state.activeTab === "favorites") {
+                renderActiveTab(state.ui);
+              }
+              setStatus(
+                state.ui,
+                decision.favoriteRemoved
+                  ? "Удалено из избранного. Отправка отменена."
+                  : "Отправка отменена: запись в избранном не найдена.",
+              );
+              return;
+            }
             setStatus(
               state.ui,
               "Отправка отменена: в это окно уже идёт срез соплеменников.",
@@ -21277,10 +21414,28 @@ ${panelHtml}`;
         });
         logSliceConflictDebug("go_click_main_overlay_full", fullDump);
         if (conflictSummary) {
-          const accepted = await askSliceConflictProceedDialog({
-            summary: conflictSummary,
+          const favoriteId = resolveFavoriteEntryIdByIncomingId(
+            cleanText(row && row.getAttribute("data-incoming-id")),
+          );
+          const decision = await askSliceConflictProceedDialog({
+            summary:
+              conflictSummary && typeof conflictSummary === "object"
+                ? { ...conflictSummary, favoriteId }
+                : conflictSummary,
           });
-          if (!accepted) {
+          if (!decision || !decision.accepted) {
+            if (decision && decision.favoriteId) {
+              if (state.activeTab === "favorites") {
+                renderActiveTab(state.ui);
+              }
+              setStatus(
+                state.ui,
+                decision.favoriteRemoved
+                  ? "Удалено из избранного. Отправка отменена."
+                  : "Отправка отменена: запись в избранном не найдена.",
+              );
+              return;
+            }
             setStatus(
               state.ui,
               "Отправка отменена: в это окно уже идёт срез соплеменников.",
