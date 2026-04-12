@@ -1,8 +1,16 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.11";
+  const VERSION = "0.10.12";
   const LOG_PREFIX = "[ScriptMM]";
+  const MULTI_TAB_PRESENCE_KEY = "scriptmm.active_instances.v1";
+  const MULTI_TAB_HEARTBEAT_INTERVAL_MS = 3000;
+  const MULTI_TAB_STALE_MS = 12000;
+  const MULTI_TAB_WARNING_TEXT =
+    "В нескольких вкладках одновременно работа скрипта может быть нестабильна, для корректной работы настоятельно рекомендуется закрыть иные владки с активным скриптом";
+  const MULTI_TAB_INSTANCE_ID = `tab_${Date.now().toString(36)}_${Math.random()
+    .toString(36)
+    .slice(2, 10)}`;
   const SPEED_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
   const MAX_FETCHES_PER_SECOND = 4;
   const FETCH_REQUEST_TIMEOUT_MS = 12000;
@@ -269,6 +277,9 @@
     messageActionListenerBound: false,
     messageStorageLoaded: false,
     storageSyncListenerBound: false,
+    multiTabPresenceTimerId: null,
+    multiTabPresenceCleanupBound: false,
+    multiTabLastWarningAtMs: 0,
     selectedVillageGroupId: "0",
     villageGroupOptions: [{ id: "0", label: "все" }],
     villageGroupReloadPromise: null,
@@ -2215,6 +2226,123 @@
       if (!raw) return null;
       return JSON.parse(raw);
     }, null);
+  const normalizeMultiTabPresenceMap = (raw, nowMs = Date.now()) => {
+    const source =
+      raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+    const minActiveTs = Math.max(0, Number(nowMs) - MULTI_TAB_STALE_MS);
+    const normalized = {};
+    Object.entries(source).forEach(([tabIdRaw, tsRaw]) => {
+      const tabId = cleanText(tabIdRaw);
+      const ts = Number(tsRaw);
+      if (!tabId || !Number.isFinite(ts) || ts < minActiveTs) return;
+      normalized[tabId] = Math.round(ts);
+    });
+    return normalized;
+  };
+  const loadMultiTabPresenceMap = () =>
+    safe(() => {
+      const raw = localStorage.getItem(MULTI_TAB_PRESENCE_KEY);
+      if (!raw) return {};
+      return normalizeMultiTabPresenceMap(JSON.parse(raw), Date.now());
+    }, {});
+  const saveMultiTabPresenceMap = (mapRaw) =>
+    safe(() => {
+      const normalized = normalizeMultiTabPresenceMap(mapRaw, Date.now());
+      if (!Object.keys(normalized).length) {
+        localStorage.removeItem(MULTI_TAB_PRESENCE_KEY);
+        return true;
+      }
+      localStorage.setItem(MULTI_TAB_PRESENCE_KEY, JSON.stringify(normalized));
+      return true;
+    }, false);
+  const touchMultiTabPresence = () => {
+    const map = loadMultiTabPresenceMap();
+    map[MULTI_TAB_INSTANCE_ID] = Date.now();
+    saveMultiTabPresenceMap(map);
+    return map;
+  };
+  const removeMultiTabPresence = () => {
+    const map = loadMultiTabPresenceMap();
+    if (!Object.prototype.hasOwnProperty.call(map, MULTI_TAB_INSTANCE_ID))
+      return true;
+    delete map[MULTI_TAB_INSTANCE_ID];
+    return saveMultiTabPresenceMap(map);
+  };
+  const getOtherActiveScriptTabsCount = () => {
+    const map = loadMultiTabPresenceMap();
+    return Object.keys(map).filter(
+      (tabId) => String(tabId) !== String(MULTI_TAB_INSTANCE_ID),
+    ).length;
+  };
+  const isMultiTabScriptActive = () => getOtherActiveScriptTabsCount() > 0;
+  const maybeShowMultiTabWarning = ({
+    force = false,
+    statusTarget = null,
+  } = {}) => {
+    const otherTabsCount = getOtherActiveScriptTabsCount();
+    if (!(otherTabsCount > 0)) return false;
+    const nowMs = Date.now();
+    if (
+      !force &&
+      Number.isFinite(Number(state.multiTabLastWarningAtMs)) &&
+      nowMs - Number(state.multiTabLastWarningAtMs) < 15000
+    ) {
+      return true;
+    }
+    state.multiTabLastWarningAtMs = nowMs;
+    const uiTarget = statusTarget || state.ui || null;
+    if (uiTarget) {
+      setStatus(uiTarget, MULTI_TAB_WARNING_TEXT);
+    }
+    safe(() => {
+      console.warn("[ScriptMM][multi-tab]", {
+        currentTab: MULTI_TAB_INSTANCE_ID,
+        activeTabsTotal: otherTabsCount + 1,
+      });
+      return true;
+    }, false);
+    return true;
+  };
+  const stopMultiTabPresenceHeartbeat = ({ removeInstance = true } = {}) => {
+    if (state.multiTabPresenceTimerId) {
+      clearInterval(state.multiTabPresenceTimerId);
+      state.multiTabPresenceTimerId = null;
+    }
+    if (removeInstance) {
+      removeMultiTabPresence();
+    }
+  };
+  const startMultiTabPresenceHeartbeat = () => {
+    touchMultiTabPresence();
+    if (state.multiTabPresenceTimerId) {
+      clearInterval(state.multiTabPresenceTimerId);
+      state.multiTabPresenceTimerId = null;
+    }
+    state.multiTabPresenceTimerId = setInterval(() => {
+      touchMultiTabPresence();
+      if (state.ui) {
+        maybeShowMultiTabWarning({ force: false, statusTarget: state.ui });
+      }
+    }, MULTI_TAB_HEARTBEAT_INTERVAL_MS);
+    if (
+      !state.multiTabPresenceCleanupBound &&
+      typeof window !== "undefined" &&
+      window &&
+      window.addEventListener
+    ) {
+      const cleanup = () => {
+        stopMultiTabPresenceHeartbeat({ removeInstance: true });
+      };
+      window.addEventListener("beforeunload", cleanup);
+      window.addEventListener("pagehide", cleanup);
+      window.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible") {
+          touchMultiTabPresence();
+        }
+      });
+      state.multiTabPresenceCleanupBound = true;
+    }
+  };
   const normalizeHubConnection = (raw) => {
     if (!raw || typeof raw !== "object") return null;
     const url = cleanText(raw.url);
@@ -11799,6 +11927,7 @@
     if (!ui) return;
     stopCountdownTicker();
     ui.list.innerHTML = "";
+    maybeShowMultiTabWarning({ force: false, statusTarget: ui });
     state.scheduledCommands = purgeStaleScheduledCommands(
       state.scheduledCommands,
     );
@@ -20523,6 +20652,7 @@ ${panelHtml}`;
       state.nearestDialogState = { open: false, source: null };
       stopCountdownTicker();
       stopHubSyncLoop();
+      stopMultiTabPresenceHeartbeat({ removeInstance: true });
       if (state.ui && state.ui.root) {
         state.ui.root.remove();
       }
@@ -21066,6 +21196,7 @@ ${panelHtml}`;
 
       const planGoButton = event.target.closest(".smm-plan-go-btn");
       if (planGoButton) {
+        maybeShowMultiTabWarning({ force: true, statusTarget: state.ui });
         const commandId = cleanText(
           planGoButton.getAttribute("data-cmd-id") ||
             planGoButton
@@ -21184,6 +21315,7 @@ ${panelHtml}`;
 
       const planDeleteButton = event.target.closest(".smm-plan-del-btn");
       if (planDeleteButton) {
+        maybeShowMultiTabWarning({ force: true, statusTarget: state.ui });
         const commandId = cleanText(
           planDeleteButton.getAttribute("data-cmd-id"),
         );
@@ -21285,6 +21417,7 @@ ${panelHtml}`;
       if (scheduleButton) {
         event.preventDefault();
         event.stopPropagation();
+        maybeShowMultiTabWarning({ force: true, statusTarget: state.ui });
         try {
           const row = scheduleButton.closest(".smm-slice-row");
           if (!row) return;
@@ -21696,6 +21829,7 @@ ${panelHtml}`;
 
   const messagePlanningScreen = isMessagePlanningScreen();
   const useMessageInlineScenario = shouldUseMessageInlineScenario();
+  startMultiTabPresenceHeartbeat();
   ensureMessageActionListenerBound();
   if (messagePlanningScreen && useMessageInlineScenario) {
     bootstrapMessageInlinePlanning();
