@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.5";
+  const VERSION = "0.10.7";
   const LOG_PREFIX = "[ScriptMM]";
   const SPEED_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
   const MAX_FETCHES_PER_SECOND = 4;
@@ -8921,6 +8921,7 @@
 #scriptmm-overlay-root .smm-sigil-cell{min-width:62px}
 #scriptmm-overlay-root .smm-sigil-input{width:54px;border:1px solid #cab286;border-radius:4px;padding:1px 2px;font-size:11px;text-align:center;background:#fffef8;color:#2c220f}
 #scriptmm-overlay-root .smm-slice-depart{font-weight:700;color:#4a3210;min-width:62px;font-size:10px;line-height:1}
+#scriptmm-overlay-root .smm-slice-arrive{font-weight:700;color:#4a3210;min-width:62px;font-size:10px;line-height:1}
 #scriptmm-overlay-root .smm-slice-timer{min-width:76px}
 #scriptmm-overlay-root .smm-slice-action{min-width:188px}
 #scriptmm-overlay-root .smm-slice-action-wrap{display:flex;align-items:center;justify-content:center;gap:4px}
@@ -8978,6 +8979,7 @@
 .smm-msg-inline-panel .smm-sigil-cell{min-width:62px}
 .smm-msg-inline-panel .smm-sigil-input{width:54px;border:1px solid #cab286;border-radius:4px;padding:1px 2px;font-size:11px;text-align:center;background:#fffef8;color:#2c220f}
 .smm-msg-inline-panel .smm-slice-depart{font-weight:700;color:#4a3210;min-width:62px;font-size:10px;line-height:1}
+.smm-msg-inline-panel .smm-slice-arrive{font-weight:700;color:#4a3210;min-width:62px;font-size:10px;line-height:1}
 .smm-msg-inline-panel .smm-slice-timer{min-width:76px}
 .smm-msg-inline-panel .smm-slice-action{min-width:188px}
 .smm-msg-inline-panel .smm-slice-action-wrap{display:flex;align-items:center;justify-content:center;gap:4px}
@@ -9046,6 +9048,7 @@
 #scriptmm-overlay-root.smm-mobile .smm-sigil-cell,.smm-msg-inline-panel.smm-mobile .smm-sigil-cell{min-width:14px}
 #scriptmm-overlay-root.smm-mobile .smm-sigil-input,.smm-msg-inline-panel.smm-mobile .smm-sigil-input{width:12px;padding:0;font-size:7px;line-height:1;border-radius:2px}
 #scriptmm-overlay-root.smm-mobile .smm-slice-depart,.smm-msg-inline-panel.smm-mobile .smm-slice-depart{min-width:26px;font-size:7px}
+#scriptmm-overlay-root.smm-mobile .smm-slice-arrive,.smm-msg-inline-panel.smm-mobile .smm-slice-arrive{min-width:26px;font-size:7px}
 #scriptmm-overlay-root.smm-mobile .smm-slice-timer,.smm-msg-inline-panel.smm-mobile .smm-slice-timer{min-width:30px}
 #scriptmm-overlay-root.smm-mobile .smm-slice-action,.smm-msg-inline-panel.smm-mobile .smm-slice-action{min-width:30px}
 #scriptmm-overlay-root.smm-mobile .smm-slice-action-wrap,.smm-msg-inline-panel.smm-mobile .smm-slice-action-wrap{gap:1px}
@@ -11211,7 +11214,7 @@
 
     if (departureCell) {
       departureCell.textContent = hasDeparture
-        ? formatTimeWithMs(departureMs)
+        ? formatTimeOnly(departureMs)
         : "—";
     }
 
@@ -11284,7 +11287,7 @@
     }
     if (departureCell) {
       departureCell.textContent = hasDeparture
-        ? formatTimeWithMs(departureMs)
+        ? formatTimeOnly(departureMs)
         : "—";
     }
     if (countdownNode) {
@@ -11507,6 +11510,11 @@
     const bodyRows = villagePlan.rows
       .map((row, rowIndex) => {
         const villageText = row.villageCoord || row.villageName || "деревня";
+        const arrivalMs = Number(
+          Number.isFinite(Number(row && row.etaEpochMs))
+            ? row.etaEpochMs
+            : incomingEtaEpochMs,
+        );
         const unitCells = villagePlan.displayUnits
           .map((unit) => {
             const unitState = row.units[unit];
@@ -11573,8 +11581,11 @@
   }
   <td class="smm-slice-depart" data-role="depart">${escapeHtml(
     Number.isFinite(Number(row.bestDepartureMs))
-      ? formatTimeWithMs(row.bestDepartureMs)
+      ? formatTimeOnly(row.bestDepartureMs)
       : "—",
+  )}</td>
+  <td class="smm-slice-arrive">${escapeHtml(
+    Number.isFinite(arrivalMs) ? formatTimeWithMs(arrivalMs) : "—",
   )}</td>
   <td class="smm-slice-timer"><span class="smm-plan-countdown" data-role="countdown"${
     Number.isFinite(Number(row.bestDepartureMs))
@@ -11610,7 +11621,8 @@
           <th>${escapeHtml(villageHeaderLabel)}</th>
           ${unitHeader}
           ${showSigilColumn ? "<th>Сиг</th>" : ""}
-          <th>Время</th>
+          <th>Выход</th>
+          <th>Приход</th>
           <th>Таймер</th>
           <th>Приказ</th>
         </tr>
@@ -11788,6 +11800,7 @@
         const resolvedGoUrl =
           cleanText(command.goUrl) || resolveScheduledCommandGoUrl(command) || "";
         const departureMs = Number(command.departureMs);
+        const arrivalAtMs = Number(getPlanArrivalEpochMs(command));
         const timing = resolveTimingForScheduledCommand(command);
         const timingCenter = computeTimingCenterCopyValue(timing);
         const timingCopyValue = timingCenter;
@@ -11800,7 +11813,10 @@
         const statusLabel = getManeuverStatusLabel(command.status);
         const commentText = cleanText(command.comment);
         const departureText = Number.isFinite(departureMs)
-          ? formatDateTimeShortWithMs(departureMs)
+          ? formatDateTimeShort(departureMs)
+          : "—";
+        const arrivalText = Number.isFinite(arrivalAtMs)
+          ? formatDateTimeShortWithMs(arrivalAtMs)
           : "—";
         const countdownDataAttr = Number.isFinite(departureMs)
           ? String(departureMs)
@@ -11816,6 +11832,7 @@
   <td>${escapeHtml(command.fromVillageCoord || command.fromVillageId || "?")}</td>
   <td>${escapeHtml(command.targetCoord || "?")}</td>
   <td>${escapeHtml(departureText)}</td>
+  <td>${escapeHtml(arrivalText)}</td>
   <td${timingCellAttrs}>${escapeHtml(timing.timingLabel || "—")}</td>
   <td>${escapeHtml(statusLabel)}</td>
   ${
@@ -11856,7 +11873,8 @@
           <th>Юниты</th>
           <th>Откуда</th>
           <th>Куда</th>
-          <th>Когда</th>
+          <th>Выход</th>
+          <th>Приход</th>
           <th>Тайминг</th>
           <th>Статус</th>
           ${hasCommentColumn ? "<th>Комментарий</th>" : ""}
@@ -16210,7 +16228,10 @@
     defaultSigilPercent,
   )}"></td>
   <td class="smm-slice-depart" data-role="depart">${escapeHtml(
-    Number.isFinite(departureMs) ? formatTimeWithMs(departureMs) : "—",
+    Number.isFinite(departureMs) ? formatTimeOnly(departureMs) : "—",
+  )}</td>
+  <td class="smm-slice-arrive">${escapeHtml(
+    Number.isFinite(incomingEtaMs) ? formatTimeWithMs(incomingEtaMs) : "—",
   )}</td>
   <td class="smm-slice-timer"><span class="smm-plan-countdown" data-role="countdown"${
     Number.isFinite(departureMs)
@@ -16253,7 +16274,8 @@
         <th>Деревня</th>
         ${unitHeader}
         <th>Сиг</th>
-        <th>Время</th>
+        <th>Выход</th>
+        <th>Приход</th>
         <th>Таймер</th>
         <th>Приказ</th>
       </tr>
@@ -16612,7 +16634,7 @@
         const typeLabel = getManeuverTypeLabel(entry.action);
         const statusLabel = getManeuverStatusLabel(entry.status);
         const departureText = Number.isFinite(Number(entry.departureMs))
-          ? formatDateTimeShortWithMs(entry.departureMs)
+          ? formatDateTimeShort(entry.departureMs)
           : "—";
         const matchedArrivalMs = toFiniteEpochMs(entry.matchedArrivalMs);
         const arrivalText = Number.isFinite(matchedArrivalMs)
