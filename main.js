@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.3";
+  const VERSION = "0.10.4";
   const LOG_PREFIX = "[ScriptMM]";
   const SPEED_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
   const MAX_FETCHES_PER_SECOND = 4;
@@ -286,6 +286,7 @@
     refreshInProgress: false,
     pendingPlanRerender: false,
     pendingHubTabRerender: false,
+    nearestDialogState: { open: false, source: null },
     ui: null,
   };
   const HUB_URL_PLACEHOLDER = "https://script.google.com/macros/s/XXXI/exec";
@@ -16012,11 +16013,17 @@
 </section>`;
   };
 
-  const closeNearestSlicesDialog = ({ flushDeferredRerender = true } = {}) => {
+  const closeNearestSlicesDialog = ({
+    flushDeferredRerender = true,
+    updateState = true,
+  } = {}) => {
     if (!state.ui || !state.ui.root) return false;
     const dialog = state.ui.root.querySelector(".smm-nearest-dialog-backdrop");
     if (!dialog) return false;
     dialog.remove();
+    if (updateState) {
+      state.nearestDialogState = { open: false, source: null };
+    }
     if (flushDeferredRerender) {
       if (state.pendingActiveTabRerender && state.ui) {
         state.pendingActiveTabRerender = false;
@@ -16264,7 +16271,11 @@
         : sourceValue === "favorites"
           ? "favorites"
           : "incomings";
-    closeNearestSlicesDialog({ flushDeferredRerender: false });
+    state.nearestDialogState = { open: true, source: sourceKey };
+    closeNearestSlicesDialog({
+      flushDeferredRerender: false,
+      updateState: false,
+    });
     setStatus(state.ui, "Ближайшие срезы: считаю варианты...");
     const renderDialogWithPayload = (payload, statusText = null) => {
       if (!state.ui || !state.ui.root) return false;
@@ -16350,6 +16361,32 @@
           `Ближайшие срезы: ошибка фоновой загрузки (${text}).`,
         );
       });
+    return true;
+  };
+
+  const restoreNearestSlicesDialogIfMissing = () => {
+    if (!state.ui || !state.ui.root) return false;
+    const dialogState =
+      state.nearestDialogState &&
+      typeof state.nearestDialogState === "object" &&
+      !Array.isArray(state.nearestDialogState)
+        ? state.nearestDialogState
+        : { open: false, source: null };
+    if (!dialogState.open) return false;
+    const sourceValue = cleanText(dialogState.source);
+    const sourceKey =
+      sourceValue === "tribe"
+        ? "tribe"
+        : sourceValue === "favorites"
+          ? "favorites"
+          : "incomings";
+    const existing = state.ui.root.querySelector(
+      '.smm-nearest-dialog-backdrop[data-nearest-source="' +
+        String(sourceKey).replace(/"/g, '\\"') +
+        '"]',
+    );
+    if (existing) return false;
+    void openNearestSlicesDialog({ source: sourceKey });
     return true;
   };
 
@@ -16663,6 +16700,7 @@
       renderIncomings(ui, state.incomings);
     }
     scheduleApplySliceScrollLimits(ui.root || document);
+    restoreNearestSlicesDialogIfMissing();
   };
 
   const renderIncomings = (ui, incomings, options = {}) => {
@@ -20339,6 +20377,7 @@ ${panelHtml}`;
     const closeOverlay = () => {
       closeHubDialog();
       closeSettingsDialog();
+      state.nearestDialogState = { open: false, source: null };
       stopCountdownTicker();
       stopHubSyncLoop();
       if (state.ui && state.ui.root) {
