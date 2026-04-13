@@ -1480,86 +1480,72 @@
         },
 
         show_template_modal: function (template_id = null) {
-            const existing_overlay = document.querySelector('.guard-template-modal-overlay');
-            if (existing_overlay) existing_overlay.remove();
-
             let template = null;
             if (template_id) {
                 template = Guard.settings.templates.find(t => t.id === template_id) || null;
             }
 
-            const overlay = document.createElement('div');
-            overlay.className = 'guard-template-modal-overlay';
+            const dialog_id = Helper.get_id('template_editor');
+            const name_id = Helper.get_id('template_editor.name');
+            const save_id = Helper.get_id('template_editor.save');
 
-            const unit_rows = Guard.deff_units.map(unit_name => {
+            let html = `<div>`;
+            html += `<fieldset><legend>${template ? 'Редактировать шаблон' : 'Новый шаблон'}</legend><table>`;
+            html += `<tr>`;
+            html += `<td><label for="${name_id}">${i18n.LABELS.template_name}</label></td>`;
+            html += `<td><input id="${name_id}" value="${Helper.escape_html(template ? template.name : '')}" placeholder="Деф 1"></td>`;
+            html += `</tr>`;
+            for (const unit_name of Guard.deff_units) {
+                const input_id = Helper.get_id(`template_editor.unit.${unit_name}`);
+                const title = i18n.UNITS[unit_name] || unit_name;
                 const value = template ? Math.max(0, Helper.to_int(template.units[unit_name])) : 0;
-                return `
-                    <div class="guard-template-unit-row">
-                        <img src="${image_base}unit/unit_${unit_name}.png" alt="${unit_name}" title="${Helper.escape_html(i18n.UNITS[unit_name] || unit_name)}">
-                        <input type="number" min="0" step="1" data-unit="${unit_name}" value="${value}">
-                    </div>
-                `;
-            }).join('');
+                html += `<tr>`;
+                html += `<td><label for="${input_id}" title="${Helper.escape_html(title)}"><img src="${image_base}unit/unit_${unit_name}.png" alt="${unit_name}"></label></td>`;
+                html += `<td><input id="${input_id}" type="number" min="0" step="1" value="${value}"></td>`;
+                html += `</tr>`;
+            }
+            html += `</table></fieldset>`;
+            html += `<button id="${save_id}" class="btn right">${i18n.LABELS.save_settings}</button>`;
+            html += `</div>`;
 
-            overlay.innerHTML = `
-                <div class="guard-template-modal">
-                    <div class="guard-template-modal-head">
-                        <span>${template ? 'Редактировать шаблон' : 'Новый шаблон'}</span>
-                        <button class="guard-template-modal-close" type="button">✕</button>
-                    </div>
-                    <div class="guard-template-modal-body">
-                        <label class="guard-label">${i18n.LABELS.template_name}</label>
-                        <input class="guard-template-modal-name" type="text" value="${Helper.escape_html(template ? template.name : '')}" placeholder="Деф 1">
-                        <div class="guard-template-unit-grid">${unit_rows}</div>
-                        <button class="btn guard-template-save" type="button">${i18n.LABELS.save_settings}</button>
-                    </div>
-                </div>
-            `;
+            Dialog.show(dialog_id, html);
 
-            document.body.append(overlay);
-
-            const close = function () {
-                overlay.remove();
-            };
-
-            overlay.querySelector('.guard-template-modal-close').addEventListener('click', close);
-            overlay.addEventListener('click', event => {
-                if (event.target === overlay) {
-                    close();
-                }
-            });
-
-            overlay.querySelector('.guard-template-save').addEventListener('click', () => {
-                const name_input = overlay.querySelector('.guard-template-modal-name');
-                const name = Helper.clean_text(name_input.value) || `Шаблон ${Guard.settings.templates.length + 1}`;
-                const units = {};
-                overlay.querySelectorAll('[data-unit]').forEach(input => {
-                    const unit_name = input.getAttribute('data-unit');
-                    const count = Math.max(0, Helper.to_int(input.value));
-                    if (count > 0) {
-                        units[unit_name] = count;
+            setTimeout(() => {
+                const save_button = Helper.get_control('template_editor.save');
+                if (!save_button) return;
+                save_button.addEventListener('click', () => {
+                    const name_input = Helper.get_control('template_editor.name');
+                    const name = Helper.clean_text(name_input ? name_input.value : '') || `Шаблон ${Guard.settings.templates.length + 1}`;
+                    const units = {};
+                    for (const unit_name of Guard.deff_units) {
+                        const input = Helper.get_control(`template_editor.unit.${unit_name}`);
+                        const count = Math.max(0, Helper.to_int(input ? input.value : 0));
+                        if (count > 0) {
+                            units[unit_name] = count;
+                        }
                     }
+
+                    if (!Object.keys(units).length) {
+                        UI.ErrorMessage(i18n.LABELS.template_empty);
+                        return;
+                    }
+
+                    if (template) {
+                        template.name = name;
+                        template.units = units;
+                        Guard.settings.active_template_id = template.id;
+                    } else {
+                        const id = `tmpl_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+                        Guard.settings.templates.push({ id, name, units });
+                        Guard.settings.active_template_id = id;
+                    }
+
+                    Guard.ensure_templates();
+                    Guard.save_settings();
+                    Guard.render_template_controls();
+                    const close_btn = document.querySelector('.popup_box_close');
+                    if (close_btn) close_btn.click();
                 });
-
-                if (!Object.keys(units).length) {
-                    UI.ErrorMessage(i18n.LABELS.template_empty);
-                    return;
-                }
-
-                if (template) {
-                    template.name = name;
-                    template.units = units;
-                    Guard.settings.active_template_id = template.id;
-                } else {
-                    const id = `tmpl_${Date.now()}_${Math.random().toString(16).slice(2)}`;
-                    Guard.settings.templates.push({ id, name, units });
-                    Guard.settings.active_template_id = id;
-                }
-
-                Guard.ensure_templates();
-                Guard.save_settings();
-                Guard.render_template_controls();
-                close();
             });
         },
 
