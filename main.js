@@ -10281,12 +10281,19 @@
       if (Number.isFinite(Number(favoriteSigil))) {
         incoming.sigilPercent = normalizeSigilPercent(Number(favoriteSigil));
       }
+      const fallbackIncomingSigil = toNumber(incoming && incoming.sigilPercent);
+      const explicitSigilPercent =
+        Number.isFinite(Number(favoriteSigil)) &&
+        normalizeSigilPercent(Number(favoriteSigil)) > 0
+          ? Number(favoriteSigil)
+          : Number.isFinite(fallbackIncomingSigil) &&
+              normalizeSigilPercent(fallbackIncomingSigil) > 0
+            ? fallbackIncomingSigil
+            : undefined;
       const defaultSigilPercent = resolveSigilPercentForAction(
         "slice",
         incoming,
-        Number.isFinite(Number(favoriteSigil))
-          ? Number(favoriteSigil)
-          : incoming && incoming.sigilPercent,
+        explicitSigilPercent,
       );
       const villagePlan = buildIncomingVillagePlans(incoming, {
         action: "slice",
@@ -18967,12 +18974,19 @@ ${panelHtml}`;
       return false;
     }
 
-    const nearestSigilPercent = detectNearestSigilPercentAboveNode(actionsNode);
-    const fallbackSigilPercent = detectActiveSigilPercent();
-    const messageSigilPercent = Number.isFinite(nearestSigilPercent)
-      ? nearestSigilPercent
-      : fallbackSigilPercent;
-    if (Number.isFinite(messageSigilPercent)) {
+    const nearestSigilPercent = normalizeSigilPercent(
+      detectNearestSigilPercentAboveNode(actionsNode),
+    );
+    const fallbackSigilPercent = normalizeSigilPercent(
+      getDefaultSigilForAction("slice"),
+    );
+    const messageSigilPercent =
+      nearestSigilPercent > 0
+        ? nearestSigilPercent
+        : fallbackSigilPercent > 0
+          ? fallbackSigilPercent
+          : null;
+    if (Number.isFinite(messageSigilPercent) && messageSigilPercent > 0) {
       state.detectedSigilPercent = normalizeSigilPercent(messageSigilPercent);
       incoming.sigilPercent = normalizeSigilPercent(messageSigilPercent);
     }
@@ -18980,7 +18994,8 @@ ${panelHtml}`;
     setPlanAction(incomingId, action);
     const actionLabel = PLAN_ACTION_LABELS[action] || action;
     panelNode.innerHTML = renderSlicePlanPanel(incoming, action, actionLabel, {
-      sigilPercent: Number.isFinite(messageSigilPercent)
+      sigilPercent:
+        Number.isFinite(messageSigilPercent) && messageSigilPercent > 0
         ? messageSigilPercent
         : undefined,
       renderGroupSelectInHeader: false,
