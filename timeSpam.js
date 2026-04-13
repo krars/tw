@@ -762,12 +762,14 @@ javascript:(function(){
 
         function persistRuntimeToCurrentTab() {
             const tab = getCurrentTabState();
-            const rawCoords = parseCoordsFromTextarea($textarea ? $textarea.value : '');
-            tab.coords = rawCoords.map(c => {
-                if (c.marker === '&' || c.marker === '*') return c.coord + c.marker;
-                if (c.sigil) return c.coord + '!';
-                return c.coord;
-            });
+            if ($textarea) {
+                const rawCoords = parseCoordsFromTextarea($textarea.value);
+                tab.coords = rawCoords.map(c => {
+                    if (c.marker === '&' || c.marker === '*') return c.coord + c.marker;
+                    if (c.sigil) return c.coord + '!';
+                    return c.coord;
+                });
+            }
             tab.timeWindows = (timeWindows || []).map(w => ({
                 from: cleanText(w?.from),
                 to: cleanText(w?.to)
