@@ -142,14 +142,14 @@ javascript:(function(){
         }
 
         function parseCoord(text) {
-            const m = cleanText(text).match(/(\d{1,3})\s*\|\s*(\d{1,3})/);
+            const m = cleanText(text).match(/(\d{1,3})\s*(?:\||¦|｜|l|L|i|I)\s*(\d{1,3})/);
             return m ? { x: toInt(m[1]), y: toInt(m[2]) } : null;
         }
 
         function parseCoordsFromLine(lineText) {
             const line = String(lineText || '');
             const matches = [];
-            const coordRe = /(\d{1,3})\s*[|lL]\s*(\d{1,3})/g;
+            const coordRe = /(\d{1,3})\s*(?:\||¦|｜|l|L|i|I)\s*(\d{1,3})/g;
             let m;
             while ((m = coordRe.exec(line)) !== null) {
                 matches.push({ index: m.index || 0, raw: m[0], x: m[1], y: m[2] });
@@ -1743,7 +1743,7 @@ javascript:(function(){
             const windows = (Array.isArray(tab.timeWindows) ? tab.timeWindows : [])
                 .map(w => ({ from: cleanText(w?.from), to: cleanText(w?.to) }))
                 .filter(w => w.from && w.to);
-            const coordsText = coords.length ? `[code]\n${coords.join('\n')}\n[/code]` : '-';
+            const coordsLines = coords.length ? coords.join('\n') : '-';
 
             const activeSet = getTemplateActiveSetForCurrentTab();
             const hasActiveTemplates = activeSet.size > 0;
@@ -1770,7 +1770,9 @@ javascript:(function(){
                 `(${tabName})`,
                 '',
                 'Коры:',
-                coordsText,
+                '[code]',
+                coordsLines,
+                '[/code]',
                 '',
                 '~~~~~~~~~~~~~~~~',
                 '',
