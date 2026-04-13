@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.17";
+  const VERSION = "0.10.18";
   const LOG_PREFIX = "[ScriptMM]";
   const MULTI_TAB_PRESENCE_KEY = "scriptmm.active_instances.v1";
   const MULTI_TAB_HEARTBEAT_INTERVAL_MS = 3000;
@@ -10300,15 +10300,11 @@
       if (Number.isFinite(Number(favoriteSigil))) {
         incoming.sigilPercent = normalizeSigilPercent(Number(favoriteSigil));
       }
-      const fallbackIncomingSigil = toNumber(incoming && incoming.sigilPercent);
       const explicitSigilPercent =
         Number.isFinite(Number(favoriteSigil)) &&
         normalizeSigilPercent(Number(favoriteSigil)) > 0
           ? Number(favoriteSigil)
-          : Number.isFinite(fallbackIncomingSigil) &&
-              normalizeSigilPercent(fallbackIncomingSigil) > 0
-            ? fallbackIncomingSigil
-            : undefined;
+          : undefined;
       const defaultSigilPercent = resolveSigilPercentForAction(
         "slice",
         incoming,
