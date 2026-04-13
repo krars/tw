@@ -43,8 +43,8 @@
             targets: 'Список кор',
             group: 'Группа',
             strategy: 'Стратегия',
-            max_pop_per_village: 'Макс. население с деревни',
-            arrival_window: 'Окно прибытия',
+            max_pop_per_village: 'Макс. население с деревни (всего)',
+            arrival_window: 'Окно прибытия (дата+время)',
             arrival_from: 'Прибытие от',
             arrival_to: 'Прибытие до',
             squad: 'Отряд (шаблон)',
@@ -139,6 +139,89 @@
                 throw i18n.ERROR.BAD_FORMAT.replace('__1__', replacement);
             }
             return hh * 3600 + mm * 60 + ss;
+        },
+        format_datetime_local: function (epoch_ms) {
+            const date = new Date(Number(epoch_ms));
+            if (!Number.isFinite(date.getTime())) {
+                const fallback = new Date();
+                return Helper.format_datetime_local(fallback.getTime());
+            }
+            return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}T${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}:${String(date.getSeconds()).padStart(2, '0')}`;
+        },
+        parse_datetime_local: function (datetime_value, replacement, options = {}) {
+            const raw = Helper.clean_text(datetime_value);
+            if (!raw) {
+                throw i18n.ERROR.BLANK.replace('__1__', replacement);
+            }
+
+            const allow_time_only = !!options.allow_time_only;
+            const base_date_ms = Number.isFinite(Number(options.base_date_ms))
+                ? Number(options.base_date_ms)
+                : Date.now();
+
+            const time_match = raw.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+            if (allow_time_only && time_match) {
+                const hh = Number(time_match[1]);
+                const mm = Number(time_match[2]);
+                const ss = time_match[3] === undefined ? 0 : Number(time_match[3]);
+                if (hh > 23 || mm > 59 || ss > 59) {
+                    throw i18n.ERROR.BAD_FORMAT.replace('__1__', replacement);
+                }
+                const basis = new Date(base_date_ms);
+                return new Date(
+                    basis.getFullYear(),
+                    basis.getMonth(),
+                    basis.getDate(),
+                    hh,
+                    mm,
+                    ss,
+                    0,
+                ).getTime();
+            }
+
+            const normalized = raw.replace(' ', 'T');
+            const match = normalized.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/);
+            if (!match) {
+                throw i18n.ERROR.BAD_FORMAT.replace('__1__', replacement);
+            }
+
+            const year = Number(match[1]);
+            const month = Number(match[2]);
+            const day = Number(match[3]);
+            const hour = Number(match[4]);
+            const minute = Number(match[5]);
+            const second = match[6] === undefined ? 0 : Number(match[6]);
+
+            if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 59) {
+                throw i18n.ERROR.BAD_FORMAT.replace('__1__', replacement);
+            }
+
+            const parsed = new Date(year, month - 1, day, hour, minute, second, 0);
+            if (
+                parsed.getFullYear() !== year ||
+                parsed.getMonth() !== month - 1 ||
+                parsed.getDate() !== day ||
+                parsed.getHours() !== hour ||
+                parsed.getMinutes() !== minute ||
+                parsed.getSeconds() !== second
+            ) {
+                throw i18n.ERROR.BAD_FORMAT.replace('__1__', replacement);
+            }
+            return parsed.getTime();
+        },
+        normalize_datetime_local_value: function (value, fallback_ms = Date.now()) {
+            const fallback = Helper.format_datetime_local(fallback_ms);
+            const raw = Helper.clean_text(value);
+            if (!raw) return fallback;
+            try {
+                const parsed_ms = Helper.parse_datetime_local(raw, 'datetime', {
+                    allow_time_only: true,
+                    base_date_ms: fallback_ms,
+                });
+                return Helper.format_datetime_local(parsed_ms);
+            } catch (ex) {
+                return fallback;
+            }
         },
         assert_non_negative_number: function (input, replacement) {
             const value = input.value;
@@ -245,9 +328,10 @@
                 group: '-1',
                 strategy: 'DIST_ASC',
                 max_pop_per_village: 500,
-                arrival_window_enabled: false,
-                arrival_from: '00:00:00',
-                arrival_to: '23:59:59',
+                arrival_from_enabled: false,
+                arrival_to_enabled: false,
+                arrival_from_dt: '',
+                arrival_to_dt: '',
             },
             templates: [],
             active_template_id: null,
@@ -270,7 +354,7 @@
 .guard-root .guard-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;margin-top:8px}
 .guard-root .guard-field input,.guard-root .guard-field select{width:100%;box-sizing:border-box}
 .guard-root .guard-window{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px}
-.guard-root .guard-window input[type="time"]{min-width:110px}
+.guard-root .guard-window input[type="datetime-local"]{min-width:210px}
 .guard-root .guard-template-block{margin-top:10px;border:1px solid #c2a97d;background:#f7f0df;padding:8px;border-radius:4px}
 .guard-root .guard-template-toolbar{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:6px}
 .guard-root .guard-template-select{flex:1;min-width:220px}
@@ -337,16 +421,42 @@
 
             if (stored.input && typeof stored.input === 'object') {
                 const input = stored.input;
+                const now_ms = Date.now();
+                const default_from_dt = Helper.format_datetime_local(now_ms);
+                const default_to_dt = Helper.format_datetime_local(now_ms + 60 * 60 * 1000);
+
                 base.input.targets = Helper.clean_text(input.targets || '');
                 base.input.group = Helper.clean_text(input.group || base.input.group) || '-1';
                 base.input.strategy = Guard.strategies[input.strategy]
                     ? input.strategy
                     : base.input.strategy;
                 base.input.max_pop_per_village = Math.max(1, Helper.to_int(input.max_pop_per_village) || base.input.max_pop_per_village);
-                base.input.arrival_window_enabled = !!input.arrival_window_enabled;
-                base.input.arrival_from = Helper.clean_text(input.arrival_from || base.input.arrival_from) || base.input.arrival_from;
-                base.input.arrival_to = Helper.clean_text(input.arrival_to || base.input.arrival_to) || base.input.arrival_to;
+                const legacy_window_enabled = !!input.arrival_window_enabled;
+                base.input.arrival_from_enabled = input.arrival_from_enabled !== undefined
+                    ? !!input.arrival_from_enabled
+                    : legacy_window_enabled;
+                base.input.arrival_to_enabled = input.arrival_to_enabled !== undefined
+                    ? !!input.arrival_to_enabled
+                    : legacy_window_enabled;
+                base.input.arrival_from_dt = Helper.normalize_datetime_local_value(
+                    input.arrival_from_dt !== undefined ? input.arrival_from_dt : input.arrival_from,
+                    now_ms,
+                ) || default_from_dt;
+                base.input.arrival_to_dt = Helper.normalize_datetime_local_value(
+                    input.arrival_to_dt !== undefined ? input.arrival_to_dt : input.arrival_to,
+                    now_ms + 60 * 60 * 1000,
+                ) || default_to_dt;
             }
+
+            const normalize_now_ms = Date.now();
+            base.input.arrival_from_dt = Helper.normalize_datetime_local_value(
+                base.input.arrival_from_dt,
+                normalize_now_ms,
+            );
+            base.input.arrival_to_dt = Helper.normalize_datetime_local_value(
+                base.input.arrival_to_dt,
+                normalize_now_ms + 60 * 60 * 1000,
+            );
 
             const templates = [];
             if (Array.isArray(stored.templates)) {
@@ -438,9 +548,10 @@
             const group_id = Helper.get_id('group');
             const strategy_id = Helper.get_id('strategy');
             const max_pop_id = Helper.get_id('max_pop_per_village');
-            const window_enabled_id = Helper.get_id('is_arrival_window_enabled');
-            const arrival_from_id = Helper.get_id('arrival_from');
-            const arrival_to_id = Helper.get_id('arrival_to');
+            const arrival_from_enabled_id = Helper.get_id('is_arrival_from_enabled');
+            const arrival_to_enabled_id = Helper.get_id('is_arrival_to_enabled');
+            const arrival_from_dt_id = Helper.get_id('arrival_from_dt');
+            const arrival_to_dt_id = Helper.get_id('arrival_to_dt');
             const template_select_id = Helper.get_id('template');
             const preview_id = Helper.get_id('template_preview');
             const create_template_id = Helper.get_id('create_template');
@@ -470,11 +581,10 @@
                 </div>
 
                 <div class="guard-window">
-                    <label><input id="${window_enabled_id}" type="checkbox"> ${i18n.LABELS.arrival_window}</label>
-                    <span>${i18n.LABELS.arrival_from}</span>
-                    <input id="${arrival_from_id}" type="time" step="1" value="00:00:00">
-                    <span>${i18n.LABELS.arrival_to}</span>
-                    <input id="${arrival_to_id}" type="time" step="1" value="23:59:59">
+                    <label><input id="${arrival_from_enabled_id}" type="checkbox"> ${i18n.LABELS.arrival_from}</label>
+                    <input id="${arrival_from_dt_id}" type="datetime-local" step="1">
+                    <label><input id="${arrival_to_enabled_id}" type="checkbox"> ${i18n.LABELS.arrival_to}</label>
+                    <input id="${arrival_to_dt_id}" type="datetime-local" step="1">
                 </div>
 
                 <div class="guard-template-block">
@@ -589,18 +699,26 @@
             const group = Helper.get_control('group');
             const strategy = Helper.get_control('strategy');
             const max_pop = Helper.get_control('max_pop_per_village');
-            const window_enabled = Helper.get_control('is_arrival_window_enabled');
-            const arrival_from = Helper.get_control('arrival_from');
-            const arrival_to = Helper.get_control('arrival_to');
+            const arrival_from_enabled = Helper.get_control('is_arrival_from_enabled');
+            const arrival_to_enabled = Helper.get_control('is_arrival_to_enabled');
+            const arrival_from_dt = Helper.get_control('arrival_from_dt');
+            const arrival_to_dt = Helper.get_control('arrival_to_dt');
             const template_select = Helper.get_control('template');
 
             Guard.settings.input.targets = targets ? String(targets.value || '') : '';
             Guard.settings.input.group = group ? String(group.value || '-1') : '-1';
             Guard.settings.input.strategy = strategy ? String(strategy.value || 'DIST_ASC') : 'DIST_ASC';
             Guard.settings.input.max_pop_per_village = Math.max(1, Helper.to_int(max_pop ? max_pop.value : 0) || 1);
-            Guard.settings.input.arrival_window_enabled = !!(window_enabled && window_enabled.checked);
-            Guard.settings.input.arrival_from = Helper.clean_text(arrival_from ? arrival_from.value : '') || '00:00:00';
-            Guard.settings.input.arrival_to = Helper.clean_text(arrival_to ? arrival_to.value : '') || '23:59:59';
+            Guard.settings.input.arrival_from_enabled = !!(arrival_from_enabled && arrival_from_enabled.checked);
+            Guard.settings.input.arrival_to_enabled = !!(arrival_to_enabled && arrival_to_enabled.checked);
+            Guard.settings.input.arrival_from_dt = Helper.normalize_datetime_local_value(
+                arrival_from_dt ? arrival_from_dt.value : '',
+                Date.now(),
+            );
+            Guard.settings.input.arrival_to_dt = Helper.normalize_datetime_local_value(
+                arrival_to_dt ? arrival_to_dt.value : '',
+                Date.now() + 60 * 60 * 1000,
+            );
 
             if (template_select) {
                 Guard.settings.active_template_id = Helper.clean_text(template_select.value) || Guard.settings.active_template_id;
@@ -613,9 +731,10 @@
             const targets = Helper.get_control('targets');
             const strategy = Helper.get_control('strategy');
             const max_pop = Helper.get_control('max_pop_per_village');
-            const window_enabled = Helper.get_control('is_arrival_window_enabled');
-            const arrival_from = Helper.get_control('arrival_from');
-            const arrival_to = Helper.get_control('arrival_to');
+            const arrival_from_enabled = Helper.get_control('is_arrival_from_enabled');
+            const arrival_to_enabled = Helper.get_control('is_arrival_to_enabled');
+            const arrival_from_dt = Helper.get_control('arrival_from_dt');
+            const arrival_to_dt = Helper.get_control('arrival_to_dt');
 
             if (targets) {
                 targets.value = Guard.settings.input.targets || '';
@@ -626,24 +745,34 @@
             if (max_pop) {
                 max_pop.value = String(Math.max(1, Helper.to_int(Guard.settings.input.max_pop_per_village) || 1));
             }
-            if (window_enabled) {
-                window_enabled.checked = !!Guard.settings.input.arrival_window_enabled;
+            if (arrival_from_enabled) {
+                arrival_from_enabled.checked = !!Guard.settings.input.arrival_from_enabled;
             }
-            if (arrival_from) {
-                arrival_from.value = Guard.settings.input.arrival_from || '00:00:00';
+            if (arrival_to_enabled) {
+                arrival_to_enabled.checked = !!Guard.settings.input.arrival_to_enabled;
             }
-            if (arrival_to) {
-                arrival_to.value = Guard.settings.input.arrival_to || '23:59:59';
+            if (arrival_from_dt) {
+                arrival_from_dt.value = Helper.normalize_datetime_local_value(
+                    Guard.settings.input.arrival_from_dt,
+                    Date.now(),
+                );
+            }
+            if (arrival_to_dt) {
+                arrival_to_dt.value = Helper.normalize_datetime_local_value(
+                    Guard.settings.input.arrival_to_dt,
+                    Date.now() + 60 * 60 * 1000,
+                );
             }
             Guard.toggle_window_controls();
         },
 
         toggle_window_controls: function () {
-            const enabled = !!(Helper.get_control('is_arrival_window_enabled') || {}).checked;
-            const arrival_from = Helper.get_control('arrival_from');
-            const arrival_to = Helper.get_control('arrival_to');
-            if (arrival_from) arrival_from.disabled = !enabled;
-            if (arrival_to) arrival_to.disabled = !enabled;
+            const arrival_from_enabled = !!(Helper.get_control('is_arrival_from_enabled') || {}).checked;
+            const arrival_to_enabled = !!(Helper.get_control('is_arrival_to_enabled') || {}).checked;
+            const arrival_from_dt = Helper.get_control('arrival_from_dt');
+            const arrival_to_dt = Helper.get_control('arrival_to_dt');
+            if (arrival_from_dt) arrival_from_dt.disabled = !arrival_from_enabled;
+            if (arrival_to_dt) arrival_to_dt.disabled = !arrival_to_enabled;
         },
 
         render_template_controls: function () {
@@ -828,13 +957,17 @@
             return weights;
         },
 
-        is_arrival_in_window: function (arrival_ms, from_sec, to_sec) {
-            const date = new Date(arrival_ms);
-            const arrival_sec = date.getHours() * 3600 + date.getMinutes() * 60 + date.getSeconds();
-            if (to_sec >= from_sec) {
-                return arrival_sec >= from_sec && arrival_sec <= to_sec;
+        is_arrival_in_window: function (arrival_ms, user_input) {
+            const arrival = Number(arrival_ms);
+            if (!Number.isFinite(arrival)) return false;
+            if (!user_input || !user_input.arrival_filter_enabled) return true;
+            if (user_input.arrival_from_enabled && Number.isFinite(user_input.arrival_from_ms)) {
+                if (arrival < user_input.arrival_from_ms) return false;
             }
-            return arrival_sec >= from_sec || arrival_sec <= to_sec;
+            if (user_input.arrival_to_enabled && Number.isFinite(user_input.arrival_to_ms)) {
+                if (arrival > user_input.arrival_to_ms) return false;
+            }
+            return true;
         },
 
         build_population_limited_composition: function (available, weights, population_cap, allowed_units) {
@@ -953,7 +1086,13 @@
         },
 
         pick_composition_for_village: function ({ village_state, distance, user_input, template_weights, now_ms }) {
-            const population_cap = Math.max(1, Helper.to_int(user_input.max_pop_per_village));
+            const population_cap = Math.min(
+                Math.max(1, Helper.to_int(user_input.max_pop_per_village)),
+                Math.max(0, Helper.to_int(village_state.remaining_population_budget)),
+            );
+            if (population_cap <= 0) {
+                return null;
+            }
             const available = village_state.remaining;
 
             const allowed_units = Object.keys(template_weights)
@@ -1018,15 +1157,8 @@
                 const travel_ms = distance * slowest_speed * 60 * 1000;
                 const arrival_ms = now_ms + travel_ms;
 
-                if (user_input.arrival_window_enabled) {
-                    const in_window = Guard.is_arrival_in_window(
-                        arrival_ms,
-                        user_input.arrival_from_sec,
-                        user_input.arrival_to_sec,
-                    );
-                    if (!in_window) {
-                        return null;
-                    }
+                if (!Guard.is_arrival_in_window(arrival_ms, user_input)) {
+                    return null;
                 }
 
                 return {
@@ -1038,7 +1170,7 @@
                 };
             };
 
-            if (!user_input.arrival_window_enabled) {
+            if (!user_input.arrival_filter_enabled) {
                 return evaluate_candidate(null);
             }
 
@@ -1048,7 +1180,7 @@
                 .filter(item => Number.isFinite(item.speed))
                 .filter(item => {
                     const arrival_ms = now_ms + distance * item.speed * 60 * 1000;
-                    return Guard.is_arrival_in_window(arrival_ms, user_input.arrival_from_sec, user_input.arrival_to_sec);
+                    return Guard.is_arrival_in_window(arrival_ms, user_input);
                 })
                 .sort((lhs, rhs) => rhs.speed - lhs.speed);
 
@@ -1072,6 +1204,11 @@
         },
 
         sort_village_candidates: function (candidates, strategy) {
+            const get_sendable_population = function (village_state) {
+                const by_units = Guard.get_village_available_population(village_state.remaining);
+                const by_budget = Math.max(0, Helper.to_int(village_state.remaining_population_budget));
+                return Math.min(by_units, by_budget);
+            };
             const items = [...candidates];
             switch (strategy) {
                 case 'DIST_ASC':
@@ -1082,14 +1219,14 @@
                     break;
                 case 'TROOP_ASC':
                     items.sort((lhs, rhs) =>
-                        Guard.get_village_available_population(lhs.village_state.remaining) -
-                        Guard.get_village_available_population(rhs.village_state.remaining)
+                        get_sendable_population(lhs.village_state) -
+                        get_sendable_population(rhs.village_state)
                     );
                     break;
                 case 'TROOP_DESC':
                     items.sort((lhs, rhs) =>
-                        Guard.get_village_available_population(rhs.village_state.remaining) -
-                        Guard.get_village_available_population(lhs.village_state.remaining)
+                        get_sendable_population(rhs.village_state) -
+                        get_sendable_population(lhs.village_state)
                     );
                     break;
                 default:
@@ -1111,9 +1248,10 @@
             const max_pop_control = Helper.get_control('max_pop_per_village');
             const strategy_control = Helper.get_control('strategy');
             const group_control = Helper.get_control('group');
-            const arrival_window_control = Helper.get_control('is_arrival_window_enabled');
-            const arrival_from_control = Helper.get_control('arrival_from');
-            const arrival_to_control = Helper.get_control('arrival_to');
+            const arrival_from_enabled_control = Helper.get_control('is_arrival_from_enabled');
+            const arrival_to_enabled_control = Helper.get_control('is_arrival_to_enabled');
+            const arrival_from_dt_control = Helper.get_control('arrival_from_dt');
+            const arrival_to_dt_control = Helper.get_control('arrival_to_dt');
 
             Helper.assert_positive_number(max_pop_control, i18n.LABELS.max_pop_per_village);
 
@@ -1135,15 +1273,36 @@
                 group_id: String(group_control.value || '-1'),
                 strategy: String(strategy_control.value || 'DIST_ASC'),
                 max_pop_per_village: Math.max(1, Helper.to_int(max_pop_control.value) || 1),
-                arrival_window_enabled: !!arrival_window_control.checked,
-                arrival_from_sec: null,
-                arrival_to_sec: null,
+                arrival_from_enabled: !!(arrival_from_enabled_control && arrival_from_enabled_control.checked),
+                arrival_to_enabled: !!(arrival_to_enabled_control && arrival_to_enabled_control.checked),
+                arrival_filter_enabled: false,
+                arrival_from_ms: null,
+                arrival_to_ms: null,
                 template,
             };
 
-            if (user_input.arrival_window_enabled) {
-                user_input.arrival_from_sec = Helper.parse_clock_to_sec(arrival_from_control.value, i18n.LABELS.arrival_from);
-                user_input.arrival_to_sec = Helper.parse_clock_to_sec(arrival_to_control.value, i18n.LABELS.arrival_to);
+            user_input.arrival_filter_enabled = user_input.arrival_from_enabled || user_input.arrival_to_enabled;
+
+            if (user_input.arrival_from_enabled) {
+                user_input.arrival_from_ms = Helper.parse_datetime_local(
+                    arrival_from_dt_control ? arrival_from_dt_control.value : '',
+                    i18n.LABELS.arrival_from,
+                );
+            }
+            if (user_input.arrival_to_enabled) {
+                user_input.arrival_to_ms = Helper.parse_datetime_local(
+                    arrival_to_dt_control ? arrival_to_dt_control.value : '',
+                    i18n.LABELS.arrival_to,
+                );
+            }
+            if (
+                user_input.arrival_from_enabled &&
+                user_input.arrival_to_enabled &&
+                Number.isFinite(user_input.arrival_from_ms) &&
+                Number.isFinite(user_input.arrival_to_ms) &&
+                user_input.arrival_from_ms > user_input.arrival_to_ms
+            ) {
+                throw i18n.ERROR.BAD_WINDOW;
             }
 
             return user_input;
@@ -1405,11 +1564,17 @@
                         const raw_count = Math.max(0, Helper.to_int(village.units[unit_name]));
                         remaining[unit_name] = Math.max(raw_count - reserve, 0);
                     }
+                    const available_population = Guard.get_village_available_population(remaining);
+                    const budget = Math.min(
+                        Math.max(1, Helper.to_int(user_input.max_pop_per_village)),
+                        available_population,
+                    );
                     return {
                         id: village.id,
                         name: village.name,
                         coords: village.coords,
                         remaining,
+                        remaining_population_budget: budget,
                     };
                 });
 
@@ -1423,7 +1588,11 @@
                             const distance = Math.hypot(target.x - village_state.coords[0], target.y - village_state.coords[1]);
                             return { village_state, distance };
                         })
-                        .filter(item => Number.isFinite(item.distance) && item.distance > 0);
+                        .filter(item =>
+                            Number.isFinite(item.distance) &&
+                            item.distance > 0 &&
+                            Math.max(0, Helper.to_int(item.village_state.remaining_population_budget)) > 0
+                        );
 
                     const sorted_candidates = Guard.sort_village_candidates(candidate_villages, user_input.strategy);
                     const commands = [];
@@ -1443,6 +1612,10 @@
                             const count = Math.max(0, Helper.to_int(picked.units[unit_name]));
                             candidate.village_state.remaining[unit_name] = Math.max(0, candidate.village_state.remaining[unit_name] - count);
                         }
+                        candidate.village_state.remaining_population_budget = Math.max(
+                            0,
+                            Math.max(0, Helper.to_int(candidate.village_state.remaining_population_budget)) - picked.population,
+                        );
 
                         commands.push({
                             village_id: candidate.village_state.id,
@@ -1638,12 +1811,16 @@
             Guard.apply_settings_to_ui();
             Guard.render_template_controls();
 
-            Helper.get_control('is_arrival_window_enabled').addEventListener('change', () => {
-                Guard.toggle_window_controls();
-                Guard.sync_settings_from_ui();
+            ['is_arrival_from_enabled', 'is_arrival_to_enabled'].forEach(control_name => {
+                const control = Helper.get_control(control_name);
+                if (!control) return;
+                control.addEventListener('change', () => {
+                    Guard.toggle_window_controls();
+                    Guard.sync_settings_from_ui();
+                });
             });
 
-            ['targets', 'group', 'strategy', 'max_pop_per_village', 'arrival_from', 'arrival_to'].forEach(control_name => {
+            ['targets', 'group', 'strategy', 'max_pop_per_village', 'arrival_from_dt', 'arrival_to_dt'].forEach(control_name => {
                 const control = Helper.get_control(control_name);
                 if (!control) return;
                 control.addEventListener('change', () => Guard.sync_settings_from_ui());
@@ -1651,6 +1828,8 @@
                     control.addEventListener('input', () => Guard.sync_settings_from_ui());
                 }
             });
+
+            Guard.toggle_window_controls();
 
             const template_select = Helper.get_control('template');
             template_select.addEventListener('change', () => {
