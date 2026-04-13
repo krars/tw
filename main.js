@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.16";
+  const VERSION = "0.10.17";
   const LOG_PREFIX = "[ScriptMM]";
   const MULTI_TAB_PRESENCE_KEY = "scriptmm.active_instances.v1";
   const MULTI_TAB_HEARTBEAT_INTERVAL_MS = 3000;
@@ -12,6 +12,7 @@
     .toString(36)
     .slice(2, 10)}`;
   const SPEED_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+  const TROOPS_CACHE_TTL_MS = 30 * 1000;
   const MAX_FETCHES_PER_SECOND = 4;
   const FETCH_REQUEST_TIMEOUT_MS = 12000;
   const FETCH_MIN_INTERVAL_MS = Math.max(
@@ -3331,6 +3332,24 @@
   };
 
   const getServerNowMs = () => getServerNow().getTime();
+  const resolvePayloadFetchedAtMs = (payload) => {
+    if (!payload || typeof payload !== "object") return NaN;
+    const fetchedAtMs = Number(payload.fetchedAtMs);
+    if (Number.isFinite(fetchedAtMs) && fetchedAtMs > 0) return fetchedAtMs;
+    const fetchedAtText =
+      cleanText(payload.fetchedAt) || cleanText(payload.generatedAt) || null;
+    if (!fetchedAtText) return NaN;
+    return Number(safe(() => new Date(fetchedAtText).getTime(), NaN));
+  };
+  const isPayloadFreshByFetchedAt = (payload, ttlMs) => {
+    if (!payload || typeof payload !== "object") return false;
+    const maxAgeMs = Math.max(0, Number(ttlMs) || 0);
+    if (!maxAgeMs) return false;
+    const fetchedAtMs = resolvePayloadFetchedAtMs(payload);
+    if (!Number.isFinite(fetchedAtMs)) return false;
+    const ageMs = getServerNowMs() - fetchedAtMs;
+    return Number.isFinite(ageMs) && ageMs <= maxAgeMs;
+  };
   const normalizePlanAction = (action) => {
     const value = cleanText(action);
     return value && PLAN_ACTIONS.includes(value) ? value : "slice";
@@ -18561,10 +18580,23 @@ ${panelHtml}`;
     const hasTroops =
       state.troops &&
       Array.isArray(state.troops.villages) &&
-      state.troops.villages.length > 0;
+      state.troops.villages.length > 0 &&
+      isPayloadFreshByFetchedAt(state.troops, TROOPS_CACHE_TTL_MS);
     if (!hasTroops) {
-      const cachedOverviewUnits = readJson(STORAGE_KEYS.overviewUnits);
-      const cachedTroops = readJson(STORAGE_KEYS.troops);
+      const cachedOverviewUnitsRaw = readJson(STORAGE_KEYS.overviewUnits);
+      const cachedOverviewUnits = isPayloadFreshByFetchedAt(
+        cachedOverviewUnitsRaw,
+        TROOPS_CACHE_TTL_MS,
+      )
+        ? cachedOverviewUnitsRaw
+        : null;
+      const cachedTroopsRaw = readJson(STORAGE_KEYS.troops);
+      const cachedTroops = isPayloadFreshByFetchedAt(
+        cachedTroopsRaw,
+        TROOPS_CACHE_TTL_MS,
+      )
+        ? cachedTroopsRaw
+        : null;
       if (
         cachedOverviewUnits &&
         Array.isArray(cachedOverviewUnits.villages) &&
@@ -18619,12 +18651,25 @@ ${panelHtml}`;
     const hasDefenseTroops =
       state.troopsDefense &&
       Array.isArray(state.troopsDefense.villages) &&
-      state.troopsDefense.villages.length > 0;
+      state.troopsDefense.villages.length > 0 &&
+      isPayloadFreshByFetchedAt(state.troopsDefense, TROOPS_CACHE_TTL_MS);
     if (!hasDefenseTroops) {
-      const cachedOverviewUnitsDefense = readJson(
+      const cachedOverviewUnitsDefenseRaw = readJson(
         STORAGE_KEYS.overviewUnitsDefense,
       );
-      const cachedTroopsDefense = readJson(STORAGE_KEYS.troopsDefense);
+      const cachedOverviewUnitsDefense = isPayloadFreshByFetchedAt(
+        cachedOverviewUnitsDefenseRaw,
+        TROOPS_CACHE_TTL_MS,
+      )
+        ? cachedOverviewUnitsDefenseRaw
+        : null;
+      const cachedTroopsDefenseRaw = readJson(STORAGE_KEYS.troopsDefense);
+      const cachedTroopsDefense = isPayloadFreshByFetchedAt(
+        cachedTroopsDefenseRaw,
+        TROOPS_CACHE_TTL_MS,
+      )
+        ? cachedTroopsDefenseRaw
+        : null;
       if (
         cachedOverviewUnitsDefense &&
         Array.isArray(cachedOverviewUnitsDefense.villages) &&
@@ -19899,10 +19944,19 @@ ${panelHtml}`;
       };
     }
 
-    const cachedTroops = readJson(STORAGE_KEYS.troops);
+    const cachedTroopsRaw = readJson(STORAGE_KEYS.troops);
+    const cachedTroops = isPayloadFreshByFetchedAt(
+      cachedTroopsRaw,
+      TROOPS_CACHE_TTL_MS,
+    )
+      ? cachedTroopsRaw
+      : null;
     if (cachedTroops && Array.isArray(cachedTroops.villages)) {
       state.troops = cachedTroops;
-    } else if (!state.troops) {
+    } else if (
+      !state.troops ||
+      !isPayloadFreshByFetchedAt(state.troops, TROOPS_CACHE_TTL_MS)
+    ) {
       state.troops = {
         version: 1,
         fetchedAt: new Date(getServerNowMs()).toISOString(),
@@ -19913,10 +19967,19 @@ ${panelHtml}`;
       };
     }
 
-    const cachedTroopsDefense = readJson(STORAGE_KEYS.troopsDefense);
+    const cachedTroopsDefenseRaw = readJson(STORAGE_KEYS.troopsDefense);
+    const cachedTroopsDefense = isPayloadFreshByFetchedAt(
+      cachedTroopsDefenseRaw,
+      TROOPS_CACHE_TTL_MS,
+    )
+      ? cachedTroopsDefenseRaw
+      : null;
     if (cachedTroopsDefense && Array.isArray(cachedTroopsDefense.villages)) {
       state.troopsDefense = cachedTroopsDefense;
-    } else if (!state.troopsDefense) {
+    } else if (
+      !state.troopsDefense ||
+      !isPayloadFreshByFetchedAt(state.troopsDefense, TROOPS_CACHE_TTL_MS)
+    ) {
       state.troopsDefense = state.troops;
     }
 
@@ -19937,10 +20000,19 @@ ${panelHtml}`;
       };
     }
 
-    const cachedOverviewUnits = readJson(STORAGE_KEYS.overviewUnits);
+    const cachedOverviewUnitsRaw = readJson(STORAGE_KEYS.overviewUnits);
+    const cachedOverviewUnits = isPayloadFreshByFetchedAt(
+      cachedOverviewUnitsRaw,
+      TROOPS_CACHE_TTL_MS,
+    )
+      ? cachedOverviewUnitsRaw
+      : null;
     if (cachedOverviewUnits && typeof cachedOverviewUnits === "object") {
       state.overviewUnitsDump = cachedOverviewUnits;
-    } else if (!state.overviewUnitsDump) {
+    } else if (
+      !state.overviewUnitsDump ||
+      !isPayloadFreshByFetchedAt(state.overviewUnitsDump, TROOPS_CACHE_TTL_MS)
+    ) {
       state.overviewUnitsDump = {
         version: 1,
         fetchedAt: new Date(getServerNowMs()).toISOString(),
@@ -19953,15 +20025,27 @@ ${panelHtml}`;
       };
     }
 
-    const cachedOverviewUnitsDefense = readJson(
+    const cachedOverviewUnitsDefenseRaw = readJson(
       STORAGE_KEYS.overviewUnitsDefense,
     );
+    const cachedOverviewUnitsDefense = isPayloadFreshByFetchedAt(
+      cachedOverviewUnitsDefenseRaw,
+      TROOPS_CACHE_TTL_MS,
+    )
+      ? cachedOverviewUnitsDefenseRaw
+      : null;
     if (
       cachedOverviewUnitsDefense &&
       typeof cachedOverviewUnitsDefense === "object"
     ) {
       state.overviewUnitsDefenseDump = cachedOverviewUnitsDefense;
-    } else if (!state.overviewUnitsDefenseDump) {
+    } else if (
+      !state.overviewUnitsDefenseDump ||
+      !isPayloadFreshByFetchedAt(
+        state.overviewUnitsDefenseDump,
+        TROOPS_CACHE_TTL_MS,
+      )
+    ) {
       state.overviewUnitsDefenseDump = {
         version: 1,
         fetchedAt: new Date(getServerNowMs()).toISOString(),
@@ -20033,13 +20117,37 @@ ${panelHtml}`;
       ) || "unknown";
     const cachedIncomings = readJson(STORAGE_KEYS.incomings);
     const cachedSupports = readJson(STORAGE_KEYS.incomingsSupports);
-    const cachedTroops = readJson(STORAGE_KEYS.troops);
-    const cachedTroopsDefense = readJson(STORAGE_KEYS.troopsDefense);
+    const cachedTroopsRaw = readJson(STORAGE_KEYS.troops);
+    const cachedTroops = isPayloadFreshByFetchedAt(
+      cachedTroopsRaw,
+      TROOPS_CACHE_TTL_MS,
+    )
+      ? cachedTroopsRaw
+      : null;
+    const cachedTroopsDefenseRaw = readJson(STORAGE_KEYS.troopsDefense);
+    const cachedTroopsDefense = isPayloadFreshByFetchedAt(
+      cachedTroopsDefenseRaw,
+      TROOPS_CACHE_TTL_MS,
+    )
+      ? cachedTroopsDefenseRaw
+      : null;
     const cachedOverviewCommands = readJson(STORAGE_KEYS.overviewCommands);
-    const cachedOverviewUnits = readJson(STORAGE_KEYS.overviewUnits);
-    const cachedOverviewUnitsDefense = readJson(
+    const cachedOverviewUnitsRaw = readJson(STORAGE_KEYS.overviewUnits);
+    const cachedOverviewUnits = isPayloadFreshByFetchedAt(
+      cachedOverviewUnitsRaw,
+      TROOPS_CACHE_TTL_MS,
+    )
+      ? cachedOverviewUnitsRaw
+      : null;
+    const cachedOverviewUnitsDefenseRaw = readJson(
       STORAGE_KEYS.overviewUnitsDefense,
     );
+    const cachedOverviewUnitsDefense = isPayloadFreshByFetchedAt(
+      cachedOverviewUnitsDefenseRaw,
+      TROOPS_CACHE_TTL_MS,
+    )
+      ? cachedOverviewUnitsDefenseRaw
+      : null;
     saveScheduledCommands();
     const progressTracker = createProgressTracker(state.ui, 7);
     try {
