@@ -2049,9 +2049,42 @@
     };
   };
 
+  let detectedPageSigilCacheValue = null;
+  let detectedPageSigilCacheAtMs = 0;
+  const getDetectedPageSigilPercentCached = () => {
+    const nowMs = Date.now();
+    if (
+      Number.isFinite(detectedPageSigilCacheValue) &&
+      nowMs - detectedPageSigilCacheAtMs <= 1500
+    ) {
+      return normalizeSigilPercent(detectedPageSigilCacheValue);
+    }
+    const liveSigil = normalizeSigilPercent(detectActiveSigilPercent());
+    detectedPageSigilCacheValue = liveSigil;
+    detectedPageSigilCacheAtMs = nowMs;
+    return liveSigil;
+  };
+
   const getDefaultSigilForAction = (action) => {
     if (!actionUsesSigil(action)) return 0;
-    return normalizeSigilPercent(state.detectedSigilPercent);
+    const liveSigil = getDetectedPageSigilPercentCached();
+    if (liveSigil > 0) {
+      state.detectedSigilPercent = liveSigil;
+      return liveSigil;
+    }
+
+    const stateSigil = normalizeSigilPercent(state.detectedSigilPercent);
+    if (stateSigil > 0) return stateSigil;
+
+    const snapshotSigil = normalizeSigilPercent(
+      toNumber(state.snapshot && state.snapshot.sigilPercent),
+    );
+    if (snapshotSigil > 0) {
+      state.detectedSigilPercent = snapshotSigil;
+      return snapshotSigil;
+    }
+
+    return stateSigil;
   };
 
   const getIncomingSigilPercent = (incoming) => {
@@ -2077,10 +2110,40 @@
     const explicitSigil = toNumber(explicitSigilRaw);
     if (Number.isFinite(explicitSigil))
       return normalizeSigilPercent(explicitSigil);
+    const defaultSigil = normalizeSigilPercent(getDefaultSigilForAction(action));
     const incomingSigil = getIncomingSigilPercent(incoming);
-    if (Number.isFinite(incomingSigil))
-      return normalizeSigilPercent(incomingSigil);
-    return normalizeSigilPercent(getDefaultSigilForAction(action));
+    const shouldPreferIncomingSigil = Boolean(
+      incoming &&
+        (incoming.isHubIncoming ||
+          incoming.isHubMass ||
+          incoming.isTribeIncoming ||
+          incoming.isTribeAllyCommand ||
+          incoming.isTribeAllyPlanned ||
+          incoming.isFavoriteEntry),
+    );
+    if (Number.isFinite(incomingSigil)) {
+      if (shouldPreferIncomingSigil) {
+        return normalizeSigilPercent(incomingSigil);
+      }
+      if (!(defaultSigil > 0)) {
+        return normalizeSigilPercent(incomingSigil);
+      }
+    }
+    return defaultSigil;
+  };
+
+  const restoreDetectedSigilPercentFromSnapshot = () => {
+    const snapshot = readJson(STORAGE_KEYS.snapshot);
+    if (!snapshot || typeof snapshot !== "object") return false;
+    state.snapshot = snapshot;
+    const snapshotSigil = normalizeSigilPercent(
+      toNumber(snapshot && snapshot.sigilPercent),
+    );
+    if (snapshotSigil > 0) {
+      state.detectedSigilPercent = snapshotSigil;
+      return true;
+    }
+    return false;
   };
 
   const isSameVillageAsIncomingTarget = (incoming, village) => {
@@ -18269,6 +18332,8 @@ ${panelHtml}`;
       clearMessageInlineActionButtons();
       return;
     }
+    ensureMessageStorageLoaded();
+    restoreDetectedSigilPercentFromSnapshot();
     state.messageMode = true;
     const payload = parseMessagePlanningPayload(document);
     const fallbackSpeedModel =
@@ -18313,15 +18378,9 @@ ${panelHtml}`;
     } else {
       state.infoVillageTargetCoord = null;
     }
-    const messageSigilPercent = detectActiveSigilPercent();
-    if (Number.isFinite(messageSigilPercent)) {
-      state.detectedSigilPercent = normalizeSigilPercent(
-        Math.max(
-          0,
-          Number(state.detectedSigilPercent) || 0,
-          messageSigilPercent,
-        ),
-      );
+    const messageSigilPercent = normalizeSigilPercent(detectActiveSigilPercent());
+    if (messageSigilPercent > 0) {
+      state.detectedSigilPercent = messageSigilPercent;
     }
     renderMessageInlineActionButtons(
       payload && Array.isArray(payload.anchors) ? payload.anchors : [],
@@ -18408,6 +18467,7 @@ ${panelHtml}`;
     if (!Array.isArray(state.hubEntries)) {
       state.hubEntries = [];
     }
+    restoreDetectedSigilPercentFromSnapshot();
     state.messageStorageLoaded = true;
   };
   const buildTroopsModelFromOverviewUnitsDump = (dump, warning = null) => ({
