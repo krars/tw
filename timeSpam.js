@@ -1,4 +1,4 @@
-(function(){
+javascript:(function(){
     'use strict';
 
     try {
@@ -323,7 +323,15 @@
 
         function parseCoordsWithSigilFromImportSection(sectionText) {
             const coordMap = new Map(); // coord -> { sigil:boolean, globalMarker:string }
-            const lines = String(sectionText || '').split('\n');
+            const src = String(sectionText || '');
+            const codeBlocks = [];
+            const codeRe = /\[code\]([\s\S]*?)\[\/code\]/gi;
+            let codeMatch;
+            while ((codeMatch = codeRe.exec(src)) !== null) {
+                codeBlocks.push(String(codeMatch[1] || ''));
+            }
+            const preferredText = codeBlocks.length ? codeBlocks.join('\n') : src;
+            const lines = preferredText.split('\n');
             lines.forEach(lineRaw => {
                 const line = String(lineRaw || '');
                 const parsed = parseCoordsFromLine(line);
@@ -1735,6 +1743,7 @@
             const windows = (Array.isArray(tab.timeWindows) ? tab.timeWindows : [])
                 .map(w => ({ from: cleanText(w?.from), to: cleanText(w?.to) }))
                 .filter(w => w.from && w.to);
+            const coordsText = coords.length ? `[code]\n${coords.join('\n')}\n[/code]` : '-';
 
             const activeSet = getTemplateActiveSetForCurrentTab();
             const hasActiveTemplates = activeSet.size > 0;
@@ -1761,7 +1770,7 @@
                 `(${tabName})`,
                 '',
                 'Коры:',
-                coords.length ? coords.join('\n') : '-',
+                coordsText,
                 '',
                 '~~~~~~~~~~~~~~~~',
                 '',
