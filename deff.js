@@ -44,6 +44,7 @@
             group: 'Группа',
             strategy: 'Стратегия',
             max_pop_per_village: 'Макс. население с деревни (всего)',
+            sigil_percent: 'Сигил (%)',
             arrival_window: 'Окно прибытия (дата+время)',
             arrival_from: 'Прибытие от',
             arrival_to: 'Прибытие до',
@@ -359,6 +360,7 @@
                 group: '-1',
                 strategy: 'DIST_ASC',
                 max_pop_per_village: 500,
+                sigil_percent: 0,
                 arrival_from_enabled: false,
                 arrival_to_enabled: false,
                 arrival_from_date: '',
@@ -529,6 +531,13 @@
                     ? input.strategy
                     : base.input.strategy;
                 base.input.max_pop_per_village = Math.max(1, Helper.to_int(input.max_pop_per_village) || base.input.max_pop_per_village);
+                base.input.sigil_percent = Math.max(
+                    0,
+                    Math.min(
+                        50,
+                        Helper.to_int(input.sigil_percent !== undefined ? input.sigil_percent : input.sigilPercent),
+                    ),
+                );
                 const legacy_window_enabled = !!input.arrival_window_enabled;
                 base.input.arrival_from_enabled = input.arrival_from_enabled !== undefined
                     ? !!input.arrival_from_enabled
@@ -573,6 +582,10 @@
             base.input.arrival_to_time = Helper.normalize_time_input_value(
                 base.input.arrival_to_time,
                 normalize_now_ms + 60 * 60 * 1000,
+            );
+            base.input.sigil_percent = Math.max(
+                0,
+                Math.min(50, Helper.to_int(base.input.sigil_percent)),
             );
 
             const templates = [];
@@ -665,6 +678,7 @@
             const group_id = Helper.get_id('group');
             const strategy_id = Helper.get_id('strategy');
             const max_pop_id = Helper.get_id('max_pop_per_village');
+            const sigil_id = Helper.get_id('sigil_percent');
             const arrival_from_enabled_id = Helper.get_id('is_arrival_from_enabled');
             const arrival_to_enabled_id = Helper.get_id('is_arrival_to_enabled');
             const arrival_from_date_id = Helper.get_id('arrival_from_date');
@@ -696,6 +710,10 @@
                     <div class="guard-field">
                         <label class="guard-label" for="${max_pop_id}">${i18n.LABELS.max_pop_per_village}</label>
                         <input id="${max_pop_id}" type="number" min="1" step="1">
+                    </div>
+                    <div class="guard-field">
+                        <label class="guard-label" for="${sigil_id}">${i18n.LABELS.sigil_percent}</label>
+                        <input id="${sigil_id}" type="number" min="0" max="50" step="1">
                     </div>
                 </div>
 
@@ -814,6 +832,7 @@
             const group = Helper.get_control('group');
             const strategy = Helper.get_control('strategy');
             const max_pop = Helper.get_control('max_pop_per_village');
+            const sigil = Helper.get_control('sigil_percent');
             const arrival_from_enabled = Helper.get_control('is_arrival_from_enabled');
             const arrival_to_enabled = Helper.get_control('is_arrival_to_enabled');
             const arrival_from_date = Helper.get_control('arrival_from_date');
@@ -826,6 +845,7 @@
             Guard.settings.input.group = group ? String(group.value || '-1') : '-1';
             Guard.settings.input.strategy = strategy ? String(strategy.value || 'DIST_ASC') : 'DIST_ASC';
             Guard.settings.input.max_pop_per_village = Math.max(1, Helper.to_int(max_pop ? max_pop.value : 0) || 1);
+            Guard.settings.input.sigil_percent = Math.max(0, Math.min(50, Helper.to_int(sigil ? sigil.value : 0)));
             Guard.settings.input.arrival_from_enabled = !!(arrival_from_enabled && arrival_from_enabled.checked);
             Guard.settings.input.arrival_to_enabled = !!(arrival_to_enabled && arrival_to_enabled.checked);
             Guard.settings.input.arrival_from_date = Helper.normalize_date_input_value(
@@ -856,6 +876,7 @@
             const targets = Helper.get_control('targets');
             const strategy = Helper.get_control('strategy');
             const max_pop = Helper.get_control('max_pop_per_village');
+            const sigil = Helper.get_control('sigil_percent');
             const arrival_from_enabled = Helper.get_control('is_arrival_from_enabled');
             const arrival_to_enabled = Helper.get_control('is_arrival_to_enabled');
             const arrival_from_date = Helper.get_control('arrival_from_date');
@@ -871,6 +892,9 @@
             }
             if (max_pop) {
                 max_pop.value = String(Math.max(1, Helper.to_int(Guard.settings.input.max_pop_per_village) || 1));
+            }
+            if (sigil) {
+                sigil.value = String(Math.max(0, Math.min(50, Helper.to_int(Guard.settings.input.sigil_percent) || 0)));
             }
             if (arrival_from_enabled) {
                 arrival_from_enabled.checked = !!Guard.settings.input.arrival_from_enabled;
@@ -1229,6 +1253,14 @@
         },
 
         pick_composition_for_village: function ({ village_state, distance, user_input, template_weights, now_ms }) {
+            const get_effective_speed_with_sigil = function (base_speed) {
+                const speed = Number(base_speed);
+                if (!Number.isFinite(speed) || speed <= 0) return null;
+                const sigil_percent = Math.max(0, Math.min(50, Helper.to_int(user_input && user_input.sigil_percent)));
+                if (!sigil_percent) return speed;
+                return speed / (1 + sigil_percent / 100);
+            };
+
             const population_cap = Math.min(
                 Math.max(1, Helper.to_int(user_input.max_pop_per_village)),
                 Math.max(0, Helper.to_int(village_state.remaining_population_budget)),
@@ -1296,8 +1328,12 @@
                 if (!Number.isFinite(slowest_speed)) {
                     return null;
                 }
+                const effective_slowest_speed = get_effective_speed_with_sigil(slowest_speed);
+                if (!Number.isFinite(effective_slowest_speed)) {
+                    return null;
+                }
 
-                const travel_ms = distance * slowest_speed * 60 * 1000;
+                const travel_ms = distance * effective_slowest_speed * 60 * 1000;
                 const arrival_ms = now_ms + travel_ms;
 
                 if (!Guard.is_arrival_in_window(arrival_ms, user_input)) {
@@ -1308,6 +1344,7 @@
                     units: composition,
                     population: selected_population,
                     slowest_speed,
+                    effective_slowest_speed,
                     travel_ms,
                     arrival_ms,
                 };
@@ -1322,7 +1359,9 @@
                 .map(unit_name => ({ unit: unit_name, speed: Guard.get_unit_speed(unit_name) }))
                 .filter(item => Number.isFinite(item.speed))
                 .filter(item => {
-                    const arrival_ms = now_ms + distance * item.speed * 60 * 1000;
+                    const effective_speed = get_effective_speed_with_sigil(item.speed);
+                    if (!Number.isFinite(effective_speed)) return false;
+                    const arrival_ms = now_ms + distance * effective_speed * 60 * 1000;
                     return Guard.is_arrival_in_window(arrival_ms, user_input);
                 })
                 .sort((lhs, rhs) => rhs.speed - lhs.speed);
@@ -1389,6 +1428,7 @@
 
             const targets_control = Helper.get_control('targets');
             const max_pop_control = Helper.get_control('max_pop_per_village');
+            const sigil_control = Helper.get_control('sigil_percent');
             const strategy_control = Helper.get_control('strategy');
             const group_control = Helper.get_control('group');
             const arrival_from_enabled_control = Helper.get_control('is_arrival_from_enabled');
@@ -1418,6 +1458,7 @@
                 group_id: String(group_control.value || '-1'),
                 strategy: String(strategy_control.value || 'DIST_ASC'),
                 max_pop_per_village: Math.max(1, Helper.to_int(max_pop_control.value) || 1),
+                sigil_percent: Math.max(0, Math.min(50, Helper.to_int(sigil_control ? sigil_control.value : 0))),
                 arrival_from_enabled: !!(arrival_from_enabled_control && arrival_from_enabled_control.checked),
                 arrival_to_enabled: !!(arrival_to_enabled_control && arrival_to_enabled_control.checked),
                 arrival_filter_enabled: false,
@@ -1969,7 +2010,7 @@
                 });
             });
 
-            ['targets', 'group', 'strategy', 'max_pop_per_village', 'arrival_from_date', 'arrival_from_time', 'arrival_to_date', 'arrival_to_time'].forEach(control_name => {
+            ['targets', 'group', 'strategy', 'max_pop_per_village', 'sigil_percent', 'arrival_from_date', 'arrival_from_time', 'arrival_to_date', 'arrival_to_time'].forEach(control_name => {
                 const control = Helper.get_control(control_name);
                 if (!control) return;
                 control.addEventListener('change', () => Guard.sync_settings_from_ui());
