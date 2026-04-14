@@ -2929,7 +2929,6 @@
             await Guard.get_world_info();
 
             Guard.apply_settings_to_ui();
-            Guard.autofill_targets_from_context_if_needed();
             Guard.render_template_controls();
 
             ['is_arrival_from_enabled', 'is_arrival_to_enabled', 'mode_full_deff', 'mode_all_units'].forEach(control_name => {
