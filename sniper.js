@@ -46,6 +46,8 @@ if (localStorage.getItem('typeTimer') === 'interval') {
         '<td>' +
         '<input type="text" id="depdate" value="' + normDt + '" onchange="supDepTime()" size="9" maxlength="10" style="margin-left:18px">' +
         '<input type="text" id="deptime" value="' + normTime + '" onchange="supDepTime()" size="12" maxlength="12" style="margin-left:8px">' +
+        '<a class="btn" href="#" onclick="pasteIntervalClipboard();return false;" style="margin-left:6px;">Из буфера</a>' +
+        '<span id="clipStatus" style="margin-left:6px;font-size:11px;"></span>' +
         '</td>' +
         '</tr>' +
         '<tr><td>Смещение:</td><td><input type="text" id="offset" value="' + offset + '" onchange="fixTime()" size="2" maxlength="5" style="margin-left:18px"><span style="margin-left:0.25em;">миллисек.</span></td></tr>' +
@@ -170,32 +172,97 @@ if (localStorage.getItem('typeTimer') === 'interval') {
         }
     }
 
-    function applyClipboardTimeIfAvailable() {
+    function setClipStatus(text, color) {
+        var statusEl = document.getElementById('clipStatus');
+        if (!statusEl) {
+            return;
+        }
+        statusEl.textContent = text || '';
+        statusEl.style.color = color || '#2e4e1f';
+    }
+
+    function parseClipboardTime(text) {
+        var m = (text || '').trim().match(/^([01]?\d|2[0-3]):([0-5]?\d):([0-5]?\d):(\d{1,3})$/);
+        if (!m) {
+            return null;
+        }
+
+        var hh = m[1].padStart(2, '0');
+        var mm = m[2].padStart(2, '0');
+        var ss = m[3].padStart(2, '0');
+        var ms = m[4].padStart(3, '0');
+        return hh + ':' + mm + ':' + ss + ':' + ms;
+    }
+
+    function applyParsedClipboardTime(text, showStatus) {
+        var val = parseClipboardTime(text);
+        if (!val) {
+            if (showStatus) {
+                setClipStatus('Формат не hh:mm:ss:ms', '#9a3c00');
+            }
+            return false;
+        }
+
+        $('#deptime').val(val);
+        window.supDepTime();
+        window.tCoSt();
+        if (showStatus) {
+            setClipStatus('Вставлено: ' + val, '#2e4e1f');
+        }
+        return true;
+    }
+
+    function tryReadClipboard(showStatus) {
         if (!navigator.clipboard || typeof navigator.clipboard.readText !== 'function' || !window.isSecureContext) {
+            if (showStatus) {
+                setClipStatus('Буфер недоступен, вставь Ctrl+V', '#9a3c00');
+            }
             return;
         }
 
         navigator.clipboard.readText().then(function (text) {
-            var m = (text || '').trim().match(/^([01]?\d|2[0-3]):([0-5]?\d):([0-5]?\d):(\d{1,3})$/);
-            if (!m) {
-                return;
-            }
-
-            var hh = m[1].padStart(2, '0');
-            var mm = m[2].padStart(2, '0');
-            var ss = m[3].padStart(2, '0');
-            var ms = m[4].padStart(3, '0');
-            var val = hh + ':' + mm + ':' + ss + ':' + ms;
-
-            $('#deptime').val(val);
-            window.supDepTime();
-            window.tCoSt();
+            applyParsedClipboardTime(text, showStatus);
         }).catch(function () {
-            // Clipboard may be blocked by browser permissions.
+            if (showStatus) {
+                setClipStatus('Нет доступа к буферу, нажми Ctrl+V', '#9a3c00');
+            }
         });
     }
 
-    applyClipboardTimeIfAvailable();
+    window.pasteIntervalClipboard = function () {
+        tryReadClipboard(true);
+    };
+
+    function setupPasteFallback() {
+        var deptimeInput = document.getElementById('deptime');
+        var attemptedGestureRead = false;
+
+        if (deptimeInput) {
+            deptimeInput.addEventListener('paste', function (event) {
+                var cd = event.clipboardData || window.clipboardData;
+                if (!cd) {
+                    return;
+                }
+                if (applyParsedClipboardTime(cd.getData('text'), true)) {
+                    event.preventDefault();
+                }
+            });
+        }
+
+        function readOnFirstGesture() {
+            if (attemptedGestureRead) {
+                return;
+            }
+            attemptedGestureRead = true;
+            tryReadClipboard(false);
+        }
+
+        document.addEventListener('pointerdown', readOnFirstGesture, { once: true, capture: true });
+        document.addEventListener('keydown', readOnFirstGesture, { once: true, capture: true });
+    }
+
+    setupPasteFallback();
+    tryReadClipboard(false);
     setInterval(window.tCoSt, 400);
     setInterval(runIntervalAutoStartCheck, 1000);
 } else {
