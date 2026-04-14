@@ -1027,6 +1027,17 @@
             return match ? Helper.clean_text(match[0]) : null;
         },
 
+        extract_coord_from_url_hash: function () {
+            const hash = Helper.clean_text(window.location.hash || '');
+            if (!hash) return null;
+            const match = hash.match(/(\d{1,3})\s*[;|]\s*(\d{1,3})/);
+            if (!match) return null;
+            const x = Number(match[1]);
+            const y = Number(match[2]);
+            if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+            return `${Math.trunc(x)}|${Math.trunc(y)}`;
+        },
+
         extract_coords_from_text_safe: function (raw_value) {
             const source = String(raw_value === null || raw_value === undefined ? '' : raw_value);
             const matches = source.match(/\d{1,3}\|\d{1,3}/g) || [];
@@ -1064,6 +1075,31 @@
             const params = new URLSearchParams(window.location.search);
             const raw_screen = Helper.clean_text((game_data && game_data.screen) || params.get('screen') || '');
             const screen = raw_screen.toLowerCase();
+
+            // 1) Highest priority: explicit coord in URL hash, e.g. #555;454
+            const hash_coord = Guard.extract_coord_from_url_hash();
+            if (hash_coord) {
+                return hash_coord;
+            }
+
+            // 2) Next priority: village id from URL (village=...)
+            const village_param_raw = Helper.clean_text(params.get('village') || '');
+            const village_param_id = village_param_raw.replace(/[^\d]/g, '');
+            if (village_param_id) {
+                if (
+                    game_data &&
+                    game_data.village &&
+                    Helper.clean_text(game_data.village.id || '') === village_param_id &&
+                    Number.isFinite(Number(game_data.village.x)) &&
+                    Number.isFinite(Number(game_data.village.y))
+                ) {
+                    return `${Math.trunc(Number(game_data.village.x))}|${Math.trunc(Number(game_data.village.y))}`;
+                }
+                const village_param_coord = Guard.extract_coord_by_village_id(village_param_id);
+                if (village_param_coord) {
+                    return village_param_coord;
+                }
+            }
 
             if (screen === 'place') {
                 const x_control = document.querySelector('#inputx');
