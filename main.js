@@ -2126,9 +2126,6 @@
       if (shouldPreferIncomingSigil) {
         return normalizeSigilPercent(incomingSigil);
       }
-      if (!(defaultSigil > 0)) {
-        return normalizeSigilPercent(incomingSigil);
-      }
     }
     return defaultSigil;
   };

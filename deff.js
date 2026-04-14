@@ -35,9 +35,16 @@
         UNITS: {
             spear: 'Копейщик',
             sword: 'Мечник',
+            axe: 'Топорщик',
             archer: 'Лучник',
             spy: 'Лазутчик',
+            light: 'Лёгкая кавалерия',
+            marcher: 'Конный лучник',
             heavy: 'Тяжёлая кавалерия',
+            ram: 'Таран',
+            catapult: 'Катапульта',
+            knight: 'Паладин',
+            snob: 'Дворянин',
         },
         LABELS: {
             targets: 'Список кор',
@@ -351,9 +358,16 @@
             safeguard: {
                 spear: 0,
                 sword: 0,
+                axe: 0,
                 archer: 0,
                 spy: 0,
+                light: 0,
+                marcher: 0,
                 heavy: 0,
+                ram: 0,
+                catapult: 0,
+                knight: 0,
+                snob: 0,
             },
             input: {
                 targets: '',
