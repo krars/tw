@@ -74,11 +74,16 @@
             save_settings: 'Сохранить',
             reset_settings: 'Сбросить',
             reserve: 'Резерв',
+            export: 'Экспорт',
+            import_title: 'Импорт TD',
+            import_found: 'Найдено настроек',
+            import_apply: 'Импортировать',
             template_name: 'Название шаблона',
             template_empty: 'В шаблоне должен быть хотя бы 1 юнит',
             no_templates: 'Нет шаблонов',
             plan_summary_empty: 'Сначала нажми «Рассчитать»',
             plan_summary_ready: 'Готово отправок: __1__ (целей: __2__)',
+            total_arriving: 'Итого успевает',
         },
     };
 
@@ -425,6 +430,7 @@
 .guard-root .guard-output-table th,.guard-root .guard-output-table td{border:1px solid #e2d5bd;padding:3px 4px;text-align:center;vertical-align:middle;font-size:11px}
 .guard-root .guard-output-table th{background:#f0e2c6}
 .guard-root .guard-output-table .guard-target-cell{font-weight:bold;background:#fff7e7}
+.guard-root .guard-output-table .guard-total-row td{font-weight:bold;background:#f6ecd7}
 .guard-root .guard-summary{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:0 6px 6px 6px;font-size:12px}
 .guard-root .guard-template-modal-overlay{position:fixed;inset:0;z-index:400000;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center}
 .guard-root .guard-template-modal{background:#f3ead5;border:2px solid #b08b4f;border-radius:10px;width:520px;max-width:95vw;max-height:92vh;overflow:auto;box-shadow:0 12px 30px rgba(0,0,0,.35)}
@@ -725,6 +731,7 @@
             const remove_template_id = Helper.get_id('remove_template');
             const generate_id = Helper.get_id('generate');
             const execute_all_id = Helper.get_id('execute_all');
+            const export_id = Helper.get_id('export');
             const settings_id = Helper.get_id('settings');
             const insert_current_target_id = Helper.get_id('insert_current_target');
             const mode_full_deff_id = Helper.get_id('mode_full_deff');
@@ -783,7 +790,8 @@
                 <div class="guard-actions">
                     <button id="${generate_id}" class="btn" type="button">${i18n.LABELS.generate}</button>
                     <button id="${execute_all_id}" class="btn" type="button" disabled>${i18n.LABELS.execute_all}</button>
-                    <img id="${settings_id}" src="${image_base}icons/settings.png" alt="settings" style="margin-left:auto;cursor:pointer;" title="Резерв">
+                    <button id="${export_id}" class="btn" type="button" style="margin-left:auto;">${i18n.LABELS.export}</button>
+                    <img id="${settings_id}" src="${image_base}icons/settings.png" alt="settings" style="cursor:pointer;" title="Резерв">
                 </div>
             `;
 
@@ -1416,6 +1424,294 @@
         unbind_external_arrival_picker: function () {
             const event_namespace = '.HermitowskiGuardArrivalPicker';
             jQuery(document).off(`click${event_namespace}`);
+        },
+
+        normalize_import_text: function (text) {
+            return String(text === null || text === undefined ? '' : text)
+                .replace(/\r/g, '')
+                .replace(/\u00a0/g, ' ')
+                .replace(/[ \t]+\n/g, '\n');
+        },
+
+        build_import_text_from_document: function (doc = document) {
+            try {
+                const body = doc && doc.body ? doc.body : null;
+                if (!body) return '';
+                const clone = body.cloneNode(true);
+                clone.querySelectorAll('script, style, noscript').forEach(el => el.remove());
+                clone.querySelectorAll('br').forEach(br => br.replaceWith(doc.createTextNode('\n')));
+                return Guard.normalize_import_text(clone.textContent || '');
+            } catch (ex) {
+                return '';
+            }
+        },
+
+        find_td_import_segments: function (text) {
+            const source = String(text === null || text === undefined ? '' : text);
+            const marker = '~~~~~~~TD~~~~~~~~';
+            const starts = [];
+            let position = source.indexOf(marker);
+            while (position !== -1) {
+                starts.push(position);
+                position = source.indexOf(marker, position + marker.length);
+            }
+            if (!starts.length) return [];
+
+            const segments = [];
+            for (let i = 0; i < starts.length; i++) {
+                const from = starts[i];
+                const to = i + 1 < starts.length ? starts[i + 1] : source.length;
+                const segment = source.slice(from, to);
+                if (/Коры\s*:/i.test(segment) || /Окно\s+прибытия/i.test(segment) || /Сигил/i.test(segment)) {
+                    segments.push(segment);
+                }
+            }
+            return segments;
+        },
+
+        extract_section_after_heading: function (text, heading_regex, stop_regex = /\n\s*~~~~~~~~~~~~~~~~/i) {
+            const source = String(text === null || text === undefined ? '' : text);
+            const match = source.match(heading_regex);
+            if (!match || match.index === undefined) return '';
+            const from = match.index + match[0].length;
+            const rest = source.slice(from);
+            if (!stop_regex) return rest;
+            const stop = rest.match(stop_regex);
+            if (!stop || stop.index === undefined) return rest;
+            return rest.slice(0, stop.index);
+        },
+
+        parse_td_import_segment: function (segment_text) {
+            const segment = String(segment_text === null || segment_text === undefined ? '' : segment_text);
+            if (!segment) return null;
+
+            const title_match = segment.match(/\[spoiler=([^\]]+)\]/i) || segment.match(/^\s*\(([^)\n]+)\)\s*$/m);
+            const title = Helper.clean_text(title_match ? title_match[1] : '') || 'TD';
+
+            const coords_section = Guard.extract_section_after_heading(segment, /Коры\s*:\s*/i);
+            const coords = Guard.extract_coords_from_text_safe(coords_section);
+
+            const sigil_section = Guard.extract_section_after_heading(segment, /Сигил\s*:?\s*/i);
+            const sigil_match = sigil_section.match(/(?:^|\n)\s*(\d{1,2})\s*(?:\n|$)/);
+            const sigil_percent = Math.max(0, Math.min(50, Helper.to_int(sigil_match ? sigil_match[1] : 0)));
+
+            const window_section = Guard.extract_section_after_heading(
+                segment,
+                /(?:Окно\s+прибытия|Временн(?:ое|ые)\s+окно)\s*:?\s*/i
+            );
+
+            const parse_slot = function (caption_regex) {
+                const slot_match = window_section.match(caption_regex);
+                if (!slot_match) {
+                    return {
+                        enabled: false,
+                        date: Helper.format_date_ymd(Date.now()),
+                        time: Helper.format_hms(Date.now()),
+                    };
+                }
+                const sign = Helper.clean_text(slot_match[1] || '');
+                const raw_datetime = Helper.clean_text(slot_match[2] || '');
+                const parsed_ms = Guard.parse_arrival_from_text(raw_datetime);
+                const safe_ms = Number.isFinite(parsed_ms) ? parsed_ms : Date.now();
+                return {
+                    enabled: sign === '+' || (!sign && !!raw_datetime),
+                    date: Helper.format_date_ymd(safe_ms),
+                    time: Helper.normalize_time_input_value(Helper.format_hms(safe_ms), safe_ms),
+                };
+            };
+
+            const from_slot = parse_slot(/От\s*:\s*([+-])?\s*([^\n\r]+)/i);
+            const to_slot = parse_slot(/До\s*:\s*([+-])?\s*([^\n\r]+)/i);
+
+            if (!coords.length && !from_slot.enabled && !to_slot.enabled && !sigil_percent) {
+                return null;
+            }
+
+            return {
+                title,
+                coords,
+                sigil_percent,
+                arrival_from_enabled: !!from_slot.enabled,
+                arrival_from_date: from_slot.date,
+                arrival_from_time: from_slot.time,
+                arrival_to_enabled: !!to_slot.enabled,
+                arrival_to_date: to_slot.date,
+                arrival_to_time: to_slot.time,
+            };
+        },
+
+        parse_td_import_payloads: function (text) {
+            const segments = Guard.find_td_import_segments(text);
+            const payloads = [];
+            segments.forEach((segment, index) => {
+                const payload = Guard.parse_td_import_segment(segment);
+                if (!payload) return;
+                payload._sourceIndex = index;
+                payload._sourceTitle = Helper.clean_text(payload.title) || `TD ${index + 1}`;
+                payloads.push(payload);
+            });
+            return payloads;
+        },
+
+        parse_td_import_payloads_from_page: function () {
+            const text = Guard.build_import_text_from_document(document);
+            if (!text) return [];
+            return Guard.parse_td_import_payloads(text);
+        },
+
+        is_forum_or_mail_page: function () {
+            const params = new URLSearchParams(window.location.search);
+            const screen = Helper.clean_text((game_data && game_data.screen) || params.get('screen') || '').toLowerCase();
+            const mode = Helper.clean_text((game_data && game_data.mode) || params.get('mode') || '').toLowerCase();
+            return (
+                (screen === 'ally' && mode === 'forum') ||
+                screen === 'mail' ||
+                screen === 'forum'
+            );
+        },
+
+        apply_import_payload: function (payload) {
+            if (!payload || typeof payload !== 'object') return false;
+
+            const targets = Helper.get_control('targets');
+            const sigil = Helper.get_control('sigil_percent');
+            const from_enabled = Helper.get_control('is_arrival_from_enabled');
+            const from_date = Helper.get_control('arrival_from_date');
+            const from_time = Helper.get_control('arrival_from_time');
+            const to_enabled = Helper.get_control('is_arrival_to_enabled');
+            const to_date = Helper.get_control('arrival_to_date');
+            const to_time = Helper.get_control('arrival_to_time');
+
+            if (targets && Array.isArray(payload.coords)) {
+                targets.value = payload.coords.map(c => Helper.clean_text(c)).filter(Boolean).join('\n');
+            }
+            if (sigil) {
+                sigil.value = String(Math.max(0, Math.min(50, Helper.to_int(payload.sigil_percent))));
+            }
+            if (from_enabled) from_enabled.checked = !!payload.arrival_from_enabled;
+            if (from_date) from_date.value = Helper.normalize_date_input_value(payload.arrival_from_date, Date.now());
+            if (from_time) from_time.value = Helper.normalize_time_input_value(payload.arrival_from_time, Date.now());
+
+            if (to_enabled) to_enabled.checked = !!payload.arrival_to_enabled;
+            if (to_date) to_date.value = Helper.normalize_date_input_value(payload.arrival_to_date, Date.now() + 60 * 60 * 1000);
+            if (to_time) to_time.value = Helper.normalize_time_input_value(payload.arrival_to_time, Date.now() + 60 * 60 * 1000);
+
+            Guard.toggle_window_controls();
+            Guard.sync_settings_from_ui();
+            Guard.arrival_pick_next_slot = 'from';
+            return true;
+        },
+
+        show_import_window: function (payloads) {
+            const list = Array.isArray(payloads) ? payloads.filter(Boolean) : [];
+            if (!list.length) return;
+
+            const dialog_id = Helper.get_id('td_import_window');
+            let html = `<div><p><strong>${i18n.LABELS.import_found}: ${list.length}</strong></p><table class="vis"><tr><th>#</th><th>${i18n.LABELS.targets}</th><th>${i18n.LABELS.sigil_percent}</th><th>${i18n.LABELS.command}</th></tr>`;
+            list.forEach((payload, index) => {
+                const title = Helper.escape_html(Helper.clean_text(payload._sourceTitle) || `TD ${index + 1}`);
+                const coords_count = Array.isArray(payload.coords) ? payload.coords.length : 0;
+                const sigil = Math.max(0, Math.min(50, Helper.to_int(payload.sigil_percent)));
+                const btn_id = Helper.get_id(`td_import_apply.${index}`);
+                html += `<tr><td>${index + 1}</td><td>${title} (${coords_count})</td><td>${sigil}</td><td><button id="${btn_id}" class="btn" type="button">${i18n.LABELS.import_apply}</button></td></tr>`;
+            });
+            html += '</table></div>';
+            Dialog.show(dialog_id, html);
+
+            setTimeout(() => {
+                list.forEach((payload, index) => {
+                    const button = Helper.get_control(`td_import_apply.${index}`);
+                    if (!button) return;
+                    button.addEventListener('click', () => {
+                        const applied = Guard.apply_import_payload(payload);
+                        if (applied) {
+                            UI.SuccessMessage(`Импортировано: ${Helper.clean_text(payload._sourceTitle) || 'TD'}`);
+                            const close_btn = document.querySelector('.popup_box_close');
+                            if (close_btn) close_btn.click();
+                        }
+                    });
+                });
+            });
+        },
+
+        copy_text_to_clipboard: async function (text) {
+            const value = String(text === null || text === undefined ? '' : text);
+            if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+                await navigator.clipboard.writeText(value);
+                return;
+            }
+            const ta = document.createElement('textarea');
+            ta.value = value;
+            ta.setAttribute('readonly', 'readonly');
+            ta.style.position = 'fixed';
+            ta.style.left = '-9999px';
+            ta.style.top = '-9999px';
+            document.body.appendChild(ta);
+            ta.select();
+            const copied = document.execCommand('copy');
+            ta.remove();
+            if (!copied) throw new Error('copy failed');
+        },
+
+        show_export_fallback_window: function (text) {
+            const dialog_id = Helper.get_id('td_export_fallback');
+            const textarea_id = Helper.get_id('td_export_fallback_text');
+            const html = `<div><p>Автокопирование не удалось, скопируй текст вручную:</p><textarea id="${textarea_id}" rows="16" style="width:100%;box-sizing:border-box;font:12px/1.35 monospace;">${Helper.escape_html(String(text || ''))}</textarea></div>`;
+            Dialog.show(dialog_id, html);
+            setTimeout(() => {
+                const ta = Helper.get_control('td_export_fallback_text');
+                if (!ta) return;
+                ta.focus();
+                ta.select();
+            });
+        },
+
+        build_export_text: function () {
+            Guard.sync_settings_from_ui();
+            const input = Guard.settings.input || {};
+            const coords = Guard.extract_coords_from_text_safe(input.targets || '');
+            const coords_lines = coords.length ? coords.join('\n') : '-';
+
+            const from_date = Helper.normalize_date_input_value(input.arrival_from_date, Date.now());
+            const from_time = Helper.normalize_time_input_value(input.arrival_from_time, Date.now());
+            const to_date = Helper.normalize_date_input_value(input.arrival_to_date, Date.now() + 60 * 60 * 1000);
+            const to_time = Helper.normalize_time_input_value(input.arrival_to_time, Date.now() + 60 * 60 * 1000);
+            const from_sign = input.arrival_from_enabled ? '+' : '-';
+            const to_sign = input.arrival_to_enabled ? '+' : '-';
+            const sigil = String(Math.max(0, Math.min(50, Helper.to_int(input.sigil_percent))));
+
+            return [
+                '[spoiler=TD]',
+                '~~~~~~~TD~~~~~~~~',
+                '(TD)',
+                '',
+                'Коры:',
+                '[code]',
+                coords_lines,
+                '[/code]',
+                '',
+                '~~~~~~~~~~~~~~~~',
+                'Окно прибытия',
+                `От: ${from_sign} ${from_date} ${from_time}`,
+                `До: ${to_sign} ${to_date} ${to_time}`,
+                '',
+                '~~~~~~~~~~~~~~~~',
+                'Сигил',
+                sigil,
+                '',
+                '~~~~~~~~~~~~~~~~',
+                '[/spoiler]',
+            ].join('\n');
+        },
+
+        export_to_clipboard: async function () {
+            const payload = Guard.build_export_text();
+            try {
+                await Guard.copy_text_to_clipboard(payload);
+                UI.SuccessMessage('Экспорт TD скопирован в буфер');
+            } catch (ex) {
+                Guard.show_export_fallback_window(payload);
+            }
         },
 
         render_template_controls: function () {
@@ -2143,6 +2439,11 @@
             if (!output) return;
 
             let total_commands = 0;
+            let total_population = 0;
+            const totals_by_unit = {};
+            for (const unit_name of Guard.deff_units) {
+                totals_by_unit[unit_name] = 0;
+            }
             Guard.generated_plan.forEach(target_plan => {
                 total_commands += target_plan.commands.length;
             });
@@ -2188,11 +2489,13 @@
                     const pop_cell = document.createElement('td');
                     pop_cell.textContent = String(command.population);
                     row.append(pop_cell);
+                    total_population += Math.max(0, Helper.to_int(command.population));
 
                     for (const unit_name of Guard.deff_units) {
                         const unit_cell = document.createElement('td');
                         const count = Math.max(0, Helper.to_int(command.units[unit_name]));
                         unit_cell.textContent = String(count);
+                        totals_by_unit[unit_name] = Math.max(0, Helper.to_int(totals_by_unit[unit_name])) + count;
                         if (!count) {
                             unit_cell.classList.add('hidden');
                         }
@@ -2215,6 +2518,30 @@
                     output.append(row);
                 }
             });
+
+            const total_row = document.createElement('tr');
+            total_row.classList.add('guard-total-row');
+
+            const total_label = document.createElement('td');
+            total_label.colSpan = 4;
+            total_label.textContent = i18n.LABELS.total_arriving;
+            total_row.append(total_label);
+
+            const total_pop_cell = document.createElement('td');
+            total_pop_cell.textContent = String(total_population);
+            total_row.append(total_pop_cell);
+
+            for (const unit_name of Guard.deff_units) {
+                const td = document.createElement('td');
+                td.textContent = String(Math.max(0, Helper.to_int(totals_by_unit[unit_name])));
+                total_row.append(td);
+            }
+
+            const total_commands_cell = document.createElement('td');
+            total_commands_cell.textContent = String(total_commands);
+            total_row.append(total_commands_cell);
+
+            output.append(total_row);
 
             Guard.set_summary(
                 i18n.LABELS.plan_summary_ready
@@ -2648,6 +2975,10 @@
                 Guard.set_targets_to_current_coord({ force: true, silent: false });
             });
 
+            Helper.get_control('export').addEventListener('click', async () => {
+                await Guard.export_to_clipboard();
+            });
+
             Helper.get_control('create_template').addEventListener('click', () => {
                 Guard.show_template_modal(null);
             });
@@ -2698,6 +3029,13 @@
 
             Guard.set_summary(i18n.LABELS.plan_summary_empty);
             Guard.update_execute_all_state();
+
+            if (Guard.is_forum_or_mail_page()) {
+                const import_payloads = Guard.parse_td_import_payloads_from_page();
+                if (import_payloads.length) {
+                    Guard.show_import_window(import_payloads);
+                }
+            }
         },
 
         main: async function () {
