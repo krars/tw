@@ -48,6 +48,7 @@
         },
         LABELS: {
             targets: 'Список кор',
+            insert_current_target: 'Вставить коры текущей',
             group: 'Группа',
             strategy: 'Стратегия',
             max_pop_per_village: 'Макс. население с деревни (всего)',
@@ -55,6 +56,8 @@
             arrival_window: 'Окно прибытия (дата+время)',
             arrival_from: 'Прибытие от',
             arrival_to: 'Прибытие до',
+            mode_full_deff: 'ВЕСЬ ДЕФФ',
+            mode_all_units: 'ВООБЩЕ ВСЕ',
             squad: 'Отряд (шаблон)',
             create_template: 'Создать шаблон',
             edit_template: 'Редактировать',
@@ -381,6 +384,8 @@
                 arrival_from_time: '',
                 arrival_to_date: '',
                 arrival_to_time: '',
+                mode_full_deff: false,
+                mode_all_units: false,
             },
             templates: [],
             active_template_id: null,
@@ -390,6 +395,7 @@
         world_info: null,
         generated_plan: [],
         last_group_id: null,
+        arrival_pick_next_slot: 'from',
 
         inject_styles: function () {
             const style_id = `${namespace}.styles`;
@@ -399,12 +405,15 @@
             style.textContent = `
 .guard-root .guard-main-panel{padding:8px}
 .guard-root .guard-label{display:block;font-weight:bold;margin:4px 0}
+.guard-root .guard-targets-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.guard-root .guard-targets-insert{margin:0}
 .guard-root .guard-targets{width:100%;box-sizing:border-box;min-height:86px;resize:vertical;font:12px/1.35 monospace}
 .guard-root .guard-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;margin-top:8px}
 .guard-root .guard-field input,.guard-root .guard-field select{width:100%;box-sizing:border-box}
 .guard-root .guard-window{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px}
 .guard-root .guard-window input[type="date"]{min-width:145px}
 .guard-root .guard-window input[type="time"]{min-width:105px}
+.guard-root .guard-mode-window{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-top:8px}
 .guard-root .guard-template-block{margin-top:10px;border:1px solid #c2a97d;background:#f7f0df;padding:8px;border-radius:4px}
 .guard-root .guard-template-toolbar{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:6px}
 .guard-root .guard-template-select{flex:1;min-width:220px}
@@ -578,6 +587,11 @@
                 base.input.arrival_from_time = from_parts.time;
                 base.input.arrival_to_date = to_parts.date;
                 base.input.arrival_to_time = to_parts.time;
+                base.input.mode_full_deff = !!input.mode_full_deff;
+                base.input.mode_all_units = !!input.mode_all_units;
+                if (base.input.mode_full_deff && base.input.mode_all_units) {
+                    base.input.mode_all_units = false;
+                }
             }
 
             const normalize_now_ms = Date.now();
@@ -601,6 +615,11 @@
                 0,
                 Math.min(50, Helper.to_int(base.input.sigil_percent)),
             );
+            base.input.mode_full_deff = !!base.input.mode_full_deff;
+            base.input.mode_all_units = !!base.input.mode_all_units;
+            if (base.input.mode_full_deff && base.input.mode_all_units) {
+                base.input.mode_all_units = false;
+            }
 
             const templates = [];
             if (Array.isArray(stored.templates)) {
@@ -707,9 +726,15 @@
             const generate_id = Helper.get_id('generate');
             const execute_all_id = Helper.get_id('execute_all');
             const settings_id = Helper.get_id('settings');
+            const insert_current_target_id = Helper.get_id('insert_current_target');
+            const mode_full_deff_id = Helper.get_id('mode_full_deff');
+            const mode_all_units_id = Helper.get_id('mode_all_units');
 
             panel.innerHTML = `
-                <label class="guard-label" for="${targets_id}">${i18n.LABELS.targets}</label>
+                <div class="guard-targets-head">
+                    <label class="guard-label" for="${targets_id}">${i18n.LABELS.targets}</label>
+                    <button id="${insert_current_target_id}" class="btn guard-targets-insert" type="button">${i18n.LABELS.insert_current_target}</button>
+                </div>
                 <textarea id="${targets_id}" class="guard-targets" rows="5" placeholder="444|555\n445|556"></textarea>
 
                 <div class="guard-grid">
@@ -738,6 +763,10 @@
                     <label><input id="${arrival_to_enabled_id}" type="checkbox"> ${i18n.LABELS.arrival_to}</label>
                     <input id="${arrival_to_date_id}" type="date">
                     <input id="${arrival_to_time_id}" type="time" step="1">
+                </div>
+                <div class="guard-mode-window">
+                    <label><input id="${mode_full_deff_id}" type="checkbox"> ${i18n.LABELS.mode_full_deff}</label>
+                    <label><input id="${mode_all_units_id}" type="checkbox"> ${i18n.LABELS.mode_all_units}</label>
                 </div>
 
                 <div class="guard-template-block">
@@ -853,6 +882,8 @@
             const arrival_from_time = Helper.get_control('arrival_from_time');
             const arrival_to_date = Helper.get_control('arrival_to_date');
             const arrival_to_time = Helper.get_control('arrival_to_time');
+            const mode_full_deff = Helper.get_control('mode_full_deff');
+            const mode_all_units = Helper.get_control('mode_all_units');
             const template_select = Helper.get_control('template');
 
             Guard.settings.input.targets = targets ? String(targets.value || '') : '';
@@ -878,6 +909,12 @@
                 arrival_to_time ? arrival_to_time.value : '',
                 Date.now() + 60 * 60 * 1000,
             );
+            Guard.settings.input.mode_full_deff = !!(mode_full_deff && mode_full_deff.checked);
+            Guard.settings.input.mode_all_units = !!(mode_all_units && mode_all_units.checked);
+            if (Guard.settings.input.mode_full_deff && Guard.settings.input.mode_all_units) {
+                Guard.settings.input.mode_all_units = false;
+                if (mode_all_units) mode_all_units.checked = false;
+            }
 
             if (template_select) {
                 Guard.settings.active_template_id = Helper.clean_text(template_select.value) || Guard.settings.active_template_id;
@@ -897,6 +934,8 @@
             const arrival_from_time = Helper.get_control('arrival_from_time');
             const arrival_to_date = Helper.get_control('arrival_to_date');
             const arrival_to_time = Helper.get_control('arrival_to_time');
+            const mode_full_deff = Helper.get_control('mode_full_deff');
+            const mode_all_units = Helper.get_control('mode_all_units');
 
             if (targets) {
                 targets.value = Guard.settings.input.targets || '';
@@ -940,6 +979,16 @@
                     Date.now() + 60 * 60 * 1000,
                 );
             }
+            if (mode_full_deff) {
+                mode_full_deff.checked = !!Guard.settings.input.mode_full_deff;
+            }
+            if (mode_all_units) {
+                mode_all_units.checked = !!Guard.settings.input.mode_all_units;
+            }
+            if (mode_full_deff && mode_all_units && mode_full_deff.checked && mode_all_units.checked) {
+                mode_all_units.checked = false;
+                Guard.settings.input.mode_all_units = false;
+            }
             Guard.toggle_window_controls();
         },
 
@@ -950,10 +999,387 @@
             const arrival_from_time = Helper.get_control('arrival_from_time');
             const arrival_to_date = Helper.get_control('arrival_to_date');
             const arrival_to_time = Helper.get_control('arrival_to_time');
+            const mode_full_deff = Helper.get_control('mode_full_deff');
+            const mode_all_units = Helper.get_control('mode_all_units');
+            const max_pop = Helper.get_control('max_pop_per_village');
             if (arrival_from_date) arrival_from_date.disabled = !arrival_from_enabled;
             if (arrival_from_time) arrival_from_time.disabled = !arrival_from_enabled;
             if (arrival_to_date) arrival_to_date.disabled = !arrival_to_enabled;
             if (arrival_to_time) arrival_to_time.disabled = !arrival_to_enabled;
+            const special_mode = !!(
+                (mode_full_deff && mode_full_deff.checked) ||
+                (mode_all_units && mode_all_units.checked)
+            );
+            if (max_pop) {
+                max_pop.disabled = special_mode;
+                max_pop.title = special_mode
+                    ? 'Игнорируется в режиме ВЕСЬ ДЕФФ / ВООБЩЕ ВСЕ'
+                    : '';
+            }
+            if (!(arrival_from_enabled && arrival_to_enabled)) {
+                Guard.arrival_pick_next_slot = 'from';
+            }
+        },
+
+        extract_coord_from_text: function (raw_value) {
+            const source = String(raw_value === null || raw_value === undefined ? '' : raw_value);
+            const match = source.match(/\d{1,3}\|\d{1,3}/);
+            return match ? Helper.clean_text(match[0]) : null;
+        },
+
+        extract_coords_from_text_safe: function (raw_value) {
+            const source = String(raw_value === null || raw_value === undefined ? '' : raw_value);
+            const matches = source.match(/\d{1,3}\|\d{1,3}/g) || [];
+            const seen = new Set();
+            const coords = [];
+            for (const match of matches) {
+                const coord = Helper.clean_text(match);
+                if (!coord || seen.has(coord)) continue;
+                seen.add(coord);
+                coords.push(coord);
+            }
+            return coords;
+        },
+
+        extract_coord_by_village_id: function (village_id) {
+            const id = Helper.clean_text(village_id).replace(/[^\d]/g, '');
+            if (!id) return null;
+
+            const anchor_by_data = document.querySelector(`.village_anchor[data-id="${id}"] a, .village_anchor[data-id="${id}"]`);
+            if (anchor_by_data) {
+                const coord = Guard.extract_coord_from_text(anchor_by_data.textContent);
+                if (coord) return coord;
+            }
+
+            const anchors = Array.from(document.querySelectorAll(`a[href*="screen=info_village"][href*="id=${id}"]`));
+            for (const anchor of anchors) {
+                const coord = Guard.extract_coord_from_text(anchor.textContent);
+                if (coord) return coord;
+            }
+
+            return null;
+        },
+
+        get_current_page_coord: function () {
+            const params = new URLSearchParams(window.location.search);
+            const raw_screen = Helper.clean_text((game_data && game_data.screen) || params.get('screen') || '');
+            const screen = raw_screen.toLowerCase();
+
+            if (screen === 'place') {
+                const x_control = document.querySelector('#inputx');
+                const y_control = document.querySelector('#inputy');
+                const x_raw = Helper.clean_text(x_control ? x_control.value : '');
+                const y_raw = Helper.clean_text(y_control ? y_control.value : '');
+                const x = Number(x_raw);
+                const y = Number(y_raw);
+                if (x_raw !== '' && y_raw !== '' && Number.isFinite(x) && Number.isFinite(y)) {
+                    return `${Math.trunc(x)}|${Math.trunc(y)}`;
+                }
+
+                const target_id = Helper.clean_text(params.get('target') || '');
+                const target_coord = Guard.extract_coord_by_village_id(target_id);
+                if (target_coord) return target_coord;
+
+                if (
+                    game_data &&
+                    game_data.village &&
+                    Number.isFinite(Number(game_data.village.x)) &&
+                    Number.isFinite(Number(game_data.village.y))
+                ) {
+                    return `${Math.trunc(Number(game_data.village.x))}|${Math.trunc(Number(game_data.village.y))}`;
+                }
+
+                const menu_coord = Guard.extract_coord_from_text(
+                    (document.querySelector('#menu_row2 b') || {}).textContent || ''
+                );
+                if (menu_coord) return menu_coord;
+
+                return null;
+            }
+
+            if (screen === 'info_village') {
+                const info_village_id = Helper.clean_text(params.get('id') || '');
+                const info_coord = Guard.extract_coord_by_village_id(info_village_id);
+                if (info_coord) return info_coord;
+                return null;
+            }
+
+            return null;
+        },
+
+        set_targets_to_current_coord: function ({ force = false, silent = false } = {}) {
+            const targets_control = Helper.get_control('targets');
+            if (!targets_control) return false;
+
+            const current_coord = Guard.get_current_page_coord();
+            if (!current_coord) {
+                if (!silent) {
+                    UI.ErrorMessage('Не удалось определить текущую кору на этой странице');
+                }
+                return false;
+            }
+
+            const existing_coords = Guard.extract_coords_from_text_safe(targets_control.value);
+            if (!force && existing_coords.length > 1) {
+                return false;
+            }
+
+            if (!force && existing_coords.length === 1 && existing_coords[0] === current_coord) {
+                return false;
+            }
+
+            targets_control.value = current_coord;
+            Guard.sync_settings_from_ui();
+            if (!silent) {
+                UI.SuccessMessage(`Подставлена кора: ${current_coord}`);
+            }
+            return true;
+        },
+
+        autofill_targets_from_context_if_needed: function () {
+            const targets_control = Helper.get_control('targets');
+            if (!targets_control) return;
+            const existing_coords = Guard.extract_coords_from_text_safe(targets_control.value);
+            if (existing_coords.length <= 1) {
+                Guard.set_targets_to_current_coord({ force: true, silent: true });
+            }
+        },
+
+        parse_arrival_from_text: function (raw_text) {
+            const source = Helper.clean_text(String(raw_text === null || raw_text === undefined ? '' : raw_text))
+                .replace(/\s+/g, ' ');
+            if (!source) return null;
+
+            const now = new Date();
+            const build_datetime = function ({ year, month, day, hour, minute, second = 0, millisecond = 0, can_roll_year = false }) {
+                const y = Number(year);
+                const m = Number(month);
+                const d = Number(day);
+                const hh = Number(hour);
+                const mm = Number(minute);
+                const ss = Number(second);
+                const ms = Number(millisecond);
+                if (
+                    !Number.isFinite(y) ||
+                    !Number.isFinite(m) ||
+                    !Number.isFinite(d) ||
+                    !Number.isFinite(hh) ||
+                    !Number.isFinite(mm) ||
+                    !Number.isFinite(ss) ||
+                    !Number.isFinite(ms)
+                ) {
+                    return null;
+                }
+                if (
+                    m < 1 || m > 12 ||
+                    d < 1 || d > 31 ||
+                    hh < 0 || hh > 23 ||
+                    mm < 0 || mm > 59 ||
+                    ss < 0 || ss > 59 ||
+                    ms < 0 || ms > 999
+                ) {
+                    return null;
+                }
+
+                const parsed = new Date(y, m - 1, d, hh, mm, ss, ms);
+                if (
+                    parsed.getFullYear() !== y ||
+                    parsed.getMonth() !== m - 1 ||
+                    parsed.getDate() !== d ||
+                    parsed.getHours() !== hh ||
+                    parsed.getMinutes() !== mm ||
+                    parsed.getSeconds() !== ss
+                ) {
+                    return null;
+                }
+
+                if (can_roll_year && parsed.getTime() < now.getTime() - 12 * 60 * 60 * 1000) {
+                    const rolled = new Date(y + 1, m - 1, d, hh, mm, ss, ms);
+                    if (
+                        rolled.getFullYear() === y + 1 &&
+                        rolled.getMonth() === m - 1 &&
+                        rolled.getDate() === d
+                    ) {
+                        return rolled.getTime();
+                    }
+                }
+
+                return parsed.getTime();
+            };
+
+            const take_last_match = function (regex) {
+                let last = null;
+                let match = null;
+                regex.lastIndex = 0;
+                while ((match = regex.exec(source)) !== null) {
+                    last = match;
+                }
+                return last;
+            };
+
+            const date_match = take_last_match(/(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?\.?\s*(?:в\s+)?(\d{1,2}):(\d{2})(?::(\d{2}))?(?:[.:](\d{1,3}))?/gi);
+            if (date_match) {
+                let year = Number(now.getFullYear());
+                const explicit_year = Helper.clean_text(date_match[3] || '');
+                if (explicit_year) {
+                    year = Number(explicit_year.length === 2 ? `20${explicit_year}` : explicit_year);
+                }
+                const parsed = build_datetime({
+                    year,
+                    month: date_match[2],
+                    day: date_match[1],
+                    hour: date_match[4],
+                    minute: date_match[5],
+                    second: date_match[6] || 0,
+                    millisecond: date_match[7] || 0,
+                    can_roll_year: !explicit_year,
+                });
+                if (Number.isFinite(parsed)) return parsed;
+            }
+
+            const relative_match = take_last_match(/(сегодня|today|завтра|tomorrow)\s*(?:в\s+)?(\d{1,2}):(\d{2})(?::(\d{2}))?(?:[.:](\d{1,3}))?/gi);
+            if (relative_match) {
+                const token = String(relative_match[1] || '').toLowerCase();
+                const shift_days = token === 'завтра' || token === 'tomorrow' ? 1 : 0;
+                const basis = new Date(
+                    now.getFullYear(),
+                    now.getMonth(),
+                    now.getDate() + shift_days,
+                    0,
+                    0,
+                    0,
+                    0,
+                );
+                const parsed = build_datetime({
+                    year: basis.getFullYear(),
+                    month: basis.getMonth() + 1,
+                    day: basis.getDate(),
+                    hour: relative_match[2],
+                    minute: relative_match[3],
+                    second: relative_match[4] || 0,
+                    millisecond: relative_match[5] || 0,
+                });
+                if (Number.isFinite(parsed)) return parsed;
+            }
+
+            const time_match = take_last_match(/(?:^|\s)(\d{1,2}):(\d{2})(?::(\d{2}))?(?:[.:](\d{1,3}))?(?!\d)/g);
+            if (time_match) {
+                const parsed = build_datetime({
+                    year: now.getFullYear(),
+                    month: now.getMonth() + 1,
+                    day: now.getDate(),
+                    hour: time_match[1],
+                    minute: time_match[2],
+                    second: time_match[3] || 0,
+                    millisecond: time_match[4] || 0,
+                });
+                if (Number.isFinite(parsed)) return parsed;
+            }
+
+            return null;
+        },
+
+        get_arrival_text_from_click_target: function (target) {
+            if (!target) return null;
+
+            const copy_node = target.closest('[data-copy-time]');
+            if (copy_node) {
+                const copied = Helper.clean_text(copy_node.getAttribute('data-copy-time') || '');
+                if (copied) return copied;
+            }
+
+            const command_row = target.closest('tr.command-row');
+            if (command_row && command_row.cells && command_row.cells.length > 1) {
+                const text = Helper.clean_text(command_row.cells[1].textContent || '');
+                if (text) return text;
+            }
+
+            const td = target.closest('td');
+            if (td) {
+                const text = Helper.clean_text(td.textContent || '');
+                if (text) return text;
+            }
+
+            const raw = Helper.clean_text(target.textContent || '');
+            return raw || null;
+        },
+
+        apply_arrival_from_click: function (arrival_ms) {
+            if (!Number.isFinite(arrival_ms)) return null;
+
+            const from_enabled = !!(Helper.get_control('is_arrival_from_enabled') || {}).checked;
+            const to_enabled = !!(Helper.get_control('is_arrival_to_enabled') || {}).checked;
+            if (!from_enabled && !to_enabled) {
+                return null;
+            }
+
+            let slot = null;
+            if (from_enabled && to_enabled) {
+                slot = Guard.arrival_pick_next_slot === 'to' ? 'to' : 'from';
+                Guard.arrival_pick_next_slot = slot === 'from' ? 'to' : 'from';
+            } else if (from_enabled) {
+                slot = 'from';
+                Guard.arrival_pick_next_slot = 'to';
+            } else {
+                slot = 'to';
+                Guard.arrival_pick_next_slot = 'from';
+            }
+
+            const date_value = Helper.format_date_ymd(arrival_ms);
+            const time_value = Helper.format_hms(arrival_ms);
+            if (slot === 'from') {
+                const date_control = Helper.get_control('arrival_from_date');
+                const time_control = Helper.get_control('arrival_from_time');
+                if (date_control) date_control.value = date_value;
+                if (time_control) time_control.value = time_value;
+            } else if (slot === 'to') {
+                const date_control = Helper.get_control('arrival_to_date');
+                const time_control = Helper.get_control('arrival_to_time');
+                if (date_control) date_control.value = date_value;
+                if (time_control) time_control.value = time_value;
+            }
+
+            Guard.sync_settings_from_ui();
+            return slot;
+        },
+
+        bind_external_arrival_picker: function () {
+            const event_namespace = '.HermitowskiGuardArrivalPicker';
+            jQuery(document).off(`click${event_namespace}`);
+            jQuery(document).on(`click${event_namespace}`, event => {
+                const root = Helper.get_control();
+                if (!root) return;
+                const target = event.target && event.target.nodeType === 1
+                    ? event.target
+                    : event.target && event.target.parentElement
+                        ? event.target.parentElement
+                        : null;
+                if (!target) return;
+                if (root.contains(target)) return;
+
+                const from_enabled = !!(Helper.get_control('is_arrival_from_enabled') || {}).checked;
+                const to_enabled = !!(Helper.get_control('is_arrival_to_enabled') || {}).checked;
+                if (!from_enabled && !to_enabled) return;
+
+                const clicked_text = Guard.get_arrival_text_from_click_target(target);
+                const from_copy_attr = !!target.closest('[data-copy-time]');
+                if (!from_copy_attr && !/(сегодня|завтра|today|tomorrow|\d{1,2}\.\d{1,2})/i.test(String(clicked_text || ''))) {
+                    return;
+                }
+                const arrival_ms = Guard.parse_arrival_from_text(clicked_text);
+                if (!Number.isFinite(arrival_ms)) return;
+
+                const slot = Guard.apply_arrival_from_click(arrival_ms);
+                if (slot) {
+                    const slot_label = slot === 'from' ? i18n.LABELS.arrival_from : i18n.LABELS.arrival_to;
+                    UI.SuccessMessage(`Вставлено в ${slot_label}: ${Helper.format_date_ymd(arrival_ms)} ${Helper.format_hms(arrival_ms)}`);
+                }
+            });
+        },
+
+        unbind_external_arrival_picker: function () {
+            const event_namespace = '.HermitowskiGuardArrivalPicker';
+            jQuery(document).off(`click${event_namespace}`);
         },
 
         render_template_controls: function () {
@@ -1138,6 +1564,29 @@
             return weights;
         },
 
+        get_effective_speed_with_sigil: function (base_speed, user_input) {
+            const speed = Number(base_speed);
+            if (!Number.isFinite(speed) || speed <= 0) return null;
+            const sigil_percent = Math.max(0, Math.min(50, Helper.to_int(user_input && user_input.sigil_percent)));
+            if (!sigil_percent) return speed;
+            return speed / (1 + sigil_percent / 100);
+        },
+
+        get_special_mode_units: function (user_input, available) {
+            const deff_only_units = ['spear', 'sword', 'archer', 'heavy'];
+            const source_units = user_input && user_input.mode_all_units
+                ? Guard.deff_units
+                : deff_only_units;
+            const result = [];
+            for (const unit_name of source_units) {
+                if (!Guard.deff_units.includes(unit_name)) continue;
+                if (Math.max(0, Helper.to_int((available || {})[unit_name])) <= 0) continue;
+                if (!Number.isFinite(Guard.get_unit_speed(unit_name))) continue;
+                result.push(unit_name);
+            }
+            return result;
+        },
+
         is_arrival_in_window: function (arrival_ms, user_input) {
             const arrival = Number(arrival_ms);
             if (!Number.isFinite(arrival)) return false;
@@ -1252,7 +1701,14 @@
             return result;
         },
 
-        get_composition_slowest_speed: function (composition) {
+        get_composition_slowest_speed: function (composition, options = {}) {
+            const force_knight_speed = !!options.force_knight_speed;
+            if (force_knight_speed && Math.max(0, Helper.to_int((composition || {}).knight)) > 0) {
+                const knight_speed = Guard.get_unit_speed('knight');
+                if (Number.isFinite(knight_speed)) {
+                    return knight_speed;
+                }
+            }
             let slowest_speed = null;
             for (const unit_name in composition) {
                 const count = Math.max(0, Helper.to_int(composition[unit_name]));
@@ -1266,14 +1722,98 @@
             return slowest_speed;
         },
 
-        pick_composition_for_village: function ({ village_state, distance, user_input, template_weights, now_ms }) {
-            const get_effective_speed_with_sigil = function (base_speed) {
-                const speed = Number(base_speed);
-                if (!Number.isFinite(speed) || speed <= 0) return null;
-                const sigil_percent = Math.max(0, Math.min(50, Helper.to_int(user_input && user_input.sigil_percent)));
-                if (!sigil_percent) return speed;
-                return speed / (1 + sigil_percent / 100);
+        pick_special_mode_composition_for_village: function ({ village_state, distance, user_input, now_ms }) {
+            const available = village_state.remaining || {};
+            const mode_units = Guard.get_special_mode_units(user_input, available);
+            if (!mode_units.length) {
+                return null;
+            }
+
+            const all_counts = {};
+            for (const unit_name of mode_units) {
+                all_counts[unit_name] = Math.max(0, Helper.to_int(available[unit_name]));
+            }
+
+            const force_knight_speed = Math.max(0, Helper.to_int(all_counts.knight)) > 0;
+            const build_with_slowest_speed = function (slowest_speed) {
+                if (!Number.isFinite(slowest_speed)) return null;
+
+                const composition = {};
+                for (const unit_name of mode_units) {
+                    const count = Math.max(0, Helper.to_int(available[unit_name]));
+                    if (!count) continue;
+                    if (!force_knight_speed) {
+                        const unit_speed = Guard.get_unit_speed(unit_name);
+                        if (!Number.isFinite(unit_speed) || unit_speed > slowest_speed) continue;
+                    }
+                    composition[unit_name] = count;
+                }
+
+                const selected_population = Guard.calc_units_population(composition);
+                if (!selected_population) {
+                    return null;
+                }
+
+                const base_slowest_speed = force_knight_speed
+                    ? Guard.get_unit_speed('knight')
+                    : Guard.get_composition_slowest_speed(composition);
+                if (!Number.isFinite(base_slowest_speed)) {
+                    return null;
+                }
+                const effective_slowest_speed = Guard.get_effective_speed_with_sigil(base_slowest_speed, user_input);
+                if (!Number.isFinite(effective_slowest_speed)) {
+                    return null;
+                }
+
+                const travel_ms = distance * effective_slowest_speed * 60 * 1000;
+                const arrival_ms = now_ms + travel_ms;
+                if (!Guard.is_arrival_in_window(arrival_ms, user_input)) {
+                    return null;
+                }
+
+                return {
+                    units: composition,
+                    population: selected_population,
+                    slowest_speed: base_slowest_speed,
+                    effective_slowest_speed,
+                    travel_ms,
+                    arrival_ms,
+                };
             };
+
+            if (!user_input.arrival_filter_enabled) {
+                const base_slowest = force_knight_speed
+                    ? Guard.get_unit_speed('knight')
+                    : Guard.get_composition_slowest_speed(all_counts);
+                return build_with_slowest_speed(base_slowest);
+            }
+
+            if (force_knight_speed) {
+                return build_with_slowest_speed(Guard.get_unit_speed('knight'));
+            }
+
+            const speed_candidates = mode_units
+                .map(unit_name => Guard.get_unit_speed(unit_name))
+                .filter(speed => Number.isFinite(speed))
+                .sort((lhs, rhs) => rhs - lhs)
+                .filter((speed, index, source) => index === 0 || speed !== source[index - 1]);
+
+            for (const slowest_speed of speed_candidates) {
+                const picked = build_with_slowest_speed(slowest_speed);
+                if (picked) return picked;
+            }
+            return null;
+        },
+
+        pick_composition_for_village: function ({ village_state, distance, user_input, template_weights, now_ms }) {
+            if (user_input && user_input.special_mode_enabled) {
+                return Guard.pick_special_mode_composition_for_village({
+                    village_state,
+                    distance,
+                    user_input,
+                    now_ms,
+                });
+            }
 
             const population_cap = Math.min(
                 Math.max(1, Helper.to_int(user_input.max_pop_per_village)),
@@ -1342,7 +1882,7 @@
                 if (!Number.isFinite(slowest_speed)) {
                     return null;
                 }
-                const effective_slowest_speed = get_effective_speed_with_sigil(slowest_speed);
+                const effective_slowest_speed = Guard.get_effective_speed_with_sigil(slowest_speed, user_input);
                 if (!Number.isFinite(effective_slowest_speed)) {
                     return null;
                 }
@@ -1373,7 +1913,7 @@
                 .map(unit_name => ({ unit: unit_name, speed: Guard.get_unit_speed(unit_name) }))
                 .filter(item => Number.isFinite(item.speed))
                 .filter(item => {
-                    const effective_speed = get_effective_speed_with_sigil(item.speed);
+                    const effective_speed = Guard.get_effective_speed_with_sigil(item.speed, user_input);
                     if (!Number.isFinite(effective_speed)) return false;
                     const arrival_ms = now_ms + distance * effective_speed * 60 * 1000;
                     return Guard.is_arrival_in_window(arrival_ms, user_input);
@@ -1451,6 +1991,8 @@
             const arrival_from_time_control = Helper.get_control('arrival_from_time');
             const arrival_to_date_control = Helper.get_control('arrival_to_date');
             const arrival_to_time_control = Helper.get_control('arrival_to_time');
+            const mode_full_deff_control = Helper.get_control('mode_full_deff');
+            const mode_all_units_control = Helper.get_control('mode_all_units');
 
             Helper.assert_positive_number(max_pop_control, i18n.LABELS.max_pop_per_village);
 
@@ -1479,7 +2021,15 @@
                 arrival_from_ms: null,
                 arrival_to_ms: null,
                 template,
+                mode_full_deff: !!(mode_full_deff_control && mode_full_deff_control.checked),
+                mode_all_units: !!(mode_all_units_control && mode_all_units_control.checked),
+                special_mode_enabled: false,
             };
+            if (user_input.mode_full_deff && user_input.mode_all_units) {
+                user_input.mode_all_units = false;
+                if (mode_all_units_control) mode_all_units_control.checked = false;
+            }
+            user_input.special_mode_enabled = user_input.mode_full_deff || user_input.mode_all_units;
 
             user_input.arrival_filter_enabled = user_input.arrival_from_enabled || user_input.arrival_to_enabled;
 
@@ -1769,8 +2319,11 @@
                         remaining[unit_name] = Math.max(raw_count - reserve, 0);
                     }
                     const available_population = Guard.get_village_available_population(remaining);
+                    const budget_limit = user_input.special_mode_enabled
+                        ? available_population
+                        : Math.max(1, Helper.to_int(user_input.max_pop_per_village));
                     const budget = Math.min(
-                        Math.max(1, Helper.to_int(user_input.max_pop_per_village)),
+                        Math.max(0, Helper.to_int(budget_limit)),
                         available_population,
                     );
                     return {
@@ -2013,12 +2566,24 @@
             await Guard.get_world_info();
 
             Guard.apply_settings_to_ui();
+            Guard.autofill_targets_from_context_if_needed();
             Guard.render_template_controls();
 
-            ['is_arrival_from_enabled', 'is_arrival_to_enabled'].forEach(control_name => {
+            ['is_arrival_from_enabled', 'is_arrival_to_enabled', 'mode_full_deff', 'mode_all_units'].forEach(control_name => {
                 const control = Helper.get_control(control_name);
                 if (!control) return;
                 control.addEventListener('change', () => {
+                    if (control_name === 'mode_full_deff' && control.checked) {
+                        const all_units_control = Helper.get_control('mode_all_units');
+                        if (all_units_control) {
+                            all_units_control.checked = false;
+                        }
+                    } else if (control_name === 'mode_all_units' && control.checked) {
+                        const full_deff_control = Helper.get_control('mode_full_deff');
+                        if (full_deff_control) {
+                            full_deff_control.checked = false;
+                        }
+                    }
                     Guard.toggle_window_controls();
                     Guard.sync_settings_from_ui();
                 });
@@ -2034,12 +2599,17 @@
             });
 
             Guard.toggle_window_controls();
+            Guard.bind_external_arrival_picker();
 
             const template_select = Helper.get_control('template');
             template_select.addEventListener('change', () => {
                 Guard.settings.active_template_id = Helper.clean_text(template_select.value) || Guard.settings.active_template_id;
                 Guard.save_settings();
                 Guard.render_template_preview();
+            });
+
+            Helper.get_control('insert_current_target').addEventListener('click', () => {
+                Guard.set_targets_to_current_coord({ force: true, silent: false });
             });
 
             Helper.get_control('create_template').addEventListener('click', () => {
@@ -2098,6 +2668,7 @@
             const instance = Helper.get_control();
             if (instance) {
                 instance.remove();
+                Guard.unbind_external_arrival_picker();
                 return;
             }
 
