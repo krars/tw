@@ -220,13 +220,32 @@ if (localStorage.getItem('typeTimer') === 'interval') {
             return;
         }
 
-        navigator.clipboard.readText().then(function (text) {
-            applyParsedClipboardTime(text, showStatus);
-        }).catch(function () {
-            if (showStatus) {
-                setClipStatus('Нет доступа к буферу, нажми Ctrl+V', '#9a3c00');
-            }
-        });
+        function readNow() {
+            navigator.clipboard.readText().then(function (text) {
+                applyParsedClipboardTime(text, showStatus);
+            }).catch(function () {
+                if (showStatus) {
+                    setClipStatus('Нет доступа к буферу, нажми Ctrl+V', '#9a3c00');
+                }
+            });
+        }
+
+        if (navigator.permissions && typeof navigator.permissions.query === 'function') {
+            navigator.permissions.query({ name: 'clipboard-read' }).then(function (perm) {
+                if (perm && perm.state === 'denied') {
+                    if (showStatus) {
+                        setClipStatus('Разрешение заблокировано, используй Ctrl+V', '#9a3c00');
+                    }
+                    return;
+                }
+                readNow();
+            }).catch(function () {
+                readNow();
+            });
+            return;
+        }
+
+        readNow();
     }
 
     window.pasteIntervalClipboard = function () {
@@ -235,7 +254,6 @@ if (localStorage.getItem('typeTimer') === 'interval') {
 
     function setupPasteFallback() {
         var deptimeInput = document.getElementById('deptime');
-        var attemptedGestureRead = false;
 
         if (deptimeInput) {
             deptimeInput.addEventListener('paste', function (event) {
@@ -249,20 +267,23 @@ if (localStorage.getItem('typeTimer') === 'interval') {
             });
         }
 
-        function readOnFirstGesture() {
-            if (attemptedGestureRead) {
+        document.addEventListener('paste', function (event) {
+            var target = event.target;
+            if (target && target.id === 'deptime') {
                 return;
             }
-            attemptedGestureRead = true;
-            tryReadClipboard(false);
-        }
 
-        document.addEventListener('pointerdown', readOnFirstGesture, { once: true, capture: true });
-        document.addEventListener('keydown', readOnFirstGesture, { once: true, capture: true });
+            var cd = event.clipboardData || window.clipboardData;
+            if (!cd) {
+                return;
+            }
+
+            applyParsedClipboardTime(cd.getData('text'), true);
+        });
     }
 
     setupPasteFallback();
-    tryReadClipboard(false);
+    setClipStatus('Скопируй hh:mm:ss:ms и нажми Ctrl+V', '#4a4a4a');
     setInterval(window.tCoSt, 400);
     setInterval(runIntervalAutoStartCheck, 1000);
 } else {
