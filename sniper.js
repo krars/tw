@@ -63,6 +63,7 @@ if (localStorage.getItem('typeTimer') === 'interval') {
     var autoClipboardPermissionDenied = false;
     var autoClipboardBusy = false;
     var lastAutoClipboardValue = null;
+    var autoClipboardStateShown = false;
 
     function normalizeTimeParts(parts) {
         var hh = Number(parts[0] || 0);
@@ -358,10 +359,18 @@ if (localStorage.getItem('typeTimer') === 'interval') {
             navigator.permissions.query({ name: 'clipboard-read' }).then(function (perm) {
                 if (perm && perm.state === 'denied') {
                     autoClipboardPermissionDenied = true;
+                    if (!autoClipboardStateShown) {
+                        setClipStatus('Авто выкл: доступ к буферу запрещен (Ctrl+V)', '#9a3c00');
+                        autoClipboardStateShown = true;
+                    }
                     finish();
                     return;
                 }
                 if (perm && perm.state !== 'granted') {
+                    if (!autoClipboardStateShown) {
+                        setClipStatus('Авто ждёт разрешение буфера (Allow)', '#9a3c00');
+                        autoClipboardStateShown = true;
+                    }
                     finish();
                     return;
                 }
