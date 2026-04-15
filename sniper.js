@@ -60,6 +60,9 @@ if (localStorage.getItem('typeTimer') === 'interval') {
 
     var sTInt = null;
     var autoStartGuard = false;
+    var autoClipboardPermissionDenied = false;
+    var autoClipboardBusy = false;
+    var lastAutoClipboardValue = null;
 
     function normalizeTimeParts(parts) {
         var hh = Number(parts[0] || 0);
@@ -313,6 +316,65 @@ if (localStorage.getItem('typeTimer') === 'interval') {
         readNow();
     }
 
+    function tryAutoClipboardInsert() {
+        if (autoClipboardBusy || autoClipboardPermissionDenied) {
+            return;
+        }
+        if (!navigator.clipboard || typeof navigator.clipboard.readText !== 'function' || !window.isSecureContext) {
+            return;
+        }
+
+        autoClipboardBusy = true;
+
+        function finish() {
+            autoClipboardBusy = false;
+        }
+
+        function readAndApply() {
+            navigator.clipboard.readText().then(function (text) {
+                var normalized = parseClipboardTime(text);
+                if (!normalized) {
+                    finish();
+                    return;
+                }
+
+                if (normalized === lastAutoClipboardValue || normalized === String($('#deptime').val() || '')) {
+                    lastAutoClipboardValue = normalized;
+                    finish();
+                    return;
+                }
+
+                if (applyParsedClipboardTime(normalized, false)) {
+                    lastAutoClipboardValue = normalized;
+                    setClipStatus('Авто: ' + normalized, '#2e4e1f');
+                }
+                finish();
+            }).catch(function () {
+                finish();
+            });
+        }
+
+        if (navigator.permissions && typeof navigator.permissions.query === 'function') {
+            navigator.permissions.query({ name: 'clipboard-read' }).then(function (perm) {
+                if (perm && perm.state === 'denied') {
+                    autoClipboardPermissionDenied = true;
+                    finish();
+                    return;
+                }
+                if (perm && perm.state !== 'granted') {
+                    finish();
+                    return;
+                }
+                readAndApply();
+            }).catch(function () {
+                readAndApply();
+            });
+            return;
+        }
+
+        readAndApply();
+    }
+
     window.pasteIntervalClipboard = function () {
         tryReadClipboard(true, function () {
             var txt = readClipboardViaExecCommand();
@@ -354,7 +416,14 @@ if (localStorage.getItem('typeTimer') === 'interval') {
     }
 
     setupPasteFallback();
-    setClipStatus('Скопируй hh:mm:ss:ms и нажми Ctrl+V', '#4a4a4a');
+    setInterval(tryAutoClipboardInsert, 1000);
+    window.addEventListener('focus', tryAutoClipboardInsert);
+    document.addEventListener('visibilitychange', function () {
+        if (document.visibilityState === 'visible') {
+            tryAutoClipboardInsert();
+        }
+    });
+    setClipStatus('Автовставка включена; если не сработало — Ctrl+V', '#4a4a4a');
     setInterval(window.tCoSt, 400);
     setInterval(runIntervalAutoStartCheck, 1000);
 } else {
