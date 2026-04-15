@@ -1037,7 +1037,7 @@
                 (mode_all_units && mode_all_units.checked)
             );
             if (max_pop) {
-                max_pop.disabled = special_mode;
+                max_pop.disabled = false;
                 max_pop.title = special_mode
                     ? 'Игнорируется в режиме ВЕСЬ ДЕФФ / ВООБЩЕ ВСЕ'
                     : '';
@@ -1213,6 +1213,30 @@
             if (!source) return null;
 
             const now = new Date();
+            const month_name_to_number = function (raw_month) {
+                const month = Helper.clean_text(raw_month).toLowerCase().replace(/\.$/, '');
+                if (!month) return null;
+                const aliases = [
+                    { keys: ['jan', 'january', 'янв', 'январ'], value: 1 },
+                    { keys: ['feb', 'february', 'фев', 'феврал'], value: 2 },
+                    { keys: ['mar', 'march', 'мар', 'март'], value: 3 },
+                    { keys: ['apr', 'april', 'апр', 'апрел'], value: 4 },
+                    { keys: ['may', 'мая', 'май'], value: 5 },
+                    { keys: ['jun', 'june', 'июн', 'июнь'], value: 6 },
+                    { keys: ['jul', 'july', 'июл', 'июль'], value: 7 },
+                    { keys: ['aug', 'august', 'авг', 'август'], value: 8 },
+                    { keys: ['sep', 'sept', 'september', 'сен', 'сентябр'], value: 9 },
+                    { keys: ['oct', 'october', 'окт', 'октябр'], value: 10 },
+                    { keys: ['nov', 'november', 'ноя', 'ноябр'], value: 11 },
+                    { keys: ['dec', 'december', 'дек', 'декабр'], value: 12 },
+                ];
+                for (const alias of aliases) {
+                    if (alias.keys.some(key => month.startsWith(key))) {
+                        return alias.value;
+                    }
+                }
+                return null;
+            };
             const build_datetime = function ({ year, month, day, hour, minute, second = 0, millisecond = 0, can_roll_year = false }) {
                 const y = Number(year);
                 const m = Number(month);
@@ -1297,6 +1321,23 @@
                     can_roll_year: !explicit_year,
                 });
                 if (Number.isFinite(parsed)) return parsed;
+            }
+
+            const month_name_match = take_last_match(/([a-zа-яё]{3,12})\.?\s+(\d{1,2})\s*,\s*(\d{4})\s*(?:г\.?)?\s*(\d{1,2}):(\d{2})(?::(\d{2}))?(?:[.:](\d{1,3}))?/gi);
+            if (month_name_match) {
+                const month_number = month_name_to_number(month_name_match[1]);
+                if (Number.isFinite(month_number)) {
+                    const parsed = build_datetime({
+                        year: month_name_match[3],
+                        month: month_number,
+                        day: month_name_match[2],
+                        hour: month_name_match[4],
+                        minute: month_name_match[5],
+                        second: month_name_match[6] || 0,
+                        millisecond: month_name_match[7] || 0,
+                    });
+                    if (Number.isFinite(parsed)) return parsed;
+                }
             }
 
             const relative_match = take_last_match(/(сегодня|today|завтра|tomorrow)\s*(?:в\s+)?(\d{1,2}):(\d{2})(?::(\d{2}))?(?:[.:](\d{1,3}))?/gi);
@@ -1593,6 +1634,40 @@
             return Guard.parse_td_import_payloads(text);
         },
 
+        parse_mail_fallback_payload: function (text) {
+            const source = Guard.normalize_import_text(text);
+            if (!source) return null;
+
+            const target_match = source.match(/(?:^|\n)\s*Деревня\s*:\s*[^\n\r]*?(\d{1,3})\s*[|;]\s*(\d{1,3})/i);
+            if (!target_match) return null;
+            const target_coord = `${Math.trunc(Number(target_match[1]))}|${Math.trunc(Number(target_match[2]))}`;
+            if (!/^\d{1,3}\|\d{1,3}$/.test(target_coord)) return null;
+
+            const arrival_label = source.match(/Время\s+прибытия\s*:/i);
+            if (!arrival_label || arrival_label.index === undefined) return null;
+
+            const arrival_slice_from = arrival_label.index + arrival_label[0].length;
+            const arrival_candidate = source.slice(arrival_slice_from, arrival_slice_from + 180);
+            const arrival_ms = Guard.parse_arrival_from_text(arrival_candidate);
+            if (!Number.isFinite(arrival_ms)) return null;
+
+            return {
+                title: 'MAIL_FALLBACK',
+                _sourceTitle: 'Mail fallback',
+                _sourceType: 'mail_fallback',
+                coords: [target_coord],
+                arrival_to_enabled: true,
+                arrival_to_date: Helper.format_date_ymd(arrival_ms),
+                arrival_to_time: Helper.normalize_time_input_value(Helper.format_hms(arrival_ms), arrival_ms),
+            };
+        },
+
+        parse_mail_fallback_payload_from_page: function () {
+            const text = Guard.build_import_text_from_document(document);
+            if (!text) return null;
+            return Guard.parse_mail_fallback_payload(text);
+        },
+
         is_forum_or_mail_page: function () {
             const params = new URLSearchParams(window.location.search);
             const screen = Helper.clean_text((game_data && game_data.screen) || params.get('screen') || '').toLowerCase();
@@ -1602,6 +1677,12 @@
                 screen === 'mail' ||
                 screen === 'forum'
             );
+        },
+
+        is_mail_page: function () {
+            const params = new URLSearchParams(window.location.search);
+            const screen = Helper.clean_text((game_data && game_data.screen) || params.get('screen') || '').toLowerCase();
+            return screen === 'mail';
         },
 
         apply_import_payload: function (payload) {
@@ -1618,10 +1699,10 @@
             const mode_full_deff = Helper.get_control('mode_full_deff');
             const mode_all_units = Helper.get_control('mode_all_units');
 
-            if (targets && Array.isArray(payload.coords)) {
+            if (targets && Array.isArray(payload.coords) && payload.coords.length) {
                 targets.value = payload.coords.map(c => Helper.clean_text(c)).filter(Boolean).join('\n');
             }
-            if (sigil) {
+            if (sigil && payload.sigil_percent !== undefined && payload.sigil_percent !== null) {
                 sigil.value = String(Math.max(0, Math.min(50, Helper.to_int(payload.sigil_percent))));
             }
             if (mode_full_deff && payload.mode_full_deff !== undefined) {
@@ -1630,13 +1711,25 @@
                     mode_all_units.checked = false;
                 }
             }
-            if (from_enabled) from_enabled.checked = !!payload.arrival_from_enabled;
-            if (from_date) from_date.value = Helper.normalize_date_input_value(payload.arrival_from_date, Date.now());
-            if (from_time) from_time.value = Helper.normalize_time_input_value(payload.arrival_from_time, Date.now());
+            if (from_enabled && payload.arrival_from_enabled !== undefined) {
+                from_enabled.checked = !!payload.arrival_from_enabled;
+            }
+            if (from_date && payload.arrival_from_date !== undefined) {
+                from_date.value = Helper.normalize_date_input_value(payload.arrival_from_date, Date.now());
+            }
+            if (from_time && payload.arrival_from_time !== undefined) {
+                from_time.value = Helper.normalize_time_input_value(payload.arrival_from_time, Date.now());
+            }
 
-            if (to_enabled) to_enabled.checked = !!payload.arrival_to_enabled;
-            if (to_date) to_date.value = Helper.normalize_date_input_value(payload.arrival_to_date, Date.now() + 60 * 60 * 1000);
-            if (to_time) to_time.value = Helper.normalize_time_input_value(payload.arrival_to_time, Date.now() + 60 * 60 * 1000);
+            if (to_enabled && payload.arrival_to_enabled !== undefined) {
+                to_enabled.checked = !!payload.arrival_to_enabled;
+            }
+            if (to_date && payload.arrival_to_date !== undefined) {
+                to_date.value = Helper.normalize_date_input_value(payload.arrival_to_date, Date.now() + 60 * 60 * 1000);
+            }
+            if (to_time && payload.arrival_to_time !== undefined) {
+                to_time.value = Helper.normalize_time_input_value(payload.arrival_to_time, Date.now() + 60 * 60 * 1000);
+            }
 
             Guard.toggle_window_controls();
             Guard.sync_settings_from_ui();
@@ -3089,6 +3182,17 @@
                 const import_payloads = Guard.parse_td_import_payloads_from_page();
                 if (import_payloads.length) {
                     Guard.show_import_window(import_payloads);
+                } else if (Guard.is_mail_page()) {
+                    const mail_fallback_payload = Guard.parse_mail_fallback_payload_from_page();
+                    if (mail_fallback_payload) {
+                        const applied = Guard.apply_import_payload(mail_fallback_payload);
+                        if (applied) {
+                            const coord = Array.isArray(mail_fallback_payload.coords) && mail_fallback_payload.coords.length
+                                ? mail_fallback_payload.coords[0]
+                                : '-';
+                            UI.SuccessMessage(`Из письма подставлено: ${coord}, до ${mail_fallback_payload.arrival_to_time}`);
+                        }
+                    }
                 }
             }
         },
