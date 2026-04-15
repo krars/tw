@@ -212,20 +212,82 @@ if (localStorage.getItem('typeTimer') === 'interval') {
         return true;
     }
 
-    function tryReadClipboard(showStatus) {
+    function readClipboardViaExecCommand() {
+        try {
+            if (typeof document.execCommand !== 'function') {
+                return null;
+            }
+            var ta = document.createElement('textarea');
+            ta.setAttribute('readonly', 'readonly');
+            ta.style.position = 'fixed';
+            ta.style.left = '-9999px';
+            ta.style.top = '-9999px';
+            document.body.appendChild(ta);
+            ta.focus();
+            ta.select();
+            var ok = document.execCommand('paste');
+            var value = (ta.value || '').trim();
+            ta.remove();
+            if (!ok && !value) {
+                return null;
+            }
+            return value || null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function armManualPasteCapture() {
+        setClipStatus('Нажми Ctrl+V (Cmd+V) для вставки', '#9a3c00');
+
+        var done = false;
+        function cleanup() {
+            if (done) {
+                return;
+            }
+            done = true;
+            document.removeEventListener('paste', onPasteCapture, true);
+        }
+
+        function onPasteCapture(event) {
+            var cd = event.clipboardData || window.clipboardData;
+            if (!cd) {
+                cleanup();
+                return;
+            }
+            if (applyParsedClipboardTime(cd.getData('text'), true)) {
+                event.preventDefault();
+            }
+            cleanup();
+        }
+
+        document.addEventListener('paste', onPasteCapture, true);
+        setTimeout(cleanup, 8000);
+    }
+
+    function tryReadClipboard(showStatus, onFail) {
         if (!navigator.clipboard || typeof navigator.clipboard.readText !== 'function' || !window.isSecureContext) {
             if (showStatus) {
                 setClipStatus('Буфер недоступен, вставь Ctrl+V', '#9a3c00');
+            }
+            if (typeof onFail === 'function') {
+                onFail();
             }
             return;
         }
 
         function readNow() {
             navigator.clipboard.readText().then(function (text) {
-                applyParsedClipboardTime(text, showStatus);
+                var ok = applyParsedClipboardTime(text, showStatus);
+                if (!ok && typeof onFail === 'function') {
+                    onFail();
+                }
             }).catch(function () {
                 if (showStatus) {
                     setClipStatus('Нет доступа к буферу, нажми Ctrl+V', '#9a3c00');
+                }
+                if (typeof onFail === 'function') {
+                    onFail();
                 }
             });
         }
@@ -235,6 +297,9 @@ if (localStorage.getItem('typeTimer') === 'interval') {
                 if (perm && perm.state === 'denied') {
                     if (showStatus) {
                         setClipStatus('Разрешение заблокировано, используй Ctrl+V', '#9a3c00');
+                    }
+                    if (typeof onFail === 'function') {
+                        onFail();
                     }
                     return;
                 }
@@ -249,7 +314,13 @@ if (localStorage.getItem('typeTimer') === 'interval') {
     }
 
     window.pasteIntervalClipboard = function () {
-        tryReadClipboard(true);
+        tryReadClipboard(true, function () {
+            var txt = readClipboardViaExecCommand();
+            if (txt && applyParsedClipboardTime(txt, true)) {
+                return;
+            }
+            armManualPasteCapture();
+        });
     };
 
     function setupPasteFallback() {
