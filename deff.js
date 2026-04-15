@@ -102,6 +102,9 @@
         snob: 100,
         militia: 0,
     };
+    const POP_LIMIT_MIN = 1;
+    const POP_LIMIT_MAX = 24000;
+    const POP_LIMIT_DEFAULT = 2000;
 
     const Helper = {
         clean_text: function (value) {
@@ -381,7 +384,7 @@
                 targets: '',
                 group: '-1',
                 strategy: 'DIST_ASC',
-                max_pop_per_village: 500,
+                max_pop_per_village: POP_LIMIT_DEFAULT,
                 sigil_percent: 0,
                 arrival_from_enabled: false,
                 arrival_to_enabled: false,
@@ -559,7 +562,10 @@
                 base.input.strategy = Guard.strategies[input.strategy]
                     ? input.strategy
                     : base.input.strategy;
-                base.input.max_pop_per_village = Math.max(1, Helper.to_int(input.max_pop_per_village) || base.input.max_pop_per_village);
+                base.input.max_pop_per_village = Math.min(
+                    POP_LIMIT_MAX,
+                    Math.max(POP_LIMIT_MIN, Helper.to_int(input.max_pop_per_village) || base.input.max_pop_per_village),
+                );
                 base.input.sigil_percent = Math.max(
                     0,
                     Math.min(
@@ -620,6 +626,10 @@
             base.input.sigil_percent = Math.max(
                 0,
                 Math.min(50, Helper.to_int(base.input.sigil_percent)),
+            );
+            base.input.max_pop_per_village = Math.min(
+                POP_LIMIT_MAX,
+                Math.max(POP_LIMIT_MIN, Helper.to_int(base.input.max_pop_per_village) || POP_LIMIT_DEFAULT),
             );
             base.input.mode_full_deff = !!base.input.mode_full_deff;
             base.input.mode_all_units = !!base.input.mode_all_units;
@@ -755,7 +765,7 @@
                     </div>
                     <div class="guard-field">
                         <label class="guard-label" for="${max_pop_id}">${i18n.LABELS.max_pop_per_village}</label>
-                        <input id="${max_pop_id}" type="number" min="1" step="1">
+                        <input id="${max_pop_id}" type="number" min="${POP_LIMIT_MIN}" max="${POP_LIMIT_MAX}" step="1">
                     </div>
                     <div class="guard-field">
                         <label class="guard-label" for="${sigil_id}">${i18n.LABELS.sigil_percent}</label>
@@ -897,7 +907,10 @@
             Guard.settings.input.targets = targets ? String(targets.value || '') : '';
             Guard.settings.input.group = group ? String(group.value || '-1') : '-1';
             Guard.settings.input.strategy = strategy ? String(strategy.value || 'DIST_ASC') : 'DIST_ASC';
-            Guard.settings.input.max_pop_per_village = Math.max(1, Helper.to_int(max_pop ? max_pop.value : 0) || 1);
+            Guard.settings.input.max_pop_per_village = Math.min(
+                POP_LIMIT_MAX,
+                Math.max(POP_LIMIT_MIN, Helper.to_int(max_pop ? max_pop.value : 0) || POP_LIMIT_DEFAULT),
+            );
             Guard.settings.input.sigil_percent = Math.max(0, Math.min(50, Helper.to_int(sigil ? sigil.value : 0)));
             Guard.settings.input.arrival_from_enabled = !!(arrival_from_enabled && arrival_from_enabled.checked);
             Guard.settings.input.arrival_to_enabled = !!(arrival_to_enabled && arrival_to_enabled.checked);
@@ -952,7 +965,12 @@
                 strategy.value = Guard.settings.input.strategy;
             }
             if (max_pop) {
-                max_pop.value = String(Math.max(1, Helper.to_int(Guard.settings.input.max_pop_per_village) || 1));
+                max_pop.value = String(
+                    Math.min(
+                        POP_LIMIT_MAX,
+                        Math.max(POP_LIMIT_MIN, Helper.to_int(Guard.settings.input.max_pop_per_village) || POP_LIMIT_DEFAULT),
+                    ),
+                );
             }
             if (sigil) {
                 sigil.value = String(Math.max(0, Math.min(50, Helper.to_int(Guard.settings.input.sigil_percent) || 0)));
@@ -1462,7 +1480,12 @@
                 const from = starts[i];
                 const to = i + 1 < starts.length ? starts[i + 1] : source.length;
                 const segment = source.slice(from, to);
-                if (/Коры\s*:/i.test(segment) || /Окно\s+прибытия/i.test(segment) || /Сигил/i.test(segment)) {
+                if (
+                    /Коры\s*:/i.test(segment) ||
+                    /Окно\s+прибытия/i.test(segment) ||
+                    /Сигил/i.test(segment) ||
+                    /Весь\s+дефф/i.test(segment)
+                ) {
                     segments.push(segment);
                 }
             }
@@ -1494,6 +1517,10 @@
             const sigil_section = Guard.extract_section_after_heading(segment, /Сигил\s*:?\s*/i);
             const sigil_match = sigil_section.match(/(?:^|\n)\s*(\d{1,2})\s*(?:\n|$)/);
             const sigil_percent = Math.max(0, Math.min(50, Helper.to_int(sigil_match ? sigil_match[1] : 0)));
+            const mode_full_deff_section = Guard.extract_section_after_heading(segment, /Весь\s+дефф\s*:?\s*/i);
+            const mode_full_deff_match = mode_full_deff_section.match(/(?:^|\n)\s*([+-])\s*(?:\n|$)/);
+            const has_mode_full_deff = !!mode_full_deff_match;
+            const mode_full_deff = has_mode_full_deff && mode_full_deff_match[1] === '+';
 
             const window_section = Guard.extract_section_after_heading(
                 segment,
@@ -1523,7 +1550,13 @@
             const from_slot = parse_slot(/От\s*:\s*([+-])?\s*([^\n\r]+)/i);
             const to_slot = parse_slot(/До\s*:\s*([+-])?\s*([^\n\r]+)/i);
 
-            if (!coords.length && !from_slot.enabled && !to_slot.enabled && !sigil_percent) {
+            if (
+                !coords.length &&
+                !from_slot.enabled &&
+                !to_slot.enabled &&
+                !sigil_percent &&
+                !has_mode_full_deff
+            ) {
                 return null;
             }
 
@@ -1531,6 +1564,7 @@
                 title,
                 coords,
                 sigil_percent,
+                mode_full_deff: has_mode_full_deff ? mode_full_deff : undefined,
                 arrival_from_enabled: !!from_slot.enabled,
                 arrival_from_date: from_slot.date,
                 arrival_from_time: from_slot.time,
@@ -1581,12 +1615,20 @@
             const to_enabled = Helper.get_control('is_arrival_to_enabled');
             const to_date = Helper.get_control('arrival_to_date');
             const to_time = Helper.get_control('arrival_to_time');
+            const mode_full_deff = Helper.get_control('mode_full_deff');
+            const mode_all_units = Helper.get_control('mode_all_units');
 
             if (targets && Array.isArray(payload.coords)) {
                 targets.value = payload.coords.map(c => Helper.clean_text(c)).filter(Boolean).join('\n');
             }
             if (sigil) {
                 sigil.value = String(Math.max(0, Math.min(50, Helper.to_int(payload.sigil_percent))));
+            }
+            if (mode_full_deff && payload.mode_full_deff !== undefined) {
+                mode_full_deff.checked = !!payload.mode_full_deff;
+                if (mode_full_deff.checked && mode_all_units) {
+                    mode_all_units.checked = false;
+                }
             }
             if (from_enabled) from_enabled.checked = !!payload.arrival_from_enabled;
             if (from_date) from_date.value = Helper.normalize_date_input_value(payload.arrival_from_date, Date.now());
@@ -1679,6 +1721,7 @@
             const from_sign = input.arrival_from_enabled ? '+' : '-';
             const to_sign = input.arrival_to_enabled ? '+' : '-';
             const sigil = String(Math.max(0, Math.min(50, Helper.to_int(input.sigil_percent))));
+            const mode_full_deff_sign = input.mode_full_deff ? '+' : '-';
 
             return [
                 '[spoiler=TD]',
@@ -1698,6 +1741,10 @@
                 '~~~~~~~~~~~~~~~~',
                 'Сигил',
                 sigil,
+                '',
+                '~~~~~~~~~~~~~~~~',
+                'Весь дефф',
+                mode_full_deff_sign,
                 '',
                 '~~~~~~~~~~~~~~~~',
                 '[/spoiler]',
@@ -2148,7 +2195,10 @@
             }
 
             const population_cap = Math.min(
-                Math.max(1, Helper.to_int(user_input.max_pop_per_village)),
+                Math.min(
+                    POP_LIMIT_MAX,
+                    Math.max(POP_LIMIT_MIN, Helper.to_int(user_input.max_pop_per_village)),
+                ),
                 Math.max(0, Helper.to_int(village_state.remaining_population_budget)),
             );
             if (population_cap <= 0) {
@@ -2345,7 +2395,10 @@
                 targets,
                 group_id: String(group_control.value || '-1'),
                 strategy: String(strategy_control.value || 'DIST_ASC'),
-                max_pop_per_village: Math.max(1, Helper.to_int(max_pop_control.value) || 1),
+                max_pop_per_village: Math.min(
+                    POP_LIMIT_MAX,
+                    Math.max(POP_LIMIT_MIN, Helper.to_int(max_pop_control.value) || POP_LIMIT_DEFAULT),
+                ),
                 sigil_percent: Math.max(0, Math.min(50, Helper.to_int(sigil_control ? sigil_control.value : 0))),
                 arrival_from_enabled: !!(arrival_from_enabled_control && arrival_from_enabled_control.checked),
                 arrival_to_enabled: !!(arrival_to_enabled_control && arrival_to_enabled_control.checked),
@@ -2684,7 +2737,10 @@
                     const available_population = Guard.get_village_available_population(remaining);
                     const budget_limit = user_input.special_mode_enabled
                         ? available_population
-                        : Math.max(1, Helper.to_int(user_input.max_pop_per_village));
+                        : Math.min(
+                            POP_LIMIT_MAX,
+                            Math.max(POP_LIMIT_MIN, Helper.to_int(user_input.max_pop_per_village) || POP_LIMIT_DEFAULT),
+                        );
                     const budget = Math.min(
                         Math.max(0, Helper.to_int(budget_limit)),
                         available_population,
