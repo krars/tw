@@ -2147,14 +2147,22 @@ javascript:(function(){
         function parseUnitsPage(html) {
             const doc = new DOMParser().parseFromString(html, 'text/html');
             const result = {};
+            const priorityByVillage = {};
             doc.querySelectorAll('#units_table tbody tr').forEach(row => {
                 const cells = row.querySelectorAll('td');
                 if (cells.length < 4) return;
-                if (cleanText(cells[1]?.textContent) !== 'свои') return;
+                const modeText = cleanText(cells[1]?.textContent).toLowerCase();
+                const isHomeRow = /(^|[\s:])в\s*деревн/i.test(modeText) || /at\s*home/i.test(modeText);
+                const isOwnRow = /(^|[\s:])свои/i.test(modeText) || /(^|[\s:])own/i.test(modeText);
+                if (!isHomeRow && !isOwnRow) return;
                 const firstCell = cells[0];
                 const quickeditEl = firstCell.querySelector('.quickedit-vn');
                 if (!quickeditEl) return;
                 const villageId = quickeditEl.getAttribute('data-id');
+                if (!villageId) return;
+                const rowPriority = isHomeRow ? 2 : 1;
+                const prevPriority = toInt(priorityByVillage[villageId]);
+                if (prevPriority >= rowPriority) return;
                 const labelEl = firstCell.querySelector('.quickedit-label');
                 const coord = labelEl ? parseCoord(labelEl.textContent) : null;
                 const units = {};
@@ -2162,6 +2170,7 @@ javascript:(function(){
                     if (i < UNIT_NAMES.length) units[UNIT_NAMES[i]] = parseInt(cell.textContent.trim(), 10) || 0;
                 });
                 result[villageId] = { units, coord };
+                priorityByVillage[villageId] = rowPriority;
             });
             return result;
         }
@@ -2683,6 +2692,12 @@ javascript:(function(){
                                     armyPop = army.totalPop;
                                     armyText = formatArmy(armyComp);
                                 }
+                                const armyEntries = Object.entries(armyComp || {}).filter(([, c]) => toInt(c) > 0);
+                                if (!armyEntries.length) return;
+                                for (const [u, cRaw] of armyEntries) {
+                                    const c = toInt(cRaw);
+                                    if ((ud.units[u] || 0) < c) return;
+                                }
 
                                 // Skip if village already has max attacks scheduled
                                 const currentCount = scheduledCount[villageId] || 0;
@@ -2713,7 +2728,8 @@ javascript:(function(){
                                 parts.push('from=simulator');
                                 parts.push(`x=${target.x}`);
                                 parts.push(`y=${target.y}`);
-                                Object.entries(armyComp).forEach(([u, c]) => {
+                                armyEntries.forEach(([u, cRaw]) => {
+                                    const c = toInt(cRaw);
                                     if (c > 0) parts.push(`att_${u}=${c}`);
                                 });
                                 const targetVillageId = villageIdByCoord.get(targetKey);
@@ -2733,7 +2749,7 @@ javascript:(function(){
                                     travelTime: formatDuration(travelMs), sendTime: formatHMS(nowMs),
                                     arrivalTime: arrivalTimeStr, windowLabel: matched.label,
                                     army: armyText, armyPop: armyPop,
-                                    sendUrl
+                                    sendUrl, speedHpf: effectiveHpf
                                 });
                                 scheduledCount[villageId] = (scheduledCount[villageId] || 0) + 1;
                             };
@@ -2833,9 +2849,11 @@ javascript:(function(){
                         const uniqueResults = [];
                         // Sort by speed: slower units first (they have larger hpf)
                         const sortedResults = [...results].sort((a, b) => {
-                            const hpfA = Object.entries(settings.unitSpeedEffective).find(([u]) => u === a.unit)?.[1] || 0;
-                            const hpfB = Object.entries(settings.unitSpeedEffective).find(([u]) => u === b.unit)?.[1] || 0;
-                            return hpfB - hpfA; // slower first
+                            const bySpeed = (Number(b.speedHpf) || 0) - (Number(a.speedHpf) || 0);
+                            if (bySpeed !== 0) return bySpeed;
+                            const byPop = (Number(b.armyPop) || 0) - (Number(a.armyPop) || 0);
+                            if (byPop !== 0) return byPop;
+                            return String(a.unit || '').localeCompare(String(b.unit || ''), 'ru');
                         });
                         sortedResults.forEach(r => {
                             const key = `${r.villageId}_${r.targetCoord}`;
@@ -3155,6 +3173,12 @@ javascript:(function(){
                                     armyPop = army.totalPop;
                                     armyText = formatArmy(armyComp);
                                 }
+                                const armyEntries = Object.entries(armyComp || {}).filter(([, c]) => toInt(c) > 0);
+                                if (!armyEntries.length) return;
+                                for (const [u, cRaw] of armyEntries) {
+                                    const c = toInt(cRaw);
+                                    if ((ud.units[u] || 0) < c) return;
+                                }
                                 const currentCount = scheduledCount[villageId] || 0;
                                 if (currentCount >= maxPerVillage) return;
                                 const currentTargetCount = targetScheduledCount[targetKey] || 0;
@@ -3180,14 +3204,17 @@ javascript:(function(){
                                 parts.push('from=simulator');
                                 parts.push(`x=${target.x}`);
                                 parts.push(`y=${target.y}`);
-                                Object.entries(armyComp).forEach(([u, c]) => { if (c > 0) parts.push(`att_${u}=${c}`); });
+                                armyEntries.forEach(([u, cRaw]) => {
+                                    const c = toInt(cRaw);
+                                    if (c > 0) parts.push(`att_${u}=${c}`);
+                                });
                                 const targetVillageId = villageIdByCoord.get(targetKey);
                                 if (targetVillageId) parts.push(`target=${targetVillageId}`);
                                 const sendUrl = `${parts.join('&')}`;
                                 const travelSecCheck = travelMs / 1000;
                                 if (!useDateFilter && (travelSecCheck < minTravelSec || travelSecCheck > maxTravelSec)) return;
                                 const arrivalLabel = useDateFilter ? `${formatServerDateYmd(arrivalMs)} ${arrivalTimeStr}` : arrivalTimeStr;
-                                results.push({ villageId, villageCoord:`${ud.coord.x}|${ud.coord.y}`, targetCoord:targetKey, unit:taskName, distance:Number(dist).toFixed(2), travelTime:formatDuration(travelMs), sendTime:formatHMS(nowMs), arrivalTime:arrivalLabel, windowLabel:matched.label, army:armyText, armyPop, sendUrl });
+                                results.push({ villageId, villageCoord:`${ud.coord.x}|${ud.coord.y}`, targetCoord:targetKey, unit:taskName, distance:Number(dist).toFixed(2), travelTime:formatDuration(travelMs), sendTime:formatHMS(nowMs), arrivalTime:arrivalLabel, windowLabel:matched.label, army:armyText, armyPop, sendUrl, speedHpf: effectiveHpf });
                                 scheduledCount[villageId] = (scheduledCount[villageId]||0)+1;
                                 targetScheduledCount[targetKey] = (targetScheduledCount[targetKey] || 0) + 1;
                             };
@@ -3323,9 +3350,11 @@ javascript:(function(){
                         const seen = new Set();
                         const uniqueResults = [];
                         const sortedResults = [...results].sort((a, b) => {
-                            const hpfA = Object.entries(settings.unitSpeedEffective).find(([u]) => u === a.unit)?.[1] || 0;
-                            const hpfB = Object.entries(settings.unitSpeedEffective).find(([u]) => u === b.unit)?.[1] || 0;
-                            return hpfB - hpfA;
+                            const bySpeed = (Number(b.speedHpf) || 0) - (Number(a.speedHpf) || 0);
+                            if (bySpeed !== 0) return bySpeed;
+                            const byPop = (Number(b.armyPop) || 0) - (Number(a.armyPop) || 0);
+                            if (byPop !== 0) return byPop;
+                            return String(a.unit || '').localeCompare(String(b.unit || ''), 'ru');
                         });
                         sortedResults.forEach(r => {
                             const key = `${r.villageId}_${r.targetCoord}`;
