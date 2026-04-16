@@ -2373,6 +2373,16 @@ javascript:(function(){
             const composition = {};
             let usedPop = 0;
             const finalize = () => {
+                // Hard safety: never exceed currently available units from this village snapshot.
+                Object.keys(composition).forEach(u => {
+                    const have = Math.max(0, toInt(villageUnits[u]));
+                    const cur = Math.max(0, toInt(composition[u]));
+                    if (cur <= 0 || have <= 0) {
+                        delete composition[u];
+                        return;
+                    }
+                    if (cur > have) composition[u] = have;
+                });
                 if (mustInclude) {
                     const haveInVillage = villageUnits[mustInclude] || 0;
                     if (haveInVillage <= 0) {
@@ -2440,7 +2450,8 @@ javascript:(function(){
                 if (!weights[u]) return;
                 const popShare = remainingPop * weights[u] / totalWeight;
                 rawCounts[u] = popShare / (POP_COST[u] || 1);
-                composition[u] = Math.max(0, Math.floor(rawCounts[u]));
+                const maxAvailable = Math.max(0, toInt(villageUnits[u]));
+                composition[u] = Math.max(0, Math.min(maxAvailable, Math.floor(rawCounts[u])));
             });
 
             // Distribute leftover pop by highest fractional part
@@ -2535,7 +2546,7 @@ javascript:(function(){
             const commandsUrl = `/game.php?village=${window.game_data.village.id}&screen=overview_villages&mode=commands&type=all&group=0&page=-1&&type=all`;
             const villageMapUrl = '/map/village.txt';
 
-            Promise.all([fetchPage(unitsUrl), fetchPage(prodUrl), fetchPage(commandsUrl), fetchPage(villageMapUrl), loadWorldSettings()])
+            Promise.all([fetchPageFresh(unitsUrl), fetchPage(prodUrl), fetchPage(commandsUrl), fetchPage(villageMapUrl), loadWorldSettings()])
                 .then(([unitsHtml, prodHtml, commandsHtml, villageMapText, settings]) => {
                     const unitsData = parseUnitsPage(unitsHtml);
                     const prodData = parseProdPage(prodHtml);
@@ -3017,7 +3028,7 @@ javascript:(function(){
             const commandsUrl = `/game.php?village=${window.game_data.village.id}&screen=overview_villages&mode=commands&type=all&group=${selectedGroup}&page=-1&&type=all`;
             const villageMapUrl = '/map/village.txt';
 
-            Promise.all([fetchPage(unitsUrl), fetchPage(prodUrl), fetchPage(commandsUrl), fetchPage(villageMapUrl), loadWorldSettings()])
+            Promise.all([fetchPageFresh(unitsUrl), fetchPage(prodUrl), fetchPage(commandsUrl), fetchPage(villageMapUrl), loadWorldSettings()])
                 .then(([unitsHtml, prodHtml, commandsHtml, villageMapText, settings]) => {
                     const unitsData = parseUnitsPage(unitsHtml);
                     const prodData = parseProdPage(prodHtml);
