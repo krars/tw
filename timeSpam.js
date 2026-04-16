@@ -385,6 +385,8 @@ javascript:(function(){
 
             const maxPvMatch = segment.match(/Макс\s*отпр\s*с\s*деревни\s*:\s*(\d+)/i);
             const maxPerVillage = Math.max(1, toInt(maxPvMatch ? maxPvMatch[1] : 5) || 5);
+            const maxPtMatch = segment.match(/Макс\s*(?:отпр(?:авок)?|отправок)\s*на\s*дер[а-я]*\s*:\s*(\d+)/i);
+            const maxPerTarget = Math.max(1, toInt(maxPtMatch ? maxPtMatch[1] : 5) || 5);
 
             const minDurMatch = segment.match(/Минимальная\s+длительность[\s:]*([0-9]{1,3}:[0-9]{2}:[0-9]{2})/i);
             const maxDurMatch = segment.match(/Максимальная\s+длительность[\s:]*([0-9]{1,3}:[0-9]{2}:[0-9]{2})/i);
@@ -426,6 +428,7 @@ javascript:(function(){
                 parsedTemplates,
                 activeTemplateIndices,
                 maxPerVillage,
+                maxPerTarget,
                 minDuration: minDurationParsed,
                 maxDuration: maxDurationParsed,
                 dateFilterEnabled: dateFilterEnabledParsed,
@@ -588,6 +591,7 @@ javascript:(function(){
         let $textarea = null;
         let selectedUnits = [...UNITS_CHECKED_BY_DEFAULT];
         let maxPerVillage = 5;
+        let maxPerTarget = 5;
         let minDuration = '00:30:00';
         let maxDuration = '99:59:59';
         let dateFilterEnabled = false;
@@ -631,6 +635,7 @@ javascript:(function(){
                 timeWindows: [],
                 selectedUnits: [...UNITS_CHECKED_BY_DEFAULT],
                 maxPerVillage: 5,
+                maxPerTarget: 5,
                 minDuration: '00:30:00',
                 maxDuration: '99:59:59',
                 dateFilterEnabled: false,
@@ -676,6 +681,7 @@ javascript:(function(){
                 base.selectedUnits = unitsRaw.map(u => cleanText(u)).filter(u => UNITS_AVAILABLE.includes(u));
                 if (!base.selectedUnits.length) base.selectedUnits = [...UNITS_CHECKED_BY_DEFAULT];
                 base.maxPerVillage = Math.max(1, toInt(raw.maxPerVillage) || 5);
+                base.maxPerTarget = Math.max(1, toInt(raw.maxPerTarget) || 5);
                 base.minDuration = cleanText(raw.minDuration) || '00:30:00';
                 base.maxDuration = cleanText(raw.maxDuration) || '99:59:59';
                 base.dateFilterEnabled = !!raw.dateFilterEnabled;
@@ -746,6 +752,7 @@ javascript:(function(){
                 ? tab.selectedUnits.filter(u => UNITS_AVAILABLE.includes(u))
                 : [...UNITS_CHECKED_BY_DEFAULT];
             maxPerVillage = Math.max(1, toInt(tab.maxPerVillage) || 5);
+            maxPerTarget = Math.max(1, toInt(tab.maxPerTarget) || 5);
             minDuration = cleanText(tab.minDuration) || '00:30:00';
             maxDuration = cleanText(tab.maxDuration) || '99:59:59';
             dateFilterEnabled = !!tab.dateFilterEnabled;
@@ -777,6 +784,7 @@ javascript:(function(){
             tab.selectedUnits = Array.isArray(selectedUnits) ? selectedUnits.filter(u => UNITS_AVAILABLE.includes(u)) : [];
             if (!tab.selectedUnits.length) tab.selectedUnits = [...UNITS_CHECKED_BY_DEFAULT];
             tab.maxPerVillage = Math.max(1, toInt(maxPerVillage) || 5);
+            tab.maxPerTarget = Math.max(1, toInt(maxPerTarget) || 5);
             tab.minDuration = cleanText(minDuration) || '00:30:00';
             tab.maxDuration = cleanText(maxDuration) || '99:59:59';
             tab.dateFilterEnabled = !!dateFilterEnabled;
@@ -815,6 +823,7 @@ javascript:(function(){
                         timeWindows: Array.isArray(config.timeWindows) ? config.timeWindows : [],
                         selectedUnits: Array.isArray(config.selectedUnits) ? config.selectedUnits : [...UNITS_CHECKED_BY_DEFAULT],
                         maxPerVillage: config.maxPerVillage,
+                        maxPerTarget: config.maxPerTarget,
                         minDuration: config.minDuration,
                         maxDuration: config.maxDuration,
                         dateFilterEnabled: config.dateFilterEnabled,
@@ -860,6 +869,7 @@ javascript:(function(){
                 noblePretimeWindowMinutes: tab.noblePretimeWindowMinutes,
                 noblePretimeWindows: tab.noblePretimeWindows,
                 maxPerVillage: tab.maxPerVillage,
+                maxPerTarget: tab.maxPerTarget,
                 minDuration: tab.minDuration,
                 maxDuration: tab.maxDuration,
                 dateFilterEnabled: tab.dateFilterEnabled,
@@ -1171,6 +1181,9 @@ javascript:(function(){
             const maxPvInput = document.getElementById('ts-max-per-village');
             if (maxPvInput) maxPerVillage = Math.max(1, toInt(maxPvInput.value) || 5);
 
+            const maxPtInput = document.getElementById('ts-max-per-target');
+            if (maxPtInput) maxPerTarget = Math.max(1, toInt(maxPtInput.value) || 5);
+
             const minDurInput = document.getElementById('ts-min-duration');
             if (minDurInput) minDuration = cleanText(minDurInput.value) || '00:30:00';
 
@@ -1231,6 +1244,9 @@ javascript:(function(){
 
             const maxPvInput = document.getElementById('ts-max-per-village');
             if (maxPvInput) maxPvInput.value = String(maxPerVillage);
+
+            const maxPtInput = document.getElementById('ts-max-per-target');
+            if (maxPtInput) maxPtInput.value = String(maxPerTarget);
 
             const minDurInput = document.getElementById('ts-min-duration');
             if (minDurInput) minDurInput.value = minDuration;
@@ -1628,6 +1644,7 @@ javascript:(function(){
                 .filter(u => UNITS_AVAILABLE.includes(u));
             if (!tab.selectedUnits.length) tab.selectedUnits = [...UNITS_CHECKED_BY_DEFAULT];
             tab.maxPerVillage = Math.max(1, toInt(payload.maxPerVillage) || tab.maxPerVillage || 5);
+            tab.maxPerTarget = Math.max(1, toInt(payload.maxPerTarget) || tab.maxPerTarget || 5);
             tab.minDuration = cleanText(payload.minDuration) || tab.minDuration || '00:30:00';
             tab.maxDuration = cleanText(payload.maxDuration) || tab.maxDuration || '99:59:59';
             tab.dateFilterEnabled = !!payload.dateFilterEnabled;
@@ -1787,6 +1804,7 @@ javascript:(function(){
                 '~~~~~~~~~~~~~~~~',
                 '',
                 `Макс отпр с деревни: ${Math.max(1, toInt(tab.maxPerVillage) || 5)}`,
+                `Макс отправок на деру: ${Math.max(1, toInt(tab.maxPerTarget) || 5)}`,
                 '',
                 '~~~~~~~~~~~~~~~~',
                 '',
@@ -2987,6 +3005,7 @@ javascript:(function(){
             console.log('Time windows:', winList);
             console.log('Selected units:', selectedUnits);
             console.log('Max per village:', maxPerVillage);
+            console.log('Max per target:', maxPerTarget);
             console.log('Min duration:', minDuration);
             console.log('Date filter:', useDateFilter ? `ON (${targetDate})` : 'OFF');
             console.log('Noble pretime enabled:', noblePretimeEnabled, 'entries:', noblePretimeWindows.length, 'windowMin:', noblePretimeWindowMinutes);
@@ -3008,9 +3027,11 @@ javascript:(function(){
 
                     const scheduledSet = new Set();
                     const villageAttackCount = {};
+                    const targetAttackCount = {};
                     existingCommands.forEach(cmd => {
                         scheduledSet.add(`${cmd.villageId}_${cmd.targetKey}`);
                         villageAttackCount[cmd.villageId] = (villageAttackCount[cmd.villageId] || 0) + 1;
+                        targetAttackCount[cmd.targetKey] = (targetAttackCount[cmd.targetKey] || 0) + 1;
                     });
 
                     const allVillageIds = new Set([...Object.keys(unitsData), ...Object.keys(prodData)]);
@@ -3065,7 +3086,9 @@ javascript:(function(){
                     const results = [];
                     const villageArmyCache = {};
                     const scheduledCount = {};
+                    const targetScheduledCount = {};
                     Object.entries(villageAttackCount).forEach(([vid, cnt]) => { scheduledCount[vid] = cnt; });
+                    Object.entries(targetAttackCount).forEach(([tKey, cnt]) => { targetScheduledCount[tKey] = cnt; });
                     const minTravelSec = useDateFilter ? 0 : parseDurationToSec(minDuration, 0);
                     const maxTravelSec = useDateFilter ? Number.POSITIVE_INFINITY : parseDurationToSec(maxDuration, 99 * 3600 + 59 * 60 + 59);
 
@@ -3123,6 +3146,8 @@ javascript:(function(){
                                 }
                                 const currentCount = scheduledCount[villageId] || 0;
                                 if (currentCount >= maxPerVillage) return;
+                                const currentTargetCount = targetScheduledCount[targetKey] || 0;
+                                if (currentTargetCount >= maxPerTarget) return;
                                 let effectiveHpf = hpf;
                                 if (sigilEnabled && target.sigil && sigilPercent > 0) {
                                     effectiveHpf = hpf / (1 + sigilPercent / 100);
@@ -3153,6 +3178,7 @@ javascript:(function(){
                                 const arrivalLabel = useDateFilter ? `${formatServerDateYmd(arrivalMs)} ${arrivalTimeStr}` : arrivalTimeStr;
                                 results.push({ villageId, villageCoord:`${ud.coord.x}|${ud.coord.y}`, targetCoord:targetKey, unit:taskName, distance:Number(dist).toFixed(2), travelTime:formatDuration(travelMs), sendTime:formatHMS(nowMs), arrivalTime:arrivalLabel, windowLabel:matched.label, army:armyText, armyPop, sendUrl });
                                 scheduledCount[villageId] = (scheduledCount[villageId]||0)+1;
+                                targetScheduledCount[targetKey] = (targetScheduledCount[targetKey] || 0) + 1;
                             };
 
                             if (useTemplates) {
@@ -3266,7 +3292,17 @@ javascript:(function(){
 
                         if (nearestCandidates.length > 0) {
                             nearestCandidates.sort((a, b) => a.waitSec - b.waitSec);
-                            const nearest30 = nearestCandidates.slice(0, 30);
+                            const nearest30 = [];
+                            const capByTarget = {};
+                            Object.entries(targetAttackCount).forEach(([tKey, cnt]) => { capByTarget[tKey] = cnt; });
+                            nearestCandidates.forEach(item => {
+                                if (nearest30.length >= 30) return;
+                                const tKey = cleanText(item.targetCoord);
+                                const cnt = capByTarget[tKey] || 0;
+                                if (cnt >= maxPerTarget) return;
+                                capByTarget[tKey] = cnt + 1;
+                                nearest30.push(item);
+                            });
                             showNearestWindow(nearest30);
                         } else {
                             showNearestWindow([]);
@@ -3368,6 +3404,8 @@ javascript:(function(){
                     <hr class="ts-hr">
                     <div class="ts-label">Макс спама с деревни</div>
                     <input type="number" id="ts-max-per-village" class="ts-number-input" value="5" min="1" max="50">
+                    <div class="ts-label" style="margin-top:6px">Макс отправок на деру</div>
+                    <input type="number" id="ts-max-per-target" class="ts-number-input" value="5" min="1" max="200">
                     <hr class="ts-hr">
                     <div id="ts-duration-block" class="ts-duration-block">
                         <div class="ts-label">Минимальная длительность</div>
