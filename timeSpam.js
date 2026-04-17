@@ -1948,6 +1948,11 @@ javascript:(function(){
                 .ts-tab-title { pointer-events:none; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
                 .ts-tab-rename { border:1px solid #b08b4f; background:#fff6de; border-radius:4px; padding:0 4px; line-height:18px; height:20px; cursor:pointer; font-size:12px; }
                 .ts-tab.active .ts-tab-rename { border-color:#9a7439; }
+                .ts-commands-filter-warning { display:none; flex-direction:column; gap:6px; margin-bottom:10px; background:#fff1d8; border:1px solid #d6942a; border-radius:8px; padding:8px 10px; }
+                .ts-commands-filter-warning-title { font-size:12px; font-weight:bold; color:#7c4100; }
+                .ts-commands-filter-warning-sub { font-size:11px; color:#7c5a2f; }
+                .ts-commands-filter-warning-btn { align-self:flex-start; border:none; border-radius:5px; background:#b08b4f; color:#fff; font-size:12px; font-weight:bold; padding:6px 10px; cursor:pointer; }
+                .ts-commands-filter-warning-btn:hover { background:#9a7439; }
                 .ts-gas-label { display:block; margin-bottom:8px; font-size:13px; font-weight:bold; cursor:pointer; }
                 .ts-label { font-weight:bold; font-size:13px; }
                 .ts-coords { width:100%; box-sizing:border-box; font:13px/1.4 monospace; border:1px solid #b08b4f; border-radius:6px; padding:8px; resize:vertical; background:#fffbe8; }
@@ -2514,6 +2519,82 @@ javascript:(function(){
 
         function formatArmy(comp) {
             return Object.entries(comp).filter(([, c]) => c > 0).map(([u, c]) => `${u}: ${c}`).join(', ') || '—';
+        }
+
+        function buildCommandsOverviewUrl(groupId = '0') {
+            const gid = encodeURIComponent(cleanText(groupId) || '0');
+            return `/game.php?village=${window.game_data.village.id}&screen=overview_villages&mode=commands&type=all&group=${gid}&page=0`;
+        }
+
+        function extractCommandsFilterStateFromDoc(doc) {
+            const root = doc || document;
+            const form =
+                root.querySelector('.overview_filters form[action*="action=save_filters"]') ||
+                root.querySelector('form[action*="mode=commands"][action*="action=save_filters"]');
+            if (!form) return { hasForm: false, active: false, reasons: [] };
+
+            const reasons = [];
+            const attackComment = cleanText(form.querySelector('input[name="filters[start_comment]"]')?.value || '');
+            const originName = cleanText(form.querySelector('input[name="filters[origin_name]"]')?.value || '');
+            const sizeFilter = cleanText(form.querySelector('input[name="filter_icon_radio"]:checked')?.value || '');
+            const iconFilterCount = form.querySelectorAll('input[name^="filter_icon["]:checked').length;
+
+            if (attackComment) reasons.push('метка атаки');
+            if (originName) reasons.push('деревня атаки');
+            if (sizeFilter && sizeFilter !== '0') reasons.push('размер атаки');
+            if (iconFilterCount > 0) reasons.push('иконки приказов');
+
+            return { hasForm: true, active: reasons.length > 0, reasons };
+        }
+
+        function parseCommandsFilterStateFromHtml(html) {
+            const doc = new DOMParser().parseFromString(String(html || ''), 'text/html');
+            return extractCommandsFilterStateFromDoc(doc);
+        }
+
+        function renderCommandsFilterWarning(state) {
+            const box = document.getElementById('ts-commands-filter-warning');
+            if (!box) return;
+
+            if (!state || !state.active) {
+                box.style.display = 'none';
+                box.innerHTML = '';
+                return;
+            }
+
+            const reasons = Array.isArray(state.reasons) ? state.reasons.filter(Boolean) : [];
+            const reasonsText = reasons.length ? `Активно: ${reasons.join(', ')}.` : '';
+            box.innerHTML = `
+                <div class="ts-commands-filter-warning-title">Для корректной работы скрипта отключите фильтры на странице приказов.</div>
+                ${reasonsText ? `<div class="ts-commands-filter-warning-sub">${escapeHtml(reasonsText)}</div>` : ''}
+                <button type="button" id="ts-open-commands-btn" class="ts-commands-filter-warning-btn">Перейти к приказам</button>
+            `;
+            box.style.display = 'flex';
+
+            const btn = box.querySelector('#ts-open-commands-btn');
+            if (btn) {
+                btn.onclick = () => {
+                    const groupId = cleanText(document.getElementById('ts-group')?.value) || '0';
+                    location.href = buildCommandsOverviewUrl(groupId);
+                };
+            }
+        }
+
+        async function checkAndRenderCommandsFilterWarning() {
+            try {
+                let state = null;
+                const gd = window.game_data || {};
+                if (gd.screen === 'overview_villages' && gd.mode === 'commands') {
+                    state = extractCommandsFilterStateFromDoc(document);
+                } else {
+                    const html = await fetchPageFresh(buildCommandsOverviewUrl('0'));
+                    state = parseCommandsFilterStateFromHtml(html);
+                }
+                renderCommandsFilterWarning(state);
+            } catch (err) {
+                console.warn('[TimeSpam] commands filter check failed:', err);
+                renderCommandsFilterWarning(null);
+            }
         }
 
         function parseCommandsPage(html) {
@@ -3454,6 +3535,7 @@ javascript:(function(){
                 </div>
                 <div class="ts-body">
                     <div id="ts-tabs" class="ts-tabs"></div>
+                    <div id="ts-commands-filter-warning" class="ts-commands-filter-warning"></div>
                     <label class="ts-gas-label" style="display:none"><input type="checkbox" id="ts-gas-cb"> Грузить данные с GAS</label>
                     <label class="ts-label">Группа</label>
                     <select id="ts-group" class="ts-select"></select>
@@ -3520,6 +3602,7 @@ javascript:(function(){
             $textarea = document.getElementById('ts-coords');
             applyActiveTabToUI();
             setNoblePretimeProgress(false);
+            checkAndRenderCommandsFilterWarning();
 
             document.getElementById('ts-help-btn').onclick = () => { showHelpWindow(); };
             document.getElementById('ts-close-btn').onclick = () => {
