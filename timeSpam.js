@@ -460,9 +460,20 @@ javascript:(function(){
             return parseTsImportPayloads(text);
         }
 
-        function navigateToSendInSameTab(fullUrl) {
+        function navigateToSend(fullUrl, openNewTabFast = false) {
             const url = cleanText(fullUrl);
             if (!url) return;
+            if (openNewTabFast) {
+                try {
+                    const newTab = window.open(url, '_blank');
+                    if (newTab) {
+                        try { newTab.focus(); } catch(e) {}
+                        return;
+                    }
+                } catch(e) {}
+                try { location.href = url; } catch(e) { location.assign(url); }
+                return;
+            }
             setTimeout(() => {
                 try {
                     const newTab = window.open(url, '_blank');
@@ -600,6 +611,7 @@ javascript:(function(){
         let sigilPercent = 0;
         let noblePretimeEnabled = false;
         let noblePretimeWindowMinutes = 3;
+        let openInNewTab = false;
         let noblePretimeWindows = [];
         let noblePretimeRunToken = 0;
         let activeTabIndex = 0;
@@ -644,6 +656,7 @@ javascript:(function(){
                 sigilPercent: 0,
                 noblePretimeEnabled: false,
                 noblePretimeWindowMinutes: 3,
+                openInNewTab: false,
                 noblePretimeWindows: [],
                 groupId: '0',
                 templateActiveIndices: []
@@ -690,6 +703,7 @@ javascript:(function(){
                 base.sigilPercent = Math.max(0, Math.min(50, toInt(raw.sigilPercent) || 0));
                 base.noblePretimeEnabled = !!raw.noblePretimeEnabled;
                 base.noblePretimeWindowMinutes = Math.max(1, toInt(raw.noblePretimeWindowMinutes) || 3);
+                base.openInNewTab = !!raw.openInNewTab;
                 base.noblePretimeWindows = pretimeRaw.map(normalizeNoblePretimeEntry).filter(Boolean);
                 base.groupId = cleanText(raw.groupId) || '0';
                 if (Array.isArray(raw.templateActiveIndices)) {
@@ -761,6 +775,7 @@ javascript:(function(){
             sigilPercent = Math.max(0, Math.min(50, toInt(tab.sigilPercent) || 0));
             noblePretimeEnabled = !!tab.noblePretimeEnabled;
             noblePretimeWindowMinutes = Math.max(1, toInt(tab.noblePretimeWindowMinutes) || 3);
+            openInNewTab = !!tab.openInNewTab;
             noblePretimeWindows = (Array.isArray(tab.noblePretimeWindows) ? tab.noblePretimeWindows : [])
                 .map(normalizeNoblePretimeEntry)
                 .filter(Boolean);
@@ -793,6 +808,7 @@ javascript:(function(){
             tab.sigilPercent = Math.max(0, Math.min(50, toInt(sigilPercent) || 0));
             tab.noblePretimeEnabled = !!noblePretimeEnabled;
             tab.noblePretimeWindowMinutes = Math.max(1, toInt(noblePretimeWindowMinutes) || 3);
+            tab.openInNewTab = !!openInNewTab;
             tab.noblePretimeWindows = (Array.isArray(noblePretimeWindows) ? noblePretimeWindows : [])
                 .map(normalizeNoblePretimeEntry)
                 .filter(Boolean);
@@ -832,6 +848,7 @@ javascript:(function(){
                         sigilPercent: config.sigilPercent,
                         noblePretimeEnabled: config.noblePretimeEnabled,
                         noblePretimeWindowMinutes: config.noblePretimeWindowMinutes,
+                        openInNewTab: config.openInNewTab,
                         noblePretimeWindows: Array.isArray(config.noblePretimeWindows) ? config.noblePretimeWindows : [],
                         groupId: config.groupId,
                         templateActiveIndices: oldActiveIds
@@ -867,6 +884,7 @@ javascript:(function(){
                 sigilPercent: tab.sigilPercent,
                 noblePretimeEnabled: tab.noblePretimeEnabled,
                 noblePretimeWindowMinutes: tab.noblePretimeWindowMinutes,
+                openInNewTab: tab.openInNewTab,
                 noblePretimeWindows: tab.noblePretimeWindows,
                 maxPerVillage: tab.maxPerVillage,
                 maxPerTarget: tab.maxPerTarget,
@@ -1207,6 +1225,9 @@ javascript:(function(){
 
             const nobleMinsInput = document.getElementById('ts-noble-minutes');
             if (nobleMinsInput) noblePretimeWindowMinutes = Math.max(1, toInt(nobleMinsInput.value) || 3);
+
+            const openTabCb = document.getElementById('ts-open-new-tab-cb');
+            if (openTabCb) openInNewTab = !!openTabCb.checked;
         }
 
         function renderTabs() {
@@ -1275,6 +1296,9 @@ javascript:(function(){
                 nobleMinsInput.value = String(noblePretimeWindowMinutes);
                 nobleMinsInput.disabled = !noblePretimeEnabled;
             }
+
+            const openTabCb = document.getElementById('ts-open-new-tab-cb');
+            if (openTabCb) openTabCb.checked = !!openInNewTab;
 
             const groupSel = document.getElementById('ts-group');
             if (groupSel) {
@@ -1954,6 +1978,8 @@ javascript:(function(){
                 .ts-noble-progress-track { height:8px; border-radius:999px; background:#e2d3b4; overflow:hidden; }
                 .ts-noble-progress-fill { width:0%; height:100%; background:#27ae60; transition:width .2s linear; }
                 .ts-noble-progress-text { margin-top:5px; font-size:11px; color:#5f4d37; }
+                .ts-open-tab-block { display:flex; flex-direction:column; gap:4px; }
+                .ts-open-tab-label { font-size:13px; font-weight:bold; cursor:pointer; display:flex; align-items:center; gap:6px; }
                 .ts-templates-block { }
                 .ts-templates-head { display:flex; align-items:center; justify-content:space-between; margin-bottom:6px; }
                 .ts-tmpl-add-btn { padding:4px 10px; background:#e67e22; color:#fff; border:none; border-radius:4px; cursor:pointer; font-size:12px; font-weight:bold; }
@@ -2884,7 +2910,7 @@ javascript:(function(){
                             } else {
                                 const fullUrl = `${location.origin}${location.pathname}?${r.sendUrl}`;
                                 console.log(`%c>>> Отправлено ${uniqueResults.length} ссылок, переходим в этой вкладке: ${fullUrl}`, 'font-size:14px;font-weight:bold;color:red');
-                                navigateToSendInSameTab(fullUrl);
+                                navigateToSend(fullUrl, openInNewTab);
                             }
                         } else {
                             console.log('%c>>> Нет доступных отправок', 'font-size:14px;font-weight:bold;color:orange');
@@ -3035,6 +3061,7 @@ javascript:(function(){
             console.log('Selected units:', selectedUnits);
             console.log('Max per village:', maxPerVillage);
             console.log('Max per target:', maxPerTarget);
+            console.log('Open in new tab:', openInNewTab);
             console.log('Min duration:', minDuration);
             console.log('Date filter:', useDateFilter ? `ON (${targetDate})` : 'OFF');
             console.log('Noble pretime enabled:', noblePretimeEnabled, 'entries:', noblePretimeWindows.length, 'windowMin:', noblePretimeWindowMinutes);
@@ -3379,7 +3406,7 @@ javascript:(function(){
                             } else {
                                 const fullUrl = `${location.origin}${location.pathname}?${r.sendUrl}`;
                                 console.log(`%c>>> ${uniqueResults.length} ссылок, переходим в этой вкладке: ${fullUrl}`, 'font-size:14px;font-weight:bold;color:red');
-                                navigateToSendInSameTab(fullUrl);
+                                navigateToSend(fullUrl, openInNewTab);
                             }
                         } else {
                             console.log('%c>>> Нет доступных отправок', 'font-size:14px;font-weight:bold;color:orange');
@@ -3475,6 +3502,10 @@ javascript:(function(){
                             <div class="ts-noble-progress-track"><div id="ts-noble-progress-fill" class="ts-noble-progress-fill"></div></div>
                             <div id="ts-noble-progress-text" class="ts-noble-progress-text"></div>
                         </div>
+                    </div>
+                    <hr class="ts-hr">
+                    <div class="ts-open-tab-block">
+                        <label class="ts-open-tab-label"><input type="checkbox" id="ts-open-new-tab-cb"> Открывать в новой вкладке</label>
                     </div>
                     <hr class="ts-hr">
                     <div class="ts-label">Временные окна</div>
@@ -3600,6 +3631,7 @@ javascript:(function(){
             const sigilPct = document.getElementById('ts-sigil-pct');
             const nobleCb = document.getElementById('ts-noble-cb');
             const nobleMins = document.getElementById('ts-noble-minutes');
+            const openTabCb = document.getElementById('ts-open-new-tab-cb');
             const dateCb = document.getElementById('ts-date-cb');
             const dateInput = document.getElementById('ts-target-date');
 
@@ -3673,6 +3705,13 @@ javascript:(function(){
                     saveConfig();
                     const gSel = document.getElementById('ts-group');
                     if (gSel) runWithGroup(gSel.value || '0');
+                });
+            }
+
+            if (openTabCb) {
+                openTabCb.addEventListener('change', function() {
+                    openInNewTab = !!this.checked;
+                    saveConfig();
                 });
             }
 
