@@ -474,19 +474,7 @@ javascript:(function(){
                 try { location.href = url; } catch(e) { location.assign(url); }
                 return;
             }
-            setTimeout(() => {
-                try {
-                    const newTab = window.open(url, '_blank');
-                    if (newTab) {
-                        try { newTab.focus(); } catch(e) {}
-                        setTimeout(() => {
-                            try { window.close(); } catch(e) {}
-                        }, 180);
-                        return;
-                    }
-                } catch(e) {}
-                try { location.href = url; } catch(e) { location.assign(url); }
-            }, 320);
+            try { location.href = url; } catch(e) { location.assign(url); }
         }
 
         function readSupportCycleState() {
@@ -2521,30 +2509,104 @@ javascript:(function(){
             return Object.entries(comp).filter(([, c]) => c > 0).map(([u, c]) => `${u}: ${c}`).join(', ') || '—';
         }
 
-        function buildCommandsOverviewUrl(groupId = '0') {
+        function buildCommandsOverviewUrl(groupId = '0', forceTypeAll = true) {
             const gid = encodeURIComponent(cleanText(groupId) || '0');
-            return `/game.php?village=${window.game_data.village.id}&screen=overview_villages&mode=commands&type=all&group=${gid}&page=0`;
+            let url = `/game.php?village=${window.game_data.village.id}&screen=overview_villages&mode=commands&group=${gid}&page=0`;
+            if (forceTypeAll) url += '&type=all';
+            return url;
+        }
+
+        function parseSelectedCommandsType(doc) {
+            const root = doc || document;
+            let type = '';
+            const selected = root.querySelector('table.modemenu td.selected a[href*="mode=commands"]');
+            if (selected) {
+                const href = cleanText(selected.getAttribute('href') || selected.href || '');
+                const m = href.match(/[?&]type=([a-z_]+)/i);
+                if (m) type = cleanText(m[1]).toLowerCase();
+            }
+            if (!type && root === document) {
+                const fromUrl = cleanText(new URLSearchParams(location.search).get('type')).toLowerCase();
+                if (fromUrl) type = fromUrl;
+            }
+            return type;
+        }
+
+        function prettyCommandsType(type) {
+            const key = cleanText(type).toLowerCase();
+            if (key === 'attack') return 'атаки';
+            if (key === 'support') return 'подкрепления';
+            if (key === 'return') return 'возвраты';
+            return key;
         }
 
         function extractCommandsFilterStateFromDoc(doc) {
             const root = doc || document;
+            const reasons = [];
+
+            const selectedType = parseSelectedCommandsType(root);
+            if (selectedType && selectedType !== 'all') {
+                reasons.push(`тип приказов: ${prettyCommandsType(selectedType)}`);
+            }
+
             const form =
                 root.querySelector('.overview_filters form[action*="action=save_filters"]') ||
                 root.querySelector('form[action*="mode=commands"][action*="action=save_filters"]');
-            if (!form) return { hasForm: false, active: false, reasons: [] };
+            const hasForm = !!form;
 
+            if (form) {
+                const attackComment = cleanText(form.querySelector('input[name="filters[start_comment]"]')?.value || '');
+                const originName = cleanText(form.querySelector('input[name="filters[origin_name]"]')?.value || '');
+                const sizeFilter = cleanText(form.querySelector('input[name="filter_icon_radio"]:checked')?.value || '');
+                const iconFilterCount = form.querySelectorAll('input[name^="filter_icon["]:checked').length;
+
+                if (attackComment) reasons.push('метка атаки');
+                if (originName) reasons.push('деревня атаки');
+                if (sizeFilter && sizeFilter !== '0') reasons.push('размер атаки');
+                if (iconFilterCount > 0) reasons.push('иконки приказов');
+            }
+
+            return { hasForm, active: reasons.length > 0, reasons };
+        }
+
+        function extractStoredOutgoingFilterState() {
             const reasons = [];
-            const attackComment = cleanText(form.querySelector('input[name="filters[start_comment]"]')?.value || '');
-            const originName = cleanText(form.querySelector('input[name="filters[origin_name]"]')?.value || '');
-            const sizeFilter = cleanText(form.querySelector('input[name="filter_icon_radio"]:checked')?.value || '');
-            const iconFilterCount = form.querySelectorAll('input[name^="filter_icon["]:checked').length;
+            try {
+                for (let i = 0; i < localStorage.length; i++) {
+                    const key = cleanText(localStorage.key(i));
+                    if (!key) continue;
+                    if (!/overview_filter_outgoing|commands.*filter|filter.*commands/i.test(key)) continue;
+                    const raw = cleanText(localStorage.getItem(key));
+                    if (!raw) continue;
 
-            if (attackComment) reasons.push('метка атаки');
-            if (originName) reasons.push('деревня атаки');
-            if (sizeFilter && sizeFilter !== '0') reasons.push('размер атаки');
-            if (iconFilterCount > 0) reasons.push('иконки приказов');
+                    let active = false;
+                    try {
+                        const parsed = JSON.parse(raw);
+                        if (parsed && typeof parsed === 'object') {
+                            const entries = Object.entries(parsed);
+                            entries.forEach(([k, v]) => {
+                                if (active) return;
+                                const kk = cleanText(k).toLowerCase();
+                                const vv = cleanText(typeof v === 'string' ? v : JSON.stringify(v)).toLowerCase();
+                                if (!vv || vv === '0' || vv === 'false' || vv === 'null' || vv === '[]' || vv === '{}') return;
+                                if (/start_comment|origin_name|filter_icon|icon|radio|type/.test(kk)) active = true;
+                            });
+                        } else {
+                            const vv = cleanText(raw).toLowerCase();
+                            active = !!vv && vv !== '0' && vv !== 'false' && vv !== 'null' && vv !== '[]' && vv !== '{}';
+                        }
+                    } catch(e) {
+                        const vv = cleanText(raw).toLowerCase();
+                        active = !!vv && vv !== '0' && vv !== 'false' && vv !== 'null' && vv !== '[]' && vv !== '{}';
+                    }
 
-            return { hasForm: true, active: reasons.length > 0, reasons };
+                    if (active) {
+                        reasons.push('сохранённый фильтр приказов');
+                        break;
+                    }
+                }
+            } catch(e) {}
+            return { active: reasons.length > 0, reasons };
         }
 
         function parseCommandsFilterStateFromHtml(html) {
@@ -2587,13 +2649,27 @@ javascript:(function(){
                 if (gd.screen === 'overview_villages' && gd.mode === 'commands') {
                     state = extractCommandsFilterStateFromDoc(document);
                 } else {
-                    const html = await fetchPageFresh(buildCommandsOverviewUrl('0'));
+                    const html = await fetchPageFresh(buildCommandsOverviewUrl('0', false));
                     state = parseCommandsFilterStateFromHtml(html);
                 }
-                renderCommandsFilterWarning(state);
+
+                const storageState = extractStoredOutgoingFilterState();
+                const reasons = Array.isArray(state?.reasons) ? [...state.reasons] : [];
+                (storageState.reasons || []).forEach(r => {
+                    const reason = cleanText(r);
+                    if (!reason) return;
+                    if (!reasons.includes(reason)) reasons.push(reason);
+                });
+
+                renderCommandsFilterWarning({
+                    hasForm: !!state?.hasForm,
+                    active: reasons.length > 0,
+                    reasons
+                });
             } catch (err) {
                 console.warn('[TimeSpam] commands filter check failed:', err);
-                renderCommandsFilterWarning(null);
+                const storageState = extractStoredOutgoingFilterState();
+                renderCommandsFilterWarning(storageState.active ? storageState : null);
             }
         }
 
