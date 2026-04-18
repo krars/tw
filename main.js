@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.18";
+  const VERSION = "0.10.16";
   const LOG_PREFIX = "[ScriptMM]";
   const MULTI_TAB_PRESENCE_KEY = "scriptmm.active_instances.v1";
   const MULTI_TAB_HEARTBEAT_INTERVAL_MS = 3000;
@@ -12,7 +12,6 @@
     .toString(36)
     .slice(2, 10)}`;
   const SPEED_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
-  const TROOPS_CACHE_TTL_MS = 30 * 1000;
   const MAX_FETCHES_PER_SECOND = 4;
   const FETCH_REQUEST_TIMEOUT_MS = 12000;
   const FETCH_MIN_INTERVAL_MS = Math.max(
@@ -2050,42 +2049,9 @@
     };
   };
 
-  let detectedPageSigilCacheValue = null;
-  let detectedPageSigilCacheAtMs = 0;
-  const getDetectedPageSigilPercentCached = () => {
-    const nowMs = Date.now();
-    if (
-      Number.isFinite(detectedPageSigilCacheValue) &&
-      nowMs - detectedPageSigilCacheAtMs <= 1500
-    ) {
-      return normalizeSigilPercent(detectedPageSigilCacheValue);
-    }
-    const liveSigil = normalizeSigilPercent(detectActiveSigilPercent());
-    detectedPageSigilCacheValue = liveSigil;
-    detectedPageSigilCacheAtMs = nowMs;
-    return liveSigil;
-  };
-
   const getDefaultSigilForAction = (action) => {
     if (!actionUsesSigil(action)) return 0;
-    const liveSigil = getDetectedPageSigilPercentCached();
-    if (liveSigil > 0) {
-      state.detectedSigilPercent = liveSigil;
-      return liveSigil;
-    }
-
-    const stateSigil = normalizeSigilPercent(state.detectedSigilPercent);
-    if (stateSigil > 0) return stateSigil;
-
-    const snapshotSigil = normalizeSigilPercent(
-      toNumber(state.snapshot && state.snapshot.sigilPercent),
-    );
-    if (snapshotSigil > 0) {
-      state.detectedSigilPercent = snapshotSigil;
-      return snapshotSigil;
-    }
-
-    return stateSigil;
+    return normalizeSigilPercent(state.detectedSigilPercent);
   };
 
   const getIncomingSigilPercent = (incoming) => {
@@ -2111,37 +2077,10 @@
     const explicitSigil = toNumber(explicitSigilRaw);
     if (Number.isFinite(explicitSigil))
       return normalizeSigilPercent(explicitSigil);
-    const defaultSigil = normalizeSigilPercent(getDefaultSigilForAction(action));
     const incomingSigil = getIncomingSigilPercent(incoming);
-    const shouldPreferIncomingSigil = Boolean(
-      incoming &&
-        (incoming.isHubIncoming ||
-          incoming.isHubMass ||
-          incoming.isTribeIncoming ||
-          incoming.isTribeAllyCommand ||
-          incoming.isTribeAllyPlanned ||
-          incoming.isFavoriteEntry),
-    );
-    if (Number.isFinite(incomingSigil)) {
-      if (shouldPreferIncomingSigil) {
-        return normalizeSigilPercent(incomingSigil);
-      }
-    }
-    return defaultSigil;
-  };
-
-  const restoreDetectedSigilPercentFromSnapshot = () => {
-    const snapshot = readJson(STORAGE_KEYS.snapshot);
-    if (!snapshot || typeof snapshot !== "object") return false;
-    state.snapshot = snapshot;
-    const snapshotSigil = normalizeSigilPercent(
-      toNumber(snapshot && snapshot.sigilPercent),
-    );
-    if (snapshotSigil > 0) {
-      state.detectedSigilPercent = snapshotSigil;
-      return true;
-    }
-    return false;
+    if (Number.isFinite(incomingSigil))
+      return normalizeSigilPercent(incomingSigil);
+    return normalizeSigilPercent(getDefaultSigilForAction(action));
   };
 
   const isSameVillageAsIncomingTarget = (incoming, village) => {
@@ -3329,24 +3268,6 @@
   };
 
   const getServerNowMs = () => getServerNow().getTime();
-  const resolvePayloadFetchedAtMs = (payload) => {
-    if (!payload || typeof payload !== "object") return NaN;
-    const fetchedAtMs = Number(payload.fetchedAtMs);
-    if (Number.isFinite(fetchedAtMs) && fetchedAtMs > 0) return fetchedAtMs;
-    const fetchedAtText =
-      cleanText(payload.fetchedAt) || cleanText(payload.generatedAt) || null;
-    if (!fetchedAtText) return NaN;
-    return Number(safe(() => new Date(fetchedAtText).getTime(), NaN));
-  };
-  const isPayloadFreshByFetchedAt = (payload, ttlMs) => {
-    if (!payload || typeof payload !== "object") return false;
-    const maxAgeMs = Math.max(0, Number(ttlMs) || 0);
-    if (!maxAgeMs) return false;
-    const fetchedAtMs = resolvePayloadFetchedAtMs(payload);
-    if (!Number.isFinite(fetchedAtMs)) return false;
-    const ageMs = getServerNowMs() - fetchedAtMs;
-    return Number.isFinite(ageMs) && ageMs <= maxAgeMs;
-  };
   const normalizePlanAction = (action) => {
     const value = cleanText(action);
     return value && PLAN_ACTIONS.includes(value) ? value : "slice";
@@ -10297,15 +10218,12 @@
       if (Number.isFinite(Number(favoriteSigil))) {
         incoming.sigilPercent = normalizeSigilPercent(Number(favoriteSigil));
       }
-      const explicitSigilPercent =
-        Number.isFinite(Number(favoriteSigil)) &&
-        normalizeSigilPercent(Number(favoriteSigil)) > 0
-          ? Number(favoriteSigil)
-          : undefined;
       const defaultSigilPercent = resolveSigilPercentForAction(
         "slice",
         incoming,
-        explicitSigilPercent,
+        Number.isFinite(Number(favoriteSigil))
+          ? Number(favoriteSigil)
+          : incoming && incoming.sigilPercent,
       );
       const villagePlan = buildIncomingVillagePlans(incoming, {
         action: "slice",
@@ -18351,8 +18269,6 @@ ${panelHtml}`;
       clearMessageInlineActionButtons();
       return;
     }
-    ensureMessageStorageLoaded();
-    restoreDetectedSigilPercentFromSnapshot();
     state.messageMode = true;
     const payload = parseMessagePlanningPayload(document);
     const fallbackSpeedModel =
@@ -18397,9 +18313,15 @@ ${panelHtml}`;
     } else {
       state.infoVillageTargetCoord = null;
     }
-    const messageSigilPercent = normalizeSigilPercent(detectActiveSigilPercent());
-    if (messageSigilPercent > 0) {
-      state.detectedSigilPercent = messageSigilPercent;
+    const messageSigilPercent = detectActiveSigilPercent();
+    if (Number.isFinite(messageSigilPercent)) {
+      state.detectedSigilPercent = normalizeSigilPercent(
+        Math.max(
+          0,
+          Number(state.detectedSigilPercent) || 0,
+          messageSigilPercent,
+        ),
+      );
     }
     renderMessageInlineActionButtons(
       payload && Array.isArray(payload.anchors) ? payload.anchors : [],
@@ -18486,7 +18408,6 @@ ${panelHtml}`;
     if (!Array.isArray(state.hubEntries)) {
       state.hubEntries = [];
     }
-    restoreDetectedSigilPercentFromSnapshot();
     state.messageStorageLoaded = true;
   };
   const buildTroopsModelFromOverviewUnitsDump = (dump, warning = null) => ({
@@ -18573,23 +18494,10 @@ ${panelHtml}`;
     const hasTroops =
       state.troops &&
       Array.isArray(state.troops.villages) &&
-      state.troops.villages.length > 0 &&
-      isPayloadFreshByFetchedAt(state.troops, TROOPS_CACHE_TTL_MS);
+      state.troops.villages.length > 0;
     if (!hasTroops) {
-      const cachedOverviewUnitsRaw = readJson(STORAGE_KEYS.overviewUnits);
-      const cachedOverviewUnits = isPayloadFreshByFetchedAt(
-        cachedOverviewUnitsRaw,
-        TROOPS_CACHE_TTL_MS,
-      )
-        ? cachedOverviewUnitsRaw
-        : null;
-      const cachedTroopsRaw = readJson(STORAGE_KEYS.troops);
-      const cachedTroops = isPayloadFreshByFetchedAt(
-        cachedTroopsRaw,
-        TROOPS_CACHE_TTL_MS,
-      )
-        ? cachedTroopsRaw
-        : null;
+      const cachedOverviewUnits = readJson(STORAGE_KEYS.overviewUnits);
+      const cachedTroops = readJson(STORAGE_KEYS.troops);
       if (
         cachedOverviewUnits &&
         Array.isArray(cachedOverviewUnits.villages) &&
@@ -18644,25 +18552,12 @@ ${panelHtml}`;
     const hasDefenseTroops =
       state.troopsDefense &&
       Array.isArray(state.troopsDefense.villages) &&
-      state.troopsDefense.villages.length > 0 &&
-      isPayloadFreshByFetchedAt(state.troopsDefense, TROOPS_CACHE_TTL_MS);
+      state.troopsDefense.villages.length > 0;
     if (!hasDefenseTroops) {
-      const cachedOverviewUnitsDefenseRaw = readJson(
+      const cachedOverviewUnitsDefense = readJson(
         STORAGE_KEYS.overviewUnitsDefense,
       );
-      const cachedOverviewUnitsDefense = isPayloadFreshByFetchedAt(
-        cachedOverviewUnitsDefenseRaw,
-        TROOPS_CACHE_TTL_MS,
-      )
-        ? cachedOverviewUnitsDefenseRaw
-        : null;
-      const cachedTroopsDefenseRaw = readJson(STORAGE_KEYS.troopsDefense);
-      const cachedTroopsDefense = isPayloadFreshByFetchedAt(
-        cachedTroopsDefenseRaw,
-        TROOPS_CACHE_TTL_MS,
-      )
-        ? cachedTroopsDefenseRaw
-        : null;
+      const cachedTroopsDefense = readJson(STORAGE_KEYS.troopsDefense);
       if (
         cachedOverviewUnitsDefense &&
         Array.isArray(cachedOverviewUnitsDefense.villages) &&
@@ -19012,19 +18907,12 @@ ${panelHtml}`;
       return false;
     }
 
-    const nearestSigilPercent = normalizeSigilPercent(
-      detectNearestSigilPercentAboveNode(actionsNode),
-    );
-    const fallbackSigilPercent = normalizeSigilPercent(
-      getDefaultSigilForAction("slice"),
-    );
-    const messageSigilPercent =
-      nearestSigilPercent > 0
-        ? nearestSigilPercent
-        : fallbackSigilPercent > 0
-          ? fallbackSigilPercent
-          : null;
-    if (Number.isFinite(messageSigilPercent) && messageSigilPercent > 0) {
+    const nearestSigilPercent = detectNearestSigilPercentAboveNode(actionsNode);
+    const fallbackSigilPercent = detectActiveSigilPercent();
+    const messageSigilPercent = Number.isFinite(nearestSigilPercent)
+      ? nearestSigilPercent
+      : fallbackSigilPercent;
+    if (Number.isFinite(messageSigilPercent)) {
       state.detectedSigilPercent = normalizeSigilPercent(messageSigilPercent);
       incoming.sigilPercent = normalizeSigilPercent(messageSigilPercent);
     }
@@ -19032,8 +18920,7 @@ ${panelHtml}`;
     setPlanAction(incomingId, action);
     const actionLabel = PLAN_ACTION_LABELS[action] || action;
     panelNode.innerHTML = renderSlicePlanPanel(incoming, action, actionLabel, {
-      sigilPercent:
-        Number.isFinite(messageSigilPercent) && messageSigilPercent > 0
+      sigilPercent: Number.isFinite(messageSigilPercent)
         ? messageSigilPercent
         : undefined,
       renderGroupSelectInHeader: false,
@@ -19937,19 +19824,10 @@ ${panelHtml}`;
       };
     }
 
-    const cachedTroopsRaw = readJson(STORAGE_KEYS.troops);
-    const cachedTroops = isPayloadFreshByFetchedAt(
-      cachedTroopsRaw,
-      TROOPS_CACHE_TTL_MS,
-    )
-      ? cachedTroopsRaw
-      : null;
+    const cachedTroops = readJson(STORAGE_KEYS.troops);
     if (cachedTroops && Array.isArray(cachedTroops.villages)) {
       state.troops = cachedTroops;
-    } else if (
-      !state.troops ||
-      !isPayloadFreshByFetchedAt(state.troops, TROOPS_CACHE_TTL_MS)
-    ) {
+    } else if (!state.troops) {
       state.troops = {
         version: 1,
         fetchedAt: new Date(getServerNowMs()).toISOString(),
@@ -19960,19 +19838,10 @@ ${panelHtml}`;
       };
     }
 
-    const cachedTroopsDefenseRaw = readJson(STORAGE_KEYS.troopsDefense);
-    const cachedTroopsDefense = isPayloadFreshByFetchedAt(
-      cachedTroopsDefenseRaw,
-      TROOPS_CACHE_TTL_MS,
-    )
-      ? cachedTroopsDefenseRaw
-      : null;
+    const cachedTroopsDefense = readJson(STORAGE_KEYS.troopsDefense);
     if (cachedTroopsDefense && Array.isArray(cachedTroopsDefense.villages)) {
       state.troopsDefense = cachedTroopsDefense;
-    } else if (
-      !state.troopsDefense ||
-      !isPayloadFreshByFetchedAt(state.troopsDefense, TROOPS_CACHE_TTL_MS)
-    ) {
+    } else if (!state.troopsDefense) {
       state.troopsDefense = state.troops;
     }
 
@@ -19993,19 +19862,10 @@ ${panelHtml}`;
       };
     }
 
-    const cachedOverviewUnitsRaw = readJson(STORAGE_KEYS.overviewUnits);
-    const cachedOverviewUnits = isPayloadFreshByFetchedAt(
-      cachedOverviewUnitsRaw,
-      TROOPS_CACHE_TTL_MS,
-    )
-      ? cachedOverviewUnitsRaw
-      : null;
+    const cachedOverviewUnits = readJson(STORAGE_KEYS.overviewUnits);
     if (cachedOverviewUnits && typeof cachedOverviewUnits === "object") {
       state.overviewUnitsDump = cachedOverviewUnits;
-    } else if (
-      !state.overviewUnitsDump ||
-      !isPayloadFreshByFetchedAt(state.overviewUnitsDump, TROOPS_CACHE_TTL_MS)
-    ) {
+    } else if (!state.overviewUnitsDump) {
       state.overviewUnitsDump = {
         version: 1,
         fetchedAt: new Date(getServerNowMs()).toISOString(),
@@ -20018,27 +19878,15 @@ ${panelHtml}`;
       };
     }
 
-    const cachedOverviewUnitsDefenseRaw = readJson(
+    const cachedOverviewUnitsDefense = readJson(
       STORAGE_KEYS.overviewUnitsDefense,
     );
-    const cachedOverviewUnitsDefense = isPayloadFreshByFetchedAt(
-      cachedOverviewUnitsDefenseRaw,
-      TROOPS_CACHE_TTL_MS,
-    )
-      ? cachedOverviewUnitsDefenseRaw
-      : null;
     if (
       cachedOverviewUnitsDefense &&
       typeof cachedOverviewUnitsDefense === "object"
     ) {
       state.overviewUnitsDefenseDump = cachedOverviewUnitsDefense;
-    } else if (
-      !state.overviewUnitsDefenseDump ||
-      !isPayloadFreshByFetchedAt(
-        state.overviewUnitsDefenseDump,
-        TROOPS_CACHE_TTL_MS,
-      )
-    ) {
+    } else if (!state.overviewUnitsDefenseDump) {
       state.overviewUnitsDefenseDump = {
         version: 1,
         fetchedAt: new Date(getServerNowMs()).toISOString(),
@@ -20110,37 +19958,13 @@ ${panelHtml}`;
       ) || "unknown";
     const cachedIncomings = readJson(STORAGE_KEYS.incomings);
     const cachedSupports = readJson(STORAGE_KEYS.incomingsSupports);
-    const cachedTroopsRaw = readJson(STORAGE_KEYS.troops);
-    const cachedTroops = isPayloadFreshByFetchedAt(
-      cachedTroopsRaw,
-      TROOPS_CACHE_TTL_MS,
-    )
-      ? cachedTroopsRaw
-      : null;
-    const cachedTroopsDefenseRaw = readJson(STORAGE_KEYS.troopsDefense);
-    const cachedTroopsDefense = isPayloadFreshByFetchedAt(
-      cachedTroopsDefenseRaw,
-      TROOPS_CACHE_TTL_MS,
-    )
-      ? cachedTroopsDefenseRaw
-      : null;
+    const cachedTroops = readJson(STORAGE_KEYS.troops);
+    const cachedTroopsDefense = readJson(STORAGE_KEYS.troopsDefense);
     const cachedOverviewCommands = readJson(STORAGE_KEYS.overviewCommands);
-    const cachedOverviewUnitsRaw = readJson(STORAGE_KEYS.overviewUnits);
-    const cachedOverviewUnits = isPayloadFreshByFetchedAt(
-      cachedOverviewUnitsRaw,
-      TROOPS_CACHE_TTL_MS,
-    )
-      ? cachedOverviewUnitsRaw
-      : null;
-    const cachedOverviewUnitsDefenseRaw = readJson(
+    const cachedOverviewUnits = readJson(STORAGE_KEYS.overviewUnits);
+    const cachedOverviewUnitsDefense = readJson(
       STORAGE_KEYS.overviewUnitsDefense,
     );
-    const cachedOverviewUnitsDefense = isPayloadFreshByFetchedAt(
-      cachedOverviewUnitsDefenseRaw,
-      TROOPS_CACHE_TTL_MS,
-    )
-      ? cachedOverviewUnitsDefenseRaw
-      : null;
     saveScheduledCommands();
     const progressTracker = createProgressTracker(state.ui, 7);
     try {
