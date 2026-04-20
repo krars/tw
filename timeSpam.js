@@ -985,22 +985,45 @@ javascript:(function(){
             label.textContent = text || (safeTotal > 0 ? `${safeDone}/${safeTotal}` : '');
         }
 
-        function parseLastSnobCommandEndMs(html) {
+        function parseLastSnobCommandInfo(html) {
             const doc = new DOMParser().parseFromString(String(html || ''), 'text/html');
-            const rows = Array.from(doc.querySelectorAll(
-                '#commands_outgoings tr.command-row, ' +
-                '#commands_outgoings tr.row_a, #commands_outgoings tr.row_b, #commands_outgoings tr.row_ax, #commands_outgoings tr.row_bx, ' +
-                '.commands-container[data-type="towards_village"] tr.command-row, ' +
-                '.commands-container[data-type="towards_village"] tr.row_a, .commands-container[data-type="towards_village"] tr.row_b'
+            const rows = [];
+            const seen = new Set();
+            const pushRow = (row) => {
+                if (!row || typeof row.querySelector !== 'function') return;
+                if (seen.has(row)) return;
+                seen.add(row);
+                rows.push(row);
+            };
+
+            const containers = Array.from(doc.querySelectorAll(
+                '#commands_outgoings, ' +
+                '.commands-container[data-type="towards_village"], ' +
+                '.commands-container[data-type="outgoing"], ' +
+                '.commands-container[data-type="incoming"], ' +
+                '.commands-container'
             ));
+            if (!containers.length) containers.push(doc.body || doc.documentElement);
+
+            containers.forEach(container => {
+                container.querySelectorAll(
+                    'tr.command-row, tr.row_a, tr.row_b, tr.row_ax, tr.row_bx, .command-row, li.command-row'
+                ).forEach(pushRow);
+
+                container.querySelectorAll('.widget-command-timer, .timer_link, .timer, [data-endtime]').forEach(timer => {
+                    const row = timer.closest(
+                        'tr.command-row, tr.row_a, tr.row_b, tr.row_ax, tr.row_bx, .command-row, li.command-row, tr, li, .vis, .quickedit-content'
+                    );
+                    if (row) pushRow(row);
+                });
+            });
 
             let latestMs = null;
+            let snobRows = 0;
+            let timerRows = 0;
             const isSnobRow = (row) => {
-                const text = cleanText(row?.textContent).toLowerCase();
-                if (/(дворян|snob)/i.test(text)) return true;
-
-                const hints = Array.from(row.querySelectorAll('[data-icon-hint], [title]'))
-                    .map(el => cleanText(el.getAttribute('data-icon-hint') || el.getAttribute('title') || ''))
+                const hints = Array.from(row.querySelectorAll('[data-icon-hint], [title], [data-title]'))
+                    .map(el => cleanText(el.getAttribute('data-icon-hint') || el.getAttribute('title') || el.getAttribute('data-title') || ''))
                     .join(' ')
                     .toLowerCase();
                 if (/(дворян|snob)/i.test(hints)) return true;
@@ -1014,9 +1037,11 @@ javascript:(function(){
 
             rows.forEach(row => {
                 if (!isSnobRow(row)) return;
+                snobRows++;
                 const timerEl = row.querySelector('.widget-command-timer, .timer_link, .timer');
                 const endSec = toInt(timerEl?.getAttribute('data-endtime'));
                 if (endSec > 0) {
+                    timerRows++;
                     const endMs = endSec * 1000;
                     if (latestMs == null || endMs > latestMs) latestMs = endMs;
                     return;
@@ -1024,12 +1049,17 @@ javascript:(function(){
                 const timerText = cleanText(timerEl?.textContent || '');
                 const durSec = parseDurationToSec(timerText, -1);
                 if (durSec >= 0) {
+                    timerRows++;
                     const endMs = getServerTimeMs() + durSec * 1000;
                     if (latestMs == null || endMs > latestMs) latestMs = endMs;
                 }
             });
 
-            return latestMs;
+            return { lastSnobAtMs: latestMs, rowsTotal: rows.length, snobRows, timerRows };
+        }
+
+        function parseLastSnobCommandEndMs(html) {
+            return parseLastSnobCommandInfo(html).lastSnobAtMs;
         }
 
         function recalcNoblePretimeRangesBySavedBase() {
@@ -1109,7 +1139,8 @@ javascript:(function(){
                 try {
                     const html = await fetchPageFresh(infoUrl);
                     if (runToken !== noblePretimeRunToken) return entries;
-                    const lastSnobAtMs = parseLastSnobCommandEndMs(html);
+                    const snobInfo = parseLastSnobCommandInfo(html);
+                    const lastSnobAtMs = snobInfo.lastSnobAtMs;
                     if (Number.isFinite(lastSnobAtMs) && lastSnobAtMs > 0) {
                         entries.push({
                             coord: item.coord,
@@ -1120,7 +1151,10 @@ javascript:(function(){
                         });
                         setNoblePretimeProgress(true, idx, total, `${idx}/${total}: ${item.coord} — двор найден`);
                     } else {
-                        setNoblePretimeProgress(true, idx, total, `${idx}/${total}: ${item.coord} — дворы не найдены`);
+                        const details = snobInfo.rowsTotal > 0
+                            ? `команд: ${snobInfo.rowsTotal}, дворов: ${snobInfo.snobRows}`
+                            : 'приказы не найдены';
+                        setNoblePretimeProgress(true, idx, total, `${idx}/${total}: ${item.coord} — дворы не найдены (${details})`);
                     }
                 } catch(err) {
                     console.error(`[timeSpam] Ошибка info_village для ${item.coord}:`, err);
@@ -1136,6 +1170,38 @@ javascript:(function(){
             setNoblePretimeProgress(true, total, total, `Готово: ${entries.length}/${total} кор с притаймом`);
             saveConfig();
             return entries;
+        }
+
+        async function runNoblePretimeNow() {
+            noblePretimeEnabled = true;
+            const nobleCb = document.getElementById('ts-noble-cb');
+            if (nobleCb) nobleCb.checked = true;
+            const nobleMins = document.getElementById('ts-noble-minutes');
+            if (nobleMins) nobleMins.disabled = false;
+            const runBtn = document.getElementById('ts-noble-run-btn');
+            if (runBtn) runBtn.disabled = false;
+
+            setNoblePretimeProgress(true, 0, 0, 'Запуск притайма...');
+            showNotice('Притайм: запускаю парсинг дворов', 'info', 1800);
+
+            try {
+                saveConfig();
+                const entries = await buildNoblePretimeWindowsFromTargets();
+                if (noblePretimeEnabled && entries.length === 0) {
+                    setNoblePretimeProgress(true, 0, 0, 'Не найдено дворов по целевым корам');
+                    showNotice('Притайм: дворы не найдены', 'warn', 2600);
+                } else {
+                    showNotice(`Притайм: найдено ${entries.length} кор`, 'success', 2600);
+                }
+                const gSel = document.getElementById('ts-group');
+                if (gSel) runWithGroup(gSel.value || '0');
+                return entries;
+            } catch (err) {
+                console.error('[timeSpam] Ошибка запуска притайма:', err);
+                setNoblePretimeProgress(true, 0, 0, `Ошибка: ${cleanText(err?.message) || 'не удалось распарсить'}`);
+                showNotice(`Притайм: ошибка — ${cleanText(err?.message) || 'не удалось распарсить'}`, 'error', 4200);
+                return [];
+            }
         }
 
         function getUnitIconUrl(unit) {
@@ -1279,11 +1345,13 @@ javascript:(function(){
 
             const nobleCb = document.getElementById('ts-noble-cb');
             const nobleMinsInput = document.getElementById('ts-noble-minutes');
+            const nobleRunBtn = document.getElementById('ts-noble-run-btn');
             if (nobleCb) nobleCb.checked = !!noblePretimeEnabled;
             if (nobleMinsInput) {
                 nobleMinsInput.value = String(noblePretimeWindowMinutes);
                 nobleMinsInput.disabled = !noblePretimeEnabled;
             }
+            if (nobleRunBtn) nobleRunBtn.disabled = !noblePretimeEnabled;
 
             const openTabCb = document.getElementById('ts-open-new-tab-cb');
             if (openTabCb) openTabCb.checked = !!openInNewTab;
@@ -1971,6 +2039,9 @@ javascript:(function(){
                 .ts-noble-progress-track { height:8px; border-radius:999px; background:#e2d3b4; overflow:hidden; }
                 .ts-noble-progress-fill { width:0%; height:100%; background:#27ae60; transition:width .2s linear; }
                 .ts-noble-progress-text { margin-top:5px; font-size:11px; color:#5f4d37; }
+                .ts-noble-run-btn { margin-top:4px; align-self:flex-start; border:none; border-radius:5px; background:#6d4c41; color:#fff; font-size:12px; font-weight:bold; padding:6px 10px; cursor:pointer; }
+                .ts-noble-run-btn:hover { background:#5d4037; }
+                .ts-noble-run-btn:disabled { opacity:.45; cursor:not-allowed; }
                 .ts-open-tab-block { display:flex; flex-direction:column; gap:4px; }
                 .ts-open-tab-label { font-size:13px; font-weight:bold; cursor:pointer; display:flex; align-items:center; gap:6px; }
                 .ts-templates-block { }
@@ -3656,6 +3727,7 @@ javascript:(function(){
                             <span>Окно (мин)</span>
                             <input type="number" id="ts-noble-minutes" class="ts-noble-min-input" value="3" min="1" max="120">
                         </div>
+                        <button type="button" id="ts-noble-run-btn" class="ts-noble-run-btn" disabled>Запустить притайм</button>
                         <div id="ts-noble-progress" class="ts-noble-progress">
                             <div class="ts-noble-progress-track"><div id="ts-noble-progress-fill" class="ts-noble-progress-fill"></div></div>
                             <div id="ts-noble-progress-text" class="ts-noble-progress-text"></div>
@@ -3790,6 +3862,7 @@ javascript:(function(){
             const sigilPct = document.getElementById('ts-sigil-pct');
             const nobleCb = document.getElementById('ts-noble-cb');
             const nobleMins = document.getElementById('ts-noble-minutes');
+            const nobleRunBtn = document.getElementById('ts-noble-run-btn');
             const openTabCb = document.getElementById('ts-open-new-tab-cb');
             const dateCb = document.getElementById('ts-date-cb');
             const dateInput = document.getElementById('ts-target-date');
@@ -3835,6 +3908,7 @@ javascript:(function(){
                 nobleCb.addEventListener('change', async function() {
                     noblePretimeEnabled = !!this.checked;
                     if (nobleMins) nobleMins.disabled = !noblePretimeEnabled;
+                    if (nobleRunBtn) nobleRunBtn.disabled = !noblePretimeEnabled;
                     if (!noblePretimeEnabled) {
                         noblePretimeRunToken++;
                         clearNoblePretimeWindows();
@@ -3844,14 +3918,7 @@ javascript:(function(){
                         if (gSel) runWithGroup(gSel.value || '0');
                         return;
                     }
-
-                    saveConfig();
-                    const entries = await buildNoblePretimeWindowsFromTargets();
-                    if (noblePretimeEnabled && entries.length === 0) {
-                        setNoblePretimeProgress(true, 0, 0, 'Не найдено дворов по целевым корам');
-                    }
-                    const gSel = document.getElementById('ts-group');
-                    if (gSel) runWithGroup(gSel.value || '0');
+                    await runNoblePretimeNow();
                 });
             }
             if (nobleMins) {
@@ -3864,6 +3931,17 @@ javascript:(function(){
                     saveConfig();
                     const gSel = document.getElementById('ts-group');
                     if (gSel) runWithGroup(gSel.value || '0');
+                });
+            }
+            if (nobleRunBtn) {
+                nobleRunBtn.addEventListener('click', async function() {
+                    if (!noblePretimeEnabled) {
+                        noblePretimeEnabled = true;
+                        if (nobleCb) nobleCb.checked = true;
+                        if (nobleMins) nobleMins.disabled = false;
+                        nobleRunBtn.disabled = false;
+                    }
+                    await runNoblePretimeNow();
                 });
             }
 
