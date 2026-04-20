@@ -966,25 +966,65 @@ javascript:(function(){
             return new Promise(resolve => setTimeout(resolve, waitMs));
         }
 
+        function ensureNoblePretimeOverlay() {
+            let overlay = document.getElementById('ts-noble-float-progress');
+            if (!overlay) {
+                overlay = document.createElement('div');
+                overlay.id = 'ts-noble-float-progress';
+                overlay.className = 'ts-noble-float-overlay';
+                overlay.innerHTML = `
+                    <div class="ts-noble-float-head">TimeSpam: Притайм за дворами</div>
+                    <div class="ts-noble-float-track">
+                        <div id="ts-noble-float-fill" class="ts-noble-float-fill"></div>
+                    </div>
+                    <div id="ts-noble-float-text" class="ts-noble-float-text">Подготовка...</div>
+                `;
+                document.body.appendChild(overlay);
+            }
+            return {
+                overlay,
+                fill: overlay.querySelector('#ts-noble-float-fill'),
+                text: overlay.querySelector('#ts-noble-float-text')
+            };
+        }
+
+        function removeNoblePretimeOverlay() {
+            const overlay = document.getElementById('ts-noble-float-progress');
+            if (overlay) overlay.remove();
+        }
+
         function setNoblePretimeProgress(visible, done = 0, total = 0, text = '') {
             const box = document.getElementById('ts-noble-progress');
             const fill = document.getElementById('ts-noble-progress-fill');
             const label = document.getElementById('ts-noble-progress-text');
-            if (!box || !fill || !label) return;
+
             if (!visible) {
-                box.style.display = 'none';
-                fill.style.width = '0%';
-                label.textContent = '';
+                if (box && fill && label) {
+                    box.style.display = 'none';
+                    fill.style.width = '0%';
+                    label.textContent = '';
+                }
+                removeNoblePretimeOverlay();
                 return;
             }
-            box.style.display = '';
+
             const safeTotal = Math.max(0, toInt(total));
             const safeDone = Math.max(0, toInt(done));
             const pct = safeTotal > 0 ? Math.min(100, Math.round((safeDone / safeTotal) * 100)) : 0;
-            fill.style.width = pct + '%';
             const prefix = safeTotal > 0 ? `${pct}% (${Math.min(safeDone, safeTotal)}/${safeTotal})` : '';
             const msg = cleanText(text);
-            label.textContent = msg ? (prefix ? `${prefix} — ${msg}` : msg) : prefix;
+            const fullText = msg ? (prefix ? `${prefix} — ${msg}` : msg) : prefix;
+
+            if (box && fill && label) {
+                box.style.display = '';
+                fill.style.width = pct + '%';
+                label.textContent = fullText;
+            }
+
+            const floatUi = ensureNoblePretimeOverlay();
+            if (floatUi.overlay) floatUi.overlay.style.display = '';
+            if (floatUi.fill) floatUi.fill.style.width = pct + '%';
+            if (floatUi.text) floatUi.text.textContent = fullText || 'Выполняется...';
         }
 
         function parseLastSnobCommandInfo(html) {
@@ -2065,6 +2105,11 @@ javascript:(function(){
                 .ts-noble-run-btn { margin-top:4px; align-self:flex-start; border:none; border-radius:5px; background:#6d4c41; color:#fff; font-size:12px; font-weight:bold; padding:6px 10px; cursor:pointer; }
                 .ts-noble-run-btn:hover { background:#5d4037; }
                 .ts-noble-run-btn:disabled { opacity:.45; cursor:not-allowed; }
+                .ts-noble-float-overlay { position:fixed; top:10px; left:50%; transform:translateX(-50%); width:min(620px, calc(100vw - 24px)); background:#f3ead5; border:2px solid #b08b4f; border-radius:10px; box-shadow:0 12px 28px rgba(0,0,0,.45); z-index:1000011; padding:10px 12px; pointer-events:none; }
+                .ts-noble-float-head { font-size:13px; font-weight:bold; color:#4f3d28; margin-bottom:6px; }
+                .ts-noble-float-track { height:16px; border-radius:999px; background:#e2d3b4; border:1px solid #c6b089; overflow:hidden; }
+                .ts-noble-float-fill { width:0%; height:100%; background:linear-gradient(90deg,#1f9d55,#39b36f); transition:width .2s linear; }
+                .ts-noble-float-text { margin-top:7px; font-size:12px; font-weight:bold; color:#4f3d28; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
                 .ts-open-tab-block { display:flex; flex-direction:column; gap:4px; }
                 .ts-open-tab-label { font-size:13px; font-weight:bold; cursor:pointer; display:flex; align-items:center; gap:6px; }
                 .ts-templates-block { }
