@@ -1195,10 +1195,27 @@ javascript:(function(){
                 } else {
                     showNotice(`Притайм: найдено ${entries.length} кор`, 'success', 2600);
                 }
-                const gSel = document.getElementById('ts-group');
-                if (gSel) {
-                    setNoblePretimeProgress(true, 1, 1, `Найдено ${entries.length} кор. Пересчёт отправок...`);
-                    await runWithGroup(gSel.value || '0');
+                const groupId = cleanText(document.getElementById('ts-group')?.value) || cleanText(getCurrentTabState()?.groupId) || '0';
+                setNoblePretimeProgress(true, 1, 1, `Найдено ${entries.length} кор. Пересчёт отправок...`);
+                const calc = await runWithGroup(groupId);
+                if (calc?.status === 'ok') {
+                    setNoblePretimeProgress(true, 1, 1, `Готово: ${entries.length} кор, ${calc.uniqueCount} отправок`);
+                    showNotice(`Пересчёт: ${calc.uniqueCount} отправок`, 'success', 2600);
+                } else if (calc?.status === 'no_immediate') {
+                    setNoblePretimeProgress(true, 1, 1, `Готово: ближайшие отправки через ${calc.nearestCount || 0} вариантов`);
+                    showNotice('Сейчас отправок нет, показаны ближайшие варианты', 'info', 3200);
+                } else if (calc?.status === 'no_candidates') {
+                    setNoblePretimeProgress(true, 1, 1, 'Готово: подходящих отправок не найдено');
+                    showNotice('После притайма подходящих отправок не найдено', 'warn', 3400);
+                } else if (calc?.status === 'no_valid_targets') {
+                    setNoblePretimeProgress(true, 1, 1, 'Готово: цели отфильтрованы (нет валидных окон)');
+                    showNotice('Цели есть, но у них нет валидных окон притайма', 'warn', 3400);
+                } else if (calc?.status === 'empty_input') {
+                    setNoblePretimeProgress(true, 1, 1, 'Готово: нет данных для расчёта');
+                    showNotice('Нет целей/окон/юнитов для расчёта', 'warn', 3000);
+                } else if (calc?.status === 'error') {
+                    setNoblePretimeProgress(true, 1, 1, `Ошибка пересчёта: ${cleanText(calc.error) || 'unknown'}`);
+                } else {
                     setNoblePretimeProgress(true, 1, 1, `Готово: ${entries.length} кор с притаймом`);
                 }
                 return entries;
@@ -3356,7 +3373,7 @@ javascript:(function(){
                         showNotice('Нет целей, юнитов или временных окон для расчёта', 'warn', 2800);
                         if (noblePretimeEnabled) setNoblePretimeProgress(true, 1, 1, 'Пересчёт завершён: нет данных для расчёта');
                         closeNearestWindow();
-                        return;
+                        return { status: 'empty_input', resultsCount: 0, uniqueCount: 0, nearestCount: 0 };
                     }
 
                     const nowMs = getServerTimeMs();
@@ -3384,7 +3401,7 @@ javascript:(function(){
                             setNoblePretimeProgress(true, 1, 1, 'Пересчёт завершён: цели отфильтрованы притаймом');
                         }
                         closeNearestWindow();
-                        return;
+                        return { status: 'no_valid_targets', resultsCount: 0, uniqueCount: 0, nearestCount: 0 };
                     }
 
                     const results = [];
@@ -3617,14 +3634,19 @@ javascript:(function(){
                                 nearest30.push(item);
                             });
                             showNearestWindow(nearest30);
+                            if (noblePretimeEnabled) setNoblePretimeProgress(true, 1, 1, `Пересчёт завершён: ближайших вариантов ${nearest30.length}`);
+                            return { status: 'no_immediate', resultsCount: 0, uniqueCount: 0, nearestCount: nearest30.length };
                         } else {
                             showNearestWindow([]);
                             showNotice('Подходящих отправок сейчас нет', 'info', 2600);
+                            if (noblePretimeEnabled) setNoblePretimeProgress(true, 1, 1, 'Пересчёт завершён: подходящих вариантов нет');
+                            return { status: 'no_candidates', resultsCount: 0, uniqueCount: 0, nearestCount: 0 };
                         }
                     } else {
                         closeNearestWindow();
                         const seen = new Set();
                         const uniqueResults = [];
+                        let navigated = false;
                         const sortedResults = [...results].sort((a, b) => {
                             const bySpeed = (Number(b.speedHpf) || 0) - (Number(a.speedHpf) || 0);
                             if (bySpeed !== 0) return bySpeed;
@@ -3656,6 +3678,7 @@ javascript:(function(){
                                 const fullUrl = `${location.origin}${location.pathname}?${r.sendUrl}`;
                                 console.log(`%c>>> ${uniqueResults.length} ссылок, переходим в этой вкладке: ${fullUrl}`, 'font-size:14px;font-weight:bold;color:red');
                                 navigateToSend(fullUrl, openInNewTab);
+                                navigated = true;
                             }
                         } else {
                             console.log('%c>>> Нет доступных отправок', 'font-size:14px;font-weight:bold;color:orange');
@@ -3663,13 +3686,27 @@ javascript:(function(){
 
                         console.log(`\nВсего: ${results.length} вариантов, ${uniqueResults.length} ссылок`);
                         console.table(results);
+                        if (noblePretimeEnabled) setNoblePretimeProgress(true, 1, 1, `Пересчёт завершён: ${uniqueResults.length} отправок`);
+                        return {
+                            status: 'ok',
+                            resultsCount: results.length,
+                            uniqueCount: uniqueResults.length,
+                            nearestCount: 0,
+                            navigated
+                        };
                     }
-                    if (noblePretimeEnabled) setNoblePretimeProgress(true, 1, 1, 'Пересчёт завершён');
                 })
                 .catch(err => {
                     console.error('[timeSpam] Error:', err);
                     showNotice(`Ошибка расчёта: ${cleanText(err?.message) || 'unknown'}`, 'error', 3800);
                     if (noblePretimeEnabled) setNoblePretimeProgress(true, 1, 1, `Ошибка пересчёта: ${cleanText(err?.message) || 'unknown'}`);
+                    return {
+                        status: 'error',
+                        resultsCount: 0,
+                        uniqueCount: 0,
+                        nearestCount: 0,
+                        error: cleanText(err?.message) || 'unknown'
+                    };
                 });
         }
 
