@@ -2385,12 +2385,11 @@ javascript:(function(){
         }
 
         function formatHMS(epochMs) {
-            // Format epoch ms as HH:MM:SS time of day
-            const dayStart = getDayStartMs(epochMs);
-            const secSinceMidnight = Math.floor((epochMs - dayStart) / 1000);
-            const hh = Math.floor(secSinceMidnight / 3600);
-            const mm = Math.floor((secSinceMidnight % 3600) / 60);
-            const ss = secSinceMidnight % 60;
+            // Format epoch ms as HH:MM:SS in server timezone
+            const d = getServerLocalDate(epochMs);
+            const hh = d.getUTCHours();
+            const mm = d.getUTCMinutes();
+            const ss = d.getUTCSeconds();
             return `${String(hh).padStart(2,'0')}:${String(mm).padStart(2,'0')}:${String(ss).padStart(2,'0')}`;
         }
 
@@ -2436,8 +2435,8 @@ javascript:(function(){
         }
 
         function getDayStartMs(epochMs) {
-            const d = new Date(epochMs);
-            return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+            const ymd = formatServerDateYmd(epochMs);
+            return getEpochMsForServerDateAtSec(ymd, 0);
         }
 
         function getServerSecondsSinceMidnightFromMs(epochMs) {
