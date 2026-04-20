@@ -982,7 +982,9 @@ javascript:(function(){
             const safeDone = Math.max(0, toInt(done));
             const pct = safeTotal > 0 ? Math.min(100, Math.round((safeDone / safeTotal) * 100)) : 0;
             fill.style.width = pct + '%';
-            label.textContent = text || (safeTotal > 0 ? `${safeDone}/${safeTotal}` : '');
+            const prefix = safeTotal > 0 ? `${pct}% (${Math.min(safeDone, safeTotal)}/${safeTotal})` : '';
+            const msg = cleanText(text);
+            label.textContent = msg ? (prefix ? `${prefix} — ${msg}` : msg) : prefix;
         }
 
         function parseLastSnobCommandInfo(html) {
@@ -1194,7 +1196,11 @@ javascript:(function(){
                     showNotice(`Притайм: найдено ${entries.length} кор`, 'success', 2600);
                 }
                 const gSel = document.getElementById('ts-group');
-                if (gSel) runWithGroup(gSel.value || '0');
+                if (gSel) {
+                    setNoblePretimeProgress(true, 1, 1, `Найдено ${entries.length} кор. Пересчёт отправок...`);
+                    await runWithGroup(gSel.value || '0');
+                    setNoblePretimeProgress(true, 1, 1, `Готово: ${entries.length} кор с притаймом`);
+                }
                 return entries;
             } catch (err) {
                 console.error('[timeSpam] Ошибка запуска притайма:', err);
@@ -2035,10 +2041,10 @@ javascript:(function(){
                 .ts-noble-row { display:flex; align-items:center; gap:8px; }
                 .ts-noble-row span { font-size:12px; color:#6c5b44; }
                 .ts-noble-min-input { width:72px; padding:4px 6px; border:1px solid #b08b4f; border-radius:4px; font:12px monospace; background:#fffbe8; }
-                .ts-noble-progress { display:none; background:#f5ecd7; border:1px solid #d4c4a0; border-radius:6px; padding:6px; }
-                .ts-noble-progress-track { height:8px; border-radius:999px; background:#e2d3b4; overflow:hidden; }
-                .ts-noble-progress-fill { width:0%; height:100%; background:#27ae60; transition:width .2s linear; }
-                .ts-noble-progress-text { margin-top:5px; font-size:11px; color:#5f4d37; }
+                .ts-noble-progress { display:none; background:#f5ecd7; border:2px solid #c39b5f; border-radius:8px; padding:8px; box-shadow: inset 0 1px 2px rgba(0,0,0,.08); }
+                .ts-noble-progress-track { height:14px; border-radius:999px; background:#e2d3b4; overflow:hidden; border:1px solid #c6b089; }
+                .ts-noble-progress-fill { width:0%; height:100%; background:linear-gradient(90deg,#1f9d55,#39b36f); transition:width .2s linear; }
+                .ts-noble-progress-text { margin-top:6px; font-size:12px; font-weight:bold; color:#4f3d28; }
                 .ts-noble-run-btn { margin-top:4px; align-self:flex-start; border:none; border-radius:5px; background:#6d4c41; color:#fff; font-size:12px; font-weight:bold; padding:6px 10px; cursor:pointer; }
                 .ts-noble-run-btn:hover { background:#5d4037; }
                 .ts-noble-run-btn:disabled { opacity:.45; cursor:not-allowed; }
@@ -3301,7 +3307,11 @@ javascript:(function(){
             const commandsUrl = `/game.php?village=${window.game_data.village.id}&screen=overview_villages&mode=commands&type=all&group=${selectedGroup}&page=-1&&type=all`;
             const villageMapUrl = '/map/village.txt';
 
-            Promise.all([fetchPageFresh(unitsUrl), fetchPage(prodUrl), fetchPage(commandsUrl), fetchPage(villageMapUrl), loadWorldSettings()])
+            if (noblePretimeEnabled) {
+                setNoblePretimeProgress(true, 0, 1, 'Пересчёт отправок...');
+            }
+
+            return Promise.all([fetchPageFresh(unitsUrl), fetchPage(prodUrl), fetchPage(commandsUrl), fetchPage(villageMapUrl), loadWorldSettings()])
                 .then(([unitsHtml, prodHtml, commandsHtml, villageMapText, settings]) => {
                     const unitsData = parseUnitsPage(unitsHtml);
                     const prodData = parseProdPage(prodHtml);
@@ -3343,6 +3353,8 @@ javascript:(function(){
                     const hasAnyWindows = noblePretimeEnabled ? noblePretimeWindows.length > 0 : winList.length > 0;
                     if (!targetCoords.length || (!selectedUnits.length && !getActiveTemplates().length) || !hasAnyWindows) {
                         console.log('%c[timeSpam] Нет целей, юнитов или окон.', 'color:orange');
+                        showNotice('Нет целей, юнитов или временных окон для расчёта', 'warn', 2800);
+                        if (noblePretimeEnabled) setNoblePretimeProgress(true, 1, 1, 'Пересчёт завершён: нет данных для расчёта');
                         closeNearestWindow();
                         return;
                     }
@@ -3365,7 +3377,15 @@ javascript:(function(){
                         }
                         return targetObj;
                     }).filter(Boolean);
-                    if (!targets.length) { console.log('[timeSpam] Нет валидных целевых координат.'); closeNearestWindow(); return; }
+                    if (!targets.length) {
+                        console.log('[timeSpam] Нет валидных целевых координат.');
+                        if (noblePretimeEnabled) {
+                            showNotice('После притайма не осталось валидных целей', 'warn', 3000);
+                            setNoblePretimeProgress(true, 1, 1, 'Пересчёт завершён: цели отфильтрованы притаймом');
+                        }
+                        closeNearestWindow();
+                        return;
+                    }
 
                     const results = [];
                     const villageArmyCache = {};
@@ -3599,6 +3619,7 @@ javascript:(function(){
                             showNearestWindow(nearest30);
                         } else {
                             showNearestWindow([]);
+                            showNotice('Подходящих отправок сейчас нет', 'info', 2600);
                         }
                     } else {
                         closeNearestWindow();
@@ -3643,8 +3664,13 @@ javascript:(function(){
                         console.log(`\nВсего: ${results.length} вариантов, ${uniqueResults.length} ссылок`);
                         console.table(results);
                     }
+                    if (noblePretimeEnabled) setNoblePretimeProgress(true, 1, 1, 'Пересчёт завершён');
                 })
-                .catch(err => console.error('[timeSpam] Error:', err));
+                .catch(err => {
+                    console.error('[timeSpam] Error:', err);
+                    showNotice(`Ошибка расчёта: ${cleanText(err?.message) || 'unknown'}`, 'error', 3800);
+                    if (noblePretimeEnabled) setNoblePretimeProgress(true, 1, 1, `Ошибка пересчёта: ${cleanText(err?.message) || 'unknown'}`);
+                });
         }
 
         function createPanel() {
