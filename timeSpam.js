@@ -185,6 +185,111 @@ javascript:(function(){
             return out;
         }
 
+        function serializeParsedCoords(parsedCoords) {
+            return (Array.isArray(parsedCoords) ? parsedCoords : []).map(item => {
+                const coord = cleanText(item?.coord);
+                if (!coord) return '';
+                if (item.marker === '&' || item.marker === '*') return coord + item.marker;
+                if (item.sigil) return coord + '!';
+                return coord;
+            }).filter(Boolean);
+        }
+
+        function normalizeCoordsArray(coords) {
+            if (!Array.isArray(coords)) return [];
+            return serializeParsedCoords(parseCoordsFromTextarea(coords.join('\n')));
+        }
+
+        function getCoordsTextSignature(text) {
+            return serializeParsedCoords(parseCoordsFromTextarea(text)).join('\n');
+        }
+
+        function parseVillageOwnerByCoordMap(text) {
+            const map = new Map();
+            String(text || '').split(/\r?\n/).forEach(line => {
+                const cols = String(line || '').split(',');
+                if (cols.length < 5) return;
+                const x = parseInt(cleanText(cols[2]), 10);
+                const y = parseInt(cleanText(cols[3]), 10);
+                if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+                const ownerId = cleanText(cols[4]);
+                map.set(`${x}|${y}`, ownerId);
+            });
+            return map;
+        }
+
+        function clearCoordsGroupedDisplaySnapshot() {
+            coordsGroupedDisplaySignature = '';
+            coordsGroupedDisplayRawCoords = null;
+        }
+
+        function captureCoordsGroupedDisplaySnapshot(sourceCoords, shownText) {
+            coordsGroupedDisplayRawCoords = Array.isArray(sourceCoords) ? sourceCoords.slice() : [];
+            coordsGroupedDisplaySignature = getCoordsTextSignature(shownText);
+        }
+
+        function getVillageOwnerByCoordMap(forceFresh = false) {
+            if (!forceFresh && villageOwnerByCoordCache instanceof Map && villageOwnerByCoordCache.size > 0) {
+                return Promise.resolve(villageOwnerByCoordCache);
+            }
+            if (!forceFresh && villageOwnerByCoordPromise) return villageOwnerByCoordPromise;
+
+            villageOwnerByCoordPromise = (forceFresh ? fetchPageFresh('/map/village.txt') : fetchPage('/map/village.txt'))
+                .then(text => {
+                    const map = parseVillageOwnerByCoordMap(text);
+                    villageOwnerByCoordCache = map;
+                    return map;
+                })
+                .catch(() => new Map())
+                .finally(() => { villageOwnerByCoordPromise = null; });
+            return villageOwnerByCoordPromise;
+        }
+
+        function buildCoordsGroupedDisplay(coords, ownerByCoordMap) {
+            const normalized = normalizeCoordsArray(Array.isArray(coords) ? coords : []);
+            if (!normalized.length) return '';
+            if (!(ownerByCoordMap instanceof Map) || ownerByCoordMap.size === 0) return normalized.join('\n');
+
+            const groups = [];
+            const groupIndexByOwner = new Map();
+            normalized.forEach(entry => {
+                const info = parseCoordSigilInfo(entry);
+                const coordKey = cleanText(info.cleanCoordText);
+                const ownerId = coordKey ? cleanText(ownerByCoordMap.get(coordKey)) : '';
+                const groupKey = ownerId !== '' ? `player:${ownerId}` : 'player:unknown';
+                if (!groupIndexByOwner.has(groupKey)) {
+                    groupIndexByOwner.set(groupKey, groups.length);
+                    groups.push([]);
+                }
+                groups[groupIndexByOwner.get(groupKey)].push(entry);
+            });
+            return groups.map(group => group.join('\n')).join('\n\n');
+        }
+
+        function renderGroupedCoordsInTextarea(sourceCoords) {
+            if (!$textarea) return;
+            const myRenderToken = ++coordsRenderToken;
+            const normalizedSource = normalizeCoordsArray(Array.isArray(sourceCoords) ? sourceCoords : []);
+            $textarea.value = normalizedSource.join('\n');
+            clearCoordsGroupedDisplaySnapshot();
+
+            if (!normalizedSource.length) return;
+            const baselineSignature = getCoordsTextSignature($textarea.value);
+
+            getVillageOwnerByCoordMap(false).then(ownerMap => {
+                if (myRenderToken !== coordsRenderToken) return;
+                if (!$textarea) return;
+                if (getCoordsTextSignature($textarea.value) !== baselineSignature) return;
+                const groupedText = buildCoordsGroupedDisplay(normalizedSource, ownerMap);
+                if (groupedText && groupedText !== $textarea.value) $textarea.value = groupedText;
+                captureCoordsGroupedDisplaySnapshot(normalizedSource, $textarea.value);
+            }).catch(() => {
+                if (myRenderToken !== coordsRenderToken) return;
+                if (!$textarea) return;
+                captureCoordsGroupedDisplaySnapshot(normalizedSource, $textarea.value);
+            });
+        }
+
         function parseCoordSigilInfo(rawCoordText) {
             const raw = cleanText(rawCoordText || '');
             const markerMatch = raw.match(/[!&*❗]\s*$/);
@@ -602,6 +707,11 @@ javascript:(function(){
         let openInNewTab = false;
         let noblePretimeWindows = [];
         let noblePretimeRunToken = 0;
+        let coordsRenderToken = 0;
+        let coordsGroupedDisplaySignature = '';
+        let coordsGroupedDisplayRawCoords = null;
+        let villageOwnerByCoordCache = null;
+        let villageOwnerByCoordPromise = null;
         let activeTabIndex = 0;
         let tabStates = [];
         let templates = []; // [{name: 'Rush', units: {ram:5, catapult:3}, active: true}]
@@ -774,11 +884,13 @@ javascript:(function(){
             const tab = getCurrentTabState();
             if ($textarea) {
                 const rawCoords = parseCoordsFromTextarea($textarea.value);
-                tab.coords = rawCoords.map(c => {
-                    if (c.marker === '&' || c.marker === '*') return c.coord + c.marker;
-                    if (c.sigil) return c.coord + '!';
-                    return c.coord;
-                });
+                const normalizedCoords = serializeParsedCoords(rawCoords);
+                const currentSignature = normalizedCoords.join('\n');
+                if (coordsGroupedDisplayRawCoords && currentSignature === coordsGroupedDisplaySignature) {
+                    tab.coords = coordsGroupedDisplayRawCoords.slice();
+                } else {
+                    tab.coords = normalizedCoords;
+                }
             }
             tab.timeWindows = (timeWindows || []).map(w => ({
                 from: cleanText(w?.from),
@@ -1378,7 +1490,7 @@ javascript:(function(){
             const tab = getCurrentTabState();
             applyTabStateToRuntime(tab);
 
-            if ($textarea) $textarea.value = (Array.isArray(tab.coords) ? tab.coords : []).join('\n');
+            renderGroupedCoordsInTextarea(Array.isArray(tab.coords) ? tab.coords : []);
 
             const maxPvInput = document.getElementById('ts-max-per-village');
             if (maxPvInput) maxPvInput.value = String(maxPerVillage);
@@ -1485,8 +1597,7 @@ javascript:(function(){
 
         function applyGasData(coords, windows) {
             if ($textarea) {
-                // coords are plain strings from GAS, display them
-                $textarea.value = coords.join('\n');
+                renderGroupedCoordsInTextarea(Array.isArray(coords) ? coords : []);
                 $textarea.readOnly = true;
             }
             // Build time windows: use GAS data where available
@@ -3855,6 +3966,12 @@ javascript:(function(){
             container.appendChild(panel);
             makeDraggable(panel);
             $textarea = document.getElementById('ts-coords');
+            if ($textarea) {
+                $textarea.addEventListener('input', () => {
+                    coordsRenderToken++;
+                    clearCoordsGroupedDisplaySnapshot();
+                });
+            }
             applyActiveTabToUI();
             setNoblePretimeProgress(false);
             checkAndRenderCommandsFilterWarning();
