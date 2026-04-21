@@ -204,16 +204,27 @@ javascript:(function(){
             return serializeParsedCoords(parseCoordsFromTextarea(text)).join('\n');
         }
 
+        function parseVillageLineInfo(line) {
+            const cols = String(line || '').split(',');
+            if (cols.length < 5) return null;
+            const id = cleanText(cols[0]);
+            const xIdx = Math.max(2, cols.length - 5);
+            const yIdx = xIdx + 1;
+            const ownerIdx = xIdx + 2;
+            if (ownerIdx >= cols.length) return null;
+            const x = parseInt(cleanText(cols[xIdx]), 10);
+            const y = parseInt(cleanText(cols[yIdx]), 10);
+            if (!id || !Number.isFinite(x) || !Number.isFinite(y)) return null;
+            const ownerId = cleanText(cols[ownerIdx]);
+            return { id, x, y, ownerId };
+        }
+
         function parseVillageOwnerByCoordMap(text) {
             const map = new Map();
             String(text || '').split(/\r?\n/).forEach(line => {
-                const cols = String(line || '').split(',');
-                if (cols.length < 5) return;
-                const x = parseInt(cleanText(cols[2]), 10);
-                const y = parseInt(cleanText(cols[3]), 10);
-                if (!Number.isFinite(x) || !Number.isFinite(y)) return;
-                const ownerId = cleanText(cols[4]);
-                map.set(`${x}|${y}`, ownerId);
+                const info = parseVillageLineInfo(line);
+                if (!info) return;
+                map.set(`${info.x}|${info.y}`, info.ownerId);
             });
             return map;
         }
@@ -236,9 +247,15 @@ javascript:(function(){
 
             villageOwnerByCoordPromise = (forceFresh ? fetchPageFresh('/map/village.txt') : fetchPage('/map/village.txt'))
                 .then(text => {
-                    const map = parseVillageOwnerByCoordMap(text);
-                    villageOwnerByCoordCache = map;
+                    let map = parseVillageOwnerByCoordMap(text);
+                    if (!forceFresh && map.size === 0) {
+                        return fetchPageFresh('/map/village.txt').then(freshText => parseVillageOwnerByCoordMap(freshText));
+                    }
                     return map;
+                })
+                .then(map => {
+                    if (map instanceof Map && map.size > 0) villageOwnerByCoordCache = map;
+                    return map instanceof Map ? map : new Map();
                 })
                 .catch(() => new Map())
                 .finally(() => { villageOwnerByCoordPromise = null; });
@@ -2956,14 +2973,9 @@ javascript:(function(){
         function parseVillageMap(text) {
             const map = new Map();
             String(text || '').split(/\r?\n/).forEach(line => {
-                const cols = line.split(',');
-                if (cols.length < 4) return;
-                const id = cols[0].trim();
-                const x = parseInt(cols[2].trim(), 10);
-                const y = parseInt(cols[3].trim(), 10);
-                if (id && !isNaN(x) && !isNaN(y)) {
-                    map.set(`${x}|${y}`, id);
-                }
+                const info = parseVillageLineInfo(line);
+                if (!info) return;
+                map.set(`${info.x}|${info.y}`, info.id);
             });
             return map;
         }
@@ -3967,10 +3979,17 @@ javascript:(function(){
             makeDraggable(panel);
             $textarea = document.getElementById('ts-coords');
             if ($textarea) {
+                const regroupFromCurrentText = () => {
+                    if (!$textarea || $textarea.readOnly) return;
+                    const normalized = serializeParsedCoords(parseCoordsFromTextarea($textarea.value));
+                    renderGroupedCoordsInTextarea(normalized);
+                };
                 $textarea.addEventListener('input', () => {
                     coordsRenderToken++;
                     clearCoordsGroupedDisplaySnapshot();
                 });
+                $textarea.addEventListener('blur', regroupFromCurrentText);
+                $textarea.addEventListener('paste', () => { setTimeout(regroupFromCurrentText, 0); });
             }
             applyActiveTabToUI();
             setNoblePretimeProgress(false);
