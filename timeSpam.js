@@ -141,6 +141,67 @@ javascript:(function(){
             return utcMs - getServerOffsetSec() * 1000;
         }
 
+        function normalizeMsPart(value) {
+            const raw = cleanText(value);
+            if (!/^\d{1,3}$/.test(raw)) return 0;
+            const n = Math.max(0, Math.min(999, toInt(raw)));
+            if (raw.length === 1) return n * 100;
+            if (raw.length === 2) return n * 10;
+            return n;
+        }
+
+        function formatNoblePretimeTimestamp(epochMs) {
+            const ms = Number(epochMs);
+            if (!Number.isFinite(ms) || ms <= 0) return '';
+            const d = getServerLocalDate(ms);
+            const yyyy = d.getUTCFullYear();
+            const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+            const dd = String(d.getUTCDate()).padStart(2, '0');
+            const hh = String(d.getUTCHours()).padStart(2, '0');
+            const mi = String(d.getUTCMinutes()).padStart(2, '0');
+            const ss = String(d.getUTCSeconds()).padStart(2, '0');
+            const mss = String(((Math.floor(ms) % 1000) + 1000) % 1000).padStart(3, '0');
+            return `${dd}.${mm}.${yyyy} ${hh}:${mi}:${ss}:${mss}`;
+        }
+
+        function parseNoblePretimeTimestampToMs(rawText, fallbackDateYmd = formatServerDateYmd()) {
+            const raw = cleanText(rawText);
+            if (!raw) return null;
+
+            const dt = raw.match(/^(\d{1,2})\.(\d{1,2})\.(\d{2,4})\s+(\d{1,2}):(\d{2}):(\d{2})(?:[:.,](\d{1,3}))?$/);
+            if (dt) {
+                const day = toInt(dt[1]);
+                const month = toInt(dt[2]);
+                let year = toInt(dt[3]);
+                if (year >= 0 && year < 100) year += 2000;
+                const hh = toInt(dt[4]);
+                const mm = toInt(dt[5]);
+                const ss = toInt(dt[6]);
+                const ms = normalizeMsPart(dt[7] || '0');
+                if (day < 1 || day > 31 || month < 1 || month > 12 || year < 1970) return null;
+                if (hh < 0 || hh > 23 || mm < 0 || mm > 59 || ss < 0 || ss > 59) return null;
+                const ymd = normalizeDateYmd(`${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`, '');
+                if (!ymd) return null;
+                const baseMs = getEpochMsForServerDateAtSec(ymd, hh * 3600 + mm * 60 + ss);
+                if (!Number.isFinite(baseMs)) return null;
+                return baseMs + ms;
+            }
+
+            const tm = raw.match(/^(\d{1,2}):(\d{2}):(\d{2})(?:[:.,](\d{1,3}))?$/);
+            if (tm) {
+                const hh = toInt(tm[1]);
+                const mm = toInt(tm[2]);
+                const ss = toInt(tm[3]);
+                const ms = normalizeMsPart(tm[4] || '0');
+                if (hh < 0 || hh > 23 || mm < 0 || mm > 59 || ss < 0 || ss > 59) return null;
+                const ymd = normalizeDateYmd(fallbackDateYmd, formatServerDateYmd());
+                const baseMs = getEpochMsForServerDateAtSec(ymd, hh * 3600 + mm * 60 + ss);
+                if (!Number.isFinite(baseMs)) return null;
+                return baseMs + ms;
+            }
+            return null;
+        }
+
         function parseCoord(text) {
             const m = cleanText(text).match(/(\d{1,3})\s*(?:\||¦|｜|l|L|i|I)\s*(\d{1,3})/);
             return m ? { x: toInt(m[1]), y: toInt(m[2]) } : null;
@@ -167,7 +228,29 @@ javascript:(function(){
                 const marker = markerMatch ? markerMatch[0] : '';
                 const sigil = marker === '!' || marker === '❗' || marker === '&' || marker === '*';
                 const globalSigil = marker === '&' || marker === '*';
-                out.push({ coord, sigil, globalSigil, marker });
+                let lastSnobRaw = '';
+                let lastSnobAtMs = null;
+                const tsRe = /\(([^()]*)\)/g;
+                let tsMatch;
+                while ((tsMatch = tsRe.exec(between)) !== null) {
+                    const rawStamp = cleanText(tsMatch[1]);
+                    if (!rawStamp) continue;
+                    const ms = parseNoblePretimeTimestampToMs(rawStamp);
+                    if (Number.isFinite(ms) && ms > 0) {
+                        lastSnobRaw = rawStamp;
+                        lastSnobAtMs = Math.round(ms);
+                    } else if (!lastSnobRaw) {
+                        lastSnobRaw = rawStamp;
+                    }
+                }
+                out.push({
+                    coord,
+                    sigil,
+                    globalSigil,
+                    marker,
+                    lastSnobRaw,
+                    lastSnobAtMs: Number.isFinite(lastSnobAtMs) && lastSnobAtMs > 0 ? lastSnobAtMs : null
+                });
             }
             return out;
         }
@@ -185,13 +268,27 @@ javascript:(function(){
             return out;
         }
 
+        function buildCoordEntryText(coord, marker, sigil, lastSnobAtMs = null, lastSnobRaw = '') {
+            const baseCoord = cleanText(coord);
+            if (!baseCoord) return '';
+            let out = baseCoord;
+            const mark = cleanText(marker);
+            if (mark === '&' || mark === '*') out += mark;
+            else if (sigil) out += '!';
+
+            const ms = Number(lastSnobAtMs);
+            const stamp = Number.isFinite(ms) && ms > 0
+                ? formatNoblePretimeTimestamp(ms)
+                : cleanText(lastSnobRaw);
+            if (stamp) out += `(${stamp})`;
+            return out;
+        }
+
         function serializeParsedCoords(parsedCoords) {
             return (Array.isArray(parsedCoords) ? parsedCoords : []).map(item => {
                 const coord = cleanText(item?.coord);
                 if (!coord) return '';
-                if (item.marker === '&' || item.marker === '*') return coord + item.marker;
-                if (item.sigil) return coord + '!';
-                return coord;
+                return buildCoordEntryText(coord, item?.marker, !!item?.sigil, item?.lastSnobAtMs, item?.lastSnobRaw);
             }).filter(Boolean);
         }
 
@@ -309,12 +406,31 @@ javascript:(function(){
 
         function parseCoordSigilInfo(rawCoordText) {
             const raw = cleanText(rawCoordText || '');
+            const parsed = parseCoordsFromLine(raw);
+            if (parsed.length) {
+                const first = parsed[0];
+                const marker = cleanText(first.marker).charAt(0);
+                const hasSigil = !!first.sigil;
+                const isGlobal = !!first.globalSigil;
+                const cleanCoordText = cleanText(first.coord);
+                const lastSnobRaw = cleanText(first.lastSnobRaw);
+                const lastSnobAtMs = Number(first.lastSnobAtMs);
+                return {
+                    marker,
+                    cleanCoordText,
+                    hasSigil,
+                    isGlobal,
+                    lastSnobRaw,
+                    lastSnobAtMs: Number.isFinite(lastSnobAtMs) && lastSnobAtMs > 0 ? Math.round(lastSnobAtMs) : null
+                };
+            }
+
             const markerMatch = raw.match(/[!&*❗]\s*$/);
             const marker = markerMatch ? cleanText(markerMatch[0]).charAt(0) : '';
             const cleanCoordText = marker ? cleanText(raw.slice(0, raw.length - markerMatch[0].length)) : raw;
             const hasSigil = marker === '!' || marker === '❗' || marker === '&' || marker === '*';
             const isGlobal = marker === '&' || marker === '*';
-            return { marker, cleanCoordText, hasSigil, isGlobal };
+            return { marker, cleanCoordText, hasSigil, isGlobal, lastSnobRaw: '', lastSnobAtMs: null };
         }
 
         function getExportUnitsOrder() {
@@ -444,7 +560,7 @@ javascript:(function(){
         }
 
         function parseCoordsWithSigilFromImportSection(sectionText) {
-            const coordMap = new Map(); // coord -> { sigil:boolean, globalMarker:string }
+            const coordMap = new Map(); // coord -> { sigil:boolean, globalMarker:string, lastSnobAtMs:number|null, lastSnobRaw:string }
             const src = String(sectionText || '');
             const codeBlocks = [];
             const codeRe = /\[code\]([\s\S]*?)\[\/code\]/gi;
@@ -460,16 +576,33 @@ javascript:(function(){
                 parsed.forEach(item => {
                     const coord = cleanText(item.coord);
                     if (!coord) return;
-                    const prev = coordMap.get(coord) || { sigil: false, globalMarker: '' };
+                    const prev = coordMap.get(coord) || { sigil: false, globalMarker: '', lastSnobAtMs: null, lastSnobRaw: '' };
+                    const prevMs = Number(prev.lastSnobAtMs);
+                    const curMs = Number(item.lastSnobAtMs);
+                    let nextMs = Number.isFinite(prevMs) && prevMs > 0 ? Math.round(prevMs) : null;
+                    let nextRaw = cleanText(prev.lastSnobRaw);
+                    if (Number.isFinite(curMs) && curMs > 0) {
+                        if (nextMs == null || curMs > nextMs) nextMs = Math.round(curMs);
+                        if (nextMs != null) nextRaw = '';
+                    } else if (!nextRaw) {
+                        nextRaw = cleanText(item.lastSnobRaw);
+                    }
                     coordMap.set(coord, {
                         sigil: prev.sigil || !!item.sigil,
-                        globalMarker: prev.globalMarker || (item.globalSigil ? item.marker : '')
+                        globalMarker: prev.globalMarker || (item.globalSigil ? item.marker : ''),
+                        lastSnobAtMs: nextMs,
+                        lastSnobRaw: nextRaw
                     });
                 });
             });
             return Array.from(coordMap.entries()).map(([coord, info]) => {
-                if (info.globalMarker) return `${coord}${info.globalMarker}`;
-                return info.sigil ? `${coord}!` : coord;
+                return buildCoordEntryText(
+                    coord,
+                    info.globalMarker,
+                    !!info.sigil,
+                    info.lastSnobAtMs,
+                    info.lastSnobRaw
+                );
             });
         }
 
@@ -1090,6 +1223,63 @@ javascript:(function(){
             return map;
         }
 
+        function buildNoblePretimeWindowFromBase(coord, baseMs, villageId = '') {
+            const base = Number(baseMs);
+            const cleanCoord = cleanText(coord);
+            if (!cleanCoord || !Number.isFinite(base) || base <= 0) return null;
+            const minutes = Math.max(1, toInt(noblePretimeWindowMinutes) || 3);
+            return {
+                coord: cleanCoord,
+                villageId: cleanText(villageId),
+                from: formatHMS(base),
+                to: formatHMS(base + minutes * 60 * 1000),
+                lastSnobAtMs: Math.round(base)
+            };
+        }
+
+        function applyPretimeEntriesToCurrentCoords(entries) {
+            const tab = getCurrentTabState();
+            const sourceCoords = normalizeCoordsArray(Array.isArray(tab.coords) ? tab.coords : []);
+            if (!sourceCoords.length) return;
+
+            const byCoord = new Map();
+            (Array.isArray(entries) ? entries : []).forEach(entry => {
+                const coord = cleanText(entry?.coord);
+                const ms = Number(entry?.lastSnobAtMs);
+                if (!coord || !Number.isFinite(ms) || ms <= 0) return;
+                const prev = byCoord.get(coord);
+                if (!prev || ms > Number(prev.lastSnobAtMs || 0)) byCoord.set(coord, { ...entry, lastSnobAtMs: Math.round(ms) });
+            });
+
+            const updated = sourceCoords.map(row => {
+                const info = parseCoordSigilInfo(row);
+                const coord = cleanText(info.cleanCoordText);
+                if (!coord) return '';
+                const found = byCoord.get(coord);
+                const ms = found ? Number(found.lastSnobAtMs) : null;
+                return buildCoordEntryText(coord, info.marker, info.hasSigil, ms, '');
+            }).filter(Boolean);
+
+            tab.coords = updated;
+            if ($textarea) renderGroupedCoordsInTextarea(updated);
+        }
+
+        function buildCoordPretimeMap(coordsList) {
+            const out = {};
+            const rows = Array.isArray(coordsList) ? coordsList : [];
+            rows.forEach(raw => {
+                const info = parseCoordSigilInfo(raw);
+                const coord = cleanText(info.cleanCoordText);
+                const baseMs = Number(info.lastSnobAtMs);
+                if (!coord || !Number.isFinite(baseMs) || baseMs <= 0) return;
+                const entry = buildNoblePretimeWindowFromBase(coord, baseMs);
+                if (!entry) return;
+                const prev = out[coord];
+                if (!prev || Number(entry.lastSnobAtMs || 0) > Number(prev.lastSnobAtMs || 0)) out[coord] = entry;
+            });
+            return out;
+        }
+
         function delay(ms) {
             const waitMs = Math.max(0, toInt(ms));
             return new Promise(resolve => setTimeout(resolve, waitMs));
@@ -1313,13 +1503,8 @@ javascript:(function(){
                     const snobInfo = parseLastSnobCommandInfo(html);
                     const lastSnobAtMs = snobInfo.lastSnobAtMs;
                     if (Number.isFinite(lastSnobAtMs) && lastSnobAtMs > 0) {
-                        entries.push({
-                            coord: item.coord,
-                            villageId: String(villageId),
-                            from: formatHMS(lastSnobAtMs),
-                            to: formatHMS(lastSnobAtMs + noblePretimeWindowMinutes * 60 * 1000),
-                            lastSnobAtMs
-                        });
+                        const win = buildNoblePretimeWindowFromBase(item.coord, lastSnobAtMs, String(villageId));
+                        if (win) entries.push(win);
                         setNoblePretimeProgress(true, idx, total, `${idx}/${total}: ${item.coord} — двор найден`);
                     } else {
                         const details = snobInfo.rowsTotal > 0
@@ -1338,6 +1523,7 @@ javascript:(function(){
             if (runToken !== noblePretimeRunToken) return entries;
 
             setNoblePretimeWindows(entries);
+            applyPretimeEntriesToCurrentCoords(entries);
             setNoblePretimeProgress(true, total, total, `Готово: ${entries.length}/${total} кор с притаймом`);
             saveConfig();
             return entries;
@@ -3472,6 +3658,7 @@ javascript:(function(){
             const winList = Array.isArray(tab.timeWindows) ? tab.timeWindows : [];
             const targetDate = normalizeDateYmd(tab.targetDateYmd, formatServerDateYmd());
             const useDateFilter = !!tab.dateFilterEnabled;
+            const coordPretimeMap = noblePretimeEnabled ? buildCoordPretimeMap(targetCoords) : {};
 
             console.log('%c=== Saved Config ===', 'font-size:14px;font-weight:bold');
             console.log('Target coords:', targetCoords);
@@ -3534,7 +3721,8 @@ javascript:(function(){
                     console.log('%c=== Unit Speeds (minutes per field) ===', 'font-size:14px;font-weight:bold');
                     console.table(Object.entries(settings.unitSpeedEffective).map(([u, h]) => ({ unit: u, minutes: Number(h).toFixed(4) })));
 
-                    const hasAnyWindows = noblePretimeEnabled ? noblePretimeWindows.length > 0 : winList.length > 0;
+                    const hasAnyCoordPretime = noblePretimeEnabled && Object.keys(coordPretimeMap).length > 0;
+                    const hasAnyWindows = noblePretimeEnabled ? (hasAnyCoordPretime || noblePretimeWindows.length > 0) : winList.length > 0;
                     if (!targetCoords.length || (!selectedUnits.length && !getActiveTemplates().length) || !hasAnyWindows) {
                         console.log('%c[timeSpam] Нет целей, юнитов или окон.', 'color:orange');
                         showNotice('Нет целей, юнитов или временных окон для расчёта', 'warn', 2800);
@@ -3555,7 +3743,12 @@ javascript:(function(){
                         if (!coord) return null;
                         const targetObj = { ...coord, sigil: hasSigil, coordKey: cleanCoord };
                         if (noblePretimeEnabled) {
-                            const entry = noblePretimeMap[cleanCoord];
+                            // Priority: timestamp embedded in coords field -> saved noble pretime windows.
+                            let entry = coordPretimeMap[cleanCoord] || null;
+                            if (!entry) {
+                                const saved = noblePretimeMap[cleanCoord];
+                                if (saved && parseClockToSec(saved.from) != null && parseClockToSec(saved.to) != null) entry = saved;
+                            }
                             if (!entry || parseClockToSec(entry.from) == null || parseClockToSec(entry.to) == null) return null;
                             targetObj.windows = [{ from: entry.from, to: entry.to }];
                         }
