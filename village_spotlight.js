@@ -5,6 +5,7 @@
   const STYLE_ID = "scriptmm-village-spotlight-style";
   const ROOT_ID = "scriptmm-village-spotlight-root";
   const LOAD_ENDPOINT = "/map/village.txt";
+  const MAIN_SCRIPT_REMOTE_URL = "https://raw.githubusercontent.com/krars/tw/main/main.js";
   const GAME_REQUEST_MIN_INTERVAL_MS = 250;
   const COMMAND_CACHE_TTL_MS = 30 * 60 * 1000;
   const SIGIL_CACHE_TTL_MS = 10 * 60 * 1000;
@@ -39,6 +40,10 @@
     knight: "пал",
     snob: "двор",
     militia: "ополч",
+  };
+  const PLAN_ACTION_LABELS = {
+    slice: "Срез/дефф",
+    intercept: "Атака/двор",
   };
   const UNIT_SPEED_FALLBACK = {
     spear: 18,
@@ -82,6 +87,7 @@
     sigilCache: new Map(),
     placeCommandFormCache: new Map(),
     speedModelPromise: null,
+    mainBridgePromise: null,
     rootEl: null,
     inputEl: null,
     statusEl: null,
@@ -530,6 +536,7 @@
           units: null,
           unitsStatus: "pending",
           unitsError: null,
+          planState: null,
         };
       })
       .filter(Boolean);
@@ -1025,6 +1032,341 @@
       ),
     ).length;
 
+  const normalizePlanAction = (value) => {
+    const action = cleanText(value);
+    if (action === "slice" || action === "intercept") return action;
+    return null;
+  };
+
+  const getPlanActionLabel = (actionRaw) => {
+    const action = normalizePlanAction(actionRaw);
+    return action ? PLAN_ACTION_LABELS[action] : "Расчет";
+  };
+
+  const actionUsesSigil = (actionRaw) => normalizePlanAction(actionRaw) === "slice";
+
+  const buildCommandPlanRequestId = () =>
+    `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+  const sanitizeDomToken = (value, fallback = "node") => {
+    const token = cleanText(value).replace(/[^a-z0-9_-]+/gi, "_");
+    return token || fallback;
+  };
+
+  const buildPlanSlotId = (commandKey) =>
+    `svs_plan_${sanitizeDomToken(commandKey, "command")}`;
+
+  const getPlanSlotNode = (commandKey) =>
+    document.getElementById(buildPlanSlotId(commandKey));
+
+  const findCommandIndexByKey = (view, commandKeyRaw) => {
+    const commandKey = cleanText(commandKeyRaw);
+    const commands = Array.isArray(view && view.commands) ? view.commands : [];
+    return commands.findIndex(
+      (command) => cleanText(command && command.key) === commandKey,
+    );
+  };
+
+  const getCommandByKey = (view, commandKeyRaw) => {
+    const index = findCommandIndexByKey(view, commandKeyRaw);
+    if (index < 0) return null;
+    return view.commands[index] || null;
+  };
+
+  const buildSpotlightIncomingId = (view, command) =>
+    [
+      "svs",
+      cleanText(view && view.villageId) || "v",
+      cleanText(command && command.commandId) || cleanText(command && command.key) || "cmd",
+    ].join("_");
+
+  const buildSpotlightIncoming = (view, command) => {
+    if (!view || !command) return null;
+    const etaEpochMs = Number(command.endTimeSec) * 1000;
+    const targetCoord = cleanText(view.coord);
+    if (!targetCoord || !Number.isFinite(etaEpochMs) || etaEpochMs <= 0) {
+      return null;
+    }
+    const incoming = {
+      id: buildSpotlightIncomingId(view, command),
+      sourceIncomingId: cleanText(command.commandId) || cleanText(command.key),
+      target: targetCoord,
+      targetCoord,
+      targetVillageId: cleanText(view.villageId) || null,
+      arrivalText:
+        cleanText(command.arrivalText) ||
+        new Date(etaEpochMs).toLocaleString("ru-RU"),
+      etaEpochMs,
+      arrivalEpochMs: etaEpochMs,
+      timerText: cleanText(command.timerText) || null,
+      commandType: "attack",
+      displayType: "attack",
+    };
+    if (Number.isFinite(Number(view.sigilPercent))) {
+      incoming.sigilPercent = Number(view.sigilPercent);
+    }
+    return incoming;
+  };
+
+  const buildSpotlightIncomingList = (view) =>
+    (Array.isArray(view && view.commands) ? view.commands : [])
+      .map((command) => buildSpotlightIncoming(view, command))
+      .filter(Boolean)
+      .sort((left, right) => Number(left.etaEpochMs || 0) - Number(right.etaEpochMs || 0));
+
+  const ensureMainBridgeLoaded = () => {
+    if (
+      window.ScriptMM &&
+      typeof window.ScriptMM.renderSpotlightPlanPanel === "function"
+    ) {
+      return Promise.resolve(window.ScriptMM);
+    }
+    if (state.mainBridgePromise) {
+      return state.mainBridgePromise;
+    }
+
+    state.mainBridgePromise = (async () => {
+      window.__ScriptMMExternalOnly = true;
+      try {
+        const url = `${MAIN_SCRIPT_REMOTE_URL}?ts=${Date.now()}`;
+        const response = await fetch(url, {
+          credentials: "omit",
+          cache: "no-store",
+        });
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        let code = String(await response.text());
+        code = code.replace(/^\s*javascript:\s*/i, "");
+        const script = document.createElement("script");
+        script.textContent = code;
+        document.documentElement.appendChild(script);
+        script.remove();
+        if (
+          !window.ScriptMM ||
+          typeof window.ScriptMM.renderSpotlightPlanPanel !== "function"
+        ) {
+          throw new Error("main.js загружен, но bridge не найден.");
+        }
+        return window.ScriptMM;
+      } finally {
+        try {
+          delete window.__ScriptMMExternalOnly;
+        } catch (error) {
+          window.__ScriptMMExternalOnly = false;
+        }
+      }
+    })();
+
+    return state.mainBridgePromise.catch((error) => {
+      state.mainBridgePromise = null;
+      throw error;
+    });
+  };
+
+  const renderPlanPlaceholder = (slotNode, text, type = "muted") => {
+    if (!slotNode) return;
+    slotNode.innerHTML = `<div class="svs-plan-placeholder svs-plan-${escapeHtml(
+      cleanText(type) || "muted",
+    )}">${escapeHtml(cleanText(text) || "")}</div>`;
+  };
+
+  const mountCommandPlan = async (commandKeyRaw) => {
+    const view = state.currentView;
+    const commandKey = cleanText(commandKeyRaw);
+    const command = getCommandByKey(view, commandKey);
+    const planState = command && command.planState ? command.planState : null;
+    if (!view || !command || !planState || cleanText(planState.status) !== "ready") {
+      return false;
+    }
+
+    const slotNode = getPlanSlotNode(commandKey);
+    if (!slotNode) return false;
+    const renderKey = [
+      cleanText(planState.requestId),
+      cleanText(planState.action),
+      Number.isFinite(Number(view.sigilPercent))
+        ? Number(view.sigilPercent).toFixed(2)
+        : "na",
+    ].join("|");
+    if (slotNode.getAttribute("data-svs-plan-rendered") === renderKey) {
+      return true;
+    }
+    if (planState.renderPromise) {
+      return planState.renderPromise;
+    }
+
+    planState.renderPromise = (async () => {
+      renderPlanPlaceholder(slotNode, "Строю таблицу расчета...", "muted");
+      const bridge = await ensureMainBridgeLoaded();
+      const currentView = state.currentView;
+      const currentCommand = getCommandByKey(currentView, commandKey);
+      const currentPlanState =
+        currentCommand && currentCommand.planState ? currentCommand.planState : null;
+      if (
+        !currentView ||
+        !currentCommand ||
+        !currentPlanState ||
+        cleanText(currentPlanState.requestId) !== cleanText(planState.requestId)
+      ) {
+        return false;
+      }
+
+      const mountNode = getPlanSlotNode(commandKey);
+      if (!mountNode) return false;
+
+      const incoming = buildSpotlightIncoming(currentView, currentCommand);
+      if (!incoming) {
+        throw new Error("Для этого приказа нет точного времени прибытия.");
+      }
+
+      const result = await bridge.renderSpotlightPlanPanel({
+        mountNode,
+        incoming,
+        incomings: buildSpotlightIncomingList(currentView),
+        action: currentPlanState.action,
+        actionLabel: getPlanActionLabel(currentPlanState.action),
+        sigilPercent: actionUsesSigil(currentPlanState.action)
+          ? currentView.sigilPercent
+          : undefined,
+        statusMessage: `${getPlanActionLabel(currentPlanState.action)} построен.`,
+      });
+
+      if (!result || result.ok === false) {
+        throw new Error("main.js не смог построить таблицу.");
+      }
+
+      mountNode.setAttribute("data-svs-plan-rendered", renderKey);
+      return true;
+    })()
+      .catch((error) => {
+        const currentView = state.currentView;
+        const currentIndex = findCommandIndexByKey(currentView, commandKey);
+        if (currentIndex >= 0) {
+          const currentCommand = currentView.commands[currentIndex];
+          const currentPlanState =
+            currentCommand && currentCommand.planState ? currentCommand.planState : null;
+          if (
+            currentPlanState &&
+            cleanText(currentPlanState.requestId) === cleanText(planState.requestId)
+          ) {
+            currentPlanState.status = "error";
+            currentPlanState.error =
+              cleanText(error && error.message) || "Ошибка построения таблицы.";
+            renderCurrentView();
+          }
+        }
+        return false;
+      })
+      .finally(() => {
+        const currentView = state.currentView;
+        const currentIndex = findCommandIndexByKey(currentView, commandKey);
+        if (currentIndex >= 0) {
+          const currentCommand = currentView.commands[currentIndex];
+          if (currentCommand && currentCommand.planState === planState) {
+            delete currentCommand.planState.renderPromise;
+          }
+        }
+        queueMicrotask(() => {
+          syncCurrentViewInlinePlans();
+        });
+      });
+
+    return planState.renderPromise;
+  };
+
+  const syncCurrentViewInlinePlans = () => {
+    const view = state.currentView;
+    if (!view || !state.resultEl) return;
+    (Array.isArray(view.commands) ? view.commands : []).forEach((command) => {
+      const planState = command && command.planState ? command.planState : null;
+      if (!planState) return;
+      const slotNode = getPlanSlotNode(command.key);
+      if (!slotNode) return;
+      const status = cleanText(planState.status);
+      if (status === "loading") {
+        renderPlanPlaceholder(slotNode, "Подключаю расчет...", "muted");
+        return;
+      }
+      if (status === "error") {
+        renderPlanPlaceholder(
+          slotNode,
+          cleanText(planState.error) || "Не удалось построить таблицу.",
+          "error",
+        );
+        return;
+      }
+      if (status === "ready") {
+        void mountCommandPlan(command.key);
+      }
+    });
+  };
+
+  const toggleCommandPlan = async (commandKeyRaw, actionRaw) => {
+    const view = state.currentView;
+    const commandKey = cleanText(commandKeyRaw);
+    const action = normalizePlanAction(actionRaw);
+    if (!view || !commandKey || !action) return;
+
+    const commandIndex = findCommandIndexByKey(view, commandKey);
+    if (commandIndex < 0) return;
+    const currentCommand = view.commands[commandIndex];
+    const currentPlanState =
+      currentCommand && currentCommand.planState ? currentCommand.planState : null;
+
+    if (currentPlanState && cleanText(currentPlanState.action) === action) {
+      view.commands[commandIndex] = {
+        ...currentCommand,
+        planState: null,
+      };
+      renderCurrentView();
+      return;
+    }
+
+    const requestId = buildCommandPlanRequestId();
+    view.commands[commandIndex] = {
+      ...currentCommand,
+      planState: {
+        action,
+        status: "loading",
+        error: null,
+        requestId,
+      },
+    };
+    renderCurrentView();
+
+    try {
+      await ensureMainBridgeLoaded();
+      const nextCommand = getCommandByKey(state.currentView, commandKey);
+      const nextPlanState =
+        nextCommand && nextCommand.planState ? nextCommand.planState : null;
+      if (
+        !nextCommand ||
+        !nextPlanState ||
+        cleanText(nextPlanState.requestId) !== requestId
+      ) {
+        return;
+      }
+      nextPlanState.status = "ready";
+      nextPlanState.error = null;
+      void mountCommandPlan(commandKey);
+    } catch (error) {
+      const latestCommand = getCommandByKey(state.currentView, commandKey);
+      const latestPlanState =
+        latestCommand && latestCommand.planState ? latestCommand.planState : null;
+      if (
+        latestCommand &&
+        latestPlanState &&
+        cleanText(latestPlanState.requestId) === requestId
+      ) {
+        latestPlanState.status = "error";
+        latestPlanState.error =
+          cleanText(error && error.message) || "Не удалось загрузить main.js.";
+        renderCurrentView();
+      }
+    }
+  };
+
   const renderIdle = () => {
     if (!state.resultEl) return;
     state.resultEl.innerHTML = "";
@@ -1084,8 +1426,14 @@
         : view.infoStatus === "loading" && !commands.length
           ? '<div class="svs-empty">Загружаю страницу деревни и список приказов...</div>'
           : commands.length
-            ? `<div class="svs-commands-wrap"><table class="svs-commands-table"><thead><tr><th>Приказ</th><th>Прибытие</th><th>Через</th><th>Войска</th></tr></thead><tbody>${commands
+            ? `<div class="svs-commands-wrap"><table class="svs-commands-table"><thead><tr><th>Приказ</th><th>Прибытие</th><th>Через</th><th>Войска</th><th>Срез/дефф</th><th>Атака/двор</th></tr></thead><tbody>${commands
                 .map((command) => {
+                  const planState =
+                    command && command.planState && typeof command.planState === "object"
+                      ? command.planState
+                      : null;
+                  const activeAction = normalizePlanAction(planState && planState.action);
+                  const hasEta = Number.isFinite(Number(command && command.endTimeSec));
                   const unitsCell =
                     command.unitsStatus === "loaded"
                       ? formatUnitsHtml(command.units)
@@ -1105,7 +1453,22 @@
                       )}">${escapeHtml(command.timerText || "")}</span>`
                     : escapeHtml(command.timerText || "");
 
-                  return `<tr><td class="svs-command-cell"><div class="svs-command-main"><span class="svs-command-icons">${
+                  const renderPlanButton = (action) => {
+                    const disabled = !hasEta;
+                    const isActive = activeAction === action;
+                    const buttonLabel = isActive ? "Скрыть" : "Показать";
+                    return `<button class="svs-plan-btn${
+                      isActive ? " is-active" : ""
+                    }" type="button" data-svs-plan-action="${escapeHtml(
+                      action,
+                    )}" data-svs-command-key="${escapeHtml(
+                      cleanText(command.key),
+                    )}"${disabled ? ' disabled title="Нет точного ETA"' : ""}>${escapeHtml(
+                      buttonLabel,
+                    )}</button>`;
+                  };
+
+                  const commandRowHtml = `<tr><td class="svs-command-cell"><div class="svs-command-main"><span class="svs-command-icons">${
                     command.iconHtml || ""
                   }</span><div class="svs-command-text"><div class="svs-command-label">${
                     command.commandUrl
@@ -1119,7 +1482,29 @@
                     command.commandId ? `id ${command.commandId}` : "id ?",
                   )}</div></div></div></td><td class="svs-arrival-cell">${escapeHtml(
                     command.arrivalText || "",
-                  )}</td><td class="svs-timer-cell">${timerHtml}</td><td class="svs-units-cell">${unitsCell}</td></tr>`;
+                  )}</td><td class="svs-timer-cell">${timerHtml}</td><td class="svs-units-cell">${unitsCell}</td><td class="svs-plan-cell">${renderPlanButton(
+                    "slice",
+                  )}</td><td class="svs-plan-cell">${renderPlanButton(
+                    "intercept",
+                  )}</td></tr>`;
+
+                  if (!planState) {
+                    return commandRowHtml;
+                  }
+
+                  const slotId = buildPlanSlotId(command.key);
+                  const inlineStateHtml =
+                    cleanText(planState.status) === "error"
+                      ? `<div class="svs-plan-placeholder svs-plan-error">${escapeHtml(
+                          cleanText(planState.error) || "Не удалось построить таблицу.",
+                        )}</div>`
+                      : '<div class="svs-plan-placeholder svs-plan-muted">Подключаю расчет...</div>';
+
+                  return `${commandRowHtml}<tr class="svs-plan-row"><td colspan="6" class="svs-plan-row-cell"><div id="${escapeHtml(
+                    slotId,
+                  )}" class="svs-plan-slot" data-svs-plan-slot="${escapeHtml(
+                    cleanText(command.key),
+                  )}">${inlineStateHtml}</div></td></tr>`;
                 })
                 .join("")}</tbody></table></div>`
             : '<div class="svs-empty">По этой деревне видимых приказов нет.</div>';
@@ -1151,6 +1536,7 @@
     }</div>${commandsHtml}`;
 
     refreshCountdowns();
+    syncCurrentViewInlinePlans();
   };
 
   const loadVillages = async () => {
@@ -1490,7 +1876,7 @@
 #${ROOT_ID} .svs-open-link{font-size:11px;color:#ffe2a9;text-decoration:underline}
 #${ROOT_ID} .svs-open-link:hover{color:#fff2d0}
 #${ROOT_ID} .svs-commands-wrap{border:1px solid rgba(236,201,130,.2);border-radius:12px;overflow:auto;background:rgba(255,248,231,.03)}
-#${ROOT_ID} .svs-commands-table{width:100%;border-collapse:separate;border-spacing:0;min-width:740px}
+#${ROOT_ID} .svs-commands-table{width:100%;border-collapse:separate;border-spacing:0;min-width:940px}
 #${ROOT_ID} .svs-commands-table th{position:sticky;top:0;padding:8px 10px;background:#f0dfbb;color:#4f320c;text-align:left;font-size:11px;letter-spacing:.05em;text-transform:uppercase;z-index:1}
 #${ROOT_ID} .svs-commands-table td{padding:7px 10px;border-top:1px solid rgba(236,201,130,.14);vertical-align:top;background:rgba(255,248,231,.015);font-size:12px;color:#f8ecd0}
 #${ROOT_ID} .svs-commands-table tbody tr:nth-child(even) td{background:rgba(255,248,231,.035)}
@@ -1506,6 +1892,17 @@
 #${ROOT_ID} .svs-arrival-cell{white-space:nowrap;min-width:160px}
 #${ROOT_ID} .svs-timer-cell{white-space:nowrap;min-width:92px;font-weight:700;color:#ffe3a4}
 #${ROOT_ID} .svs-units-cell{min-width:220px}
+#${ROOT_ID} .svs-plan-cell{white-space:nowrap;min-width:92px;text-align:center}
+#${ROOT_ID} .svs-plan-btn{min-width:74px;border:1px solid rgba(236,201,130,.34);border-radius:8px;padding:4px 9px;background:rgba(255,248,231,.06);color:#fff0cf;font-size:11px;font-weight:700;cursor:pointer}
+#${ROOT_ID} .svs-plan-btn:hover:not(:disabled){background:rgba(255,248,231,.11);border-color:rgba(255,226,169,.6)}
+#${ROOT_ID} .svs-plan-btn.is-active{background:rgba(240,201,121,.14);border-color:rgba(240,201,121,.62);color:#ffe2a9}
+#${ROOT_ID} .svs-plan-btn:disabled{opacity:.45;cursor:not-allowed}
+#${ROOT_ID} .svs-plan-row td{padding:0;background:transparent !important;border-top:0}
+#${ROOT_ID} .svs-plan-row-cell{padding:0 !important}
+#${ROOT_ID} .svs-plan-slot{padding:0 10px 10px}
+#${ROOT_ID} .svs-plan-placeholder{margin:0;padding:10px 12px;border-top:1px dashed rgba(236,201,130,.18);font-size:12px;line-height:1.35}
+#${ROOT_ID} .svs-plan-muted{color:#d6c5a4}
+#${ROOT_ID} .svs-plan-error{color:#ff9d91}
 #${ROOT_ID} .svs-units-wrap{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
 #${ROOT_ID} .svs-unit-chip{display:inline-flex;align-items:center;gap:3px;padding:2px 6px;border:1px solid rgba(236,201,130,.24);border-radius:999px;background:rgba(255,248,231,.06);color:#fff5dd;font-size:10px;font-weight:700;line-height:1}
 #${ROOT_ID} .svs-unit-icon{width:13px;height:13px;object-fit:contain;display:block}
@@ -1574,6 +1971,16 @@
     state.boundClick = (event) => {
       const target = event.target instanceof Element ? event.target : null;
       if (!target) return;
+      const planButton = target.closest("[data-svs-plan-action][data-svs-command-key]");
+      if (planButton) {
+        event.preventDefault();
+        event.stopPropagation();
+        void toggleCommandPlan(
+          planButton.getAttribute("data-svs-command-key"),
+          planButton.getAttribute("data-svs-plan-action"),
+        );
+        return;
+      }
       const action = cleanText(target.getAttribute("data-svs-action"));
       if (action === "close") {
         setVisible(false);

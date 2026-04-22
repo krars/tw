@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.16";
+  const VERSION = "0.10.18";
   const LOG_PREFIX = "[ScriptMM]";
   const MULTI_TAB_PRESENCE_KEY = "scriptmm.active_instances.v1";
   const MULTI_TAB_HEARTBEAT_INTERVAL_MS = 3000;
@@ -12,6 +12,8 @@
     .toString(36)
     .slice(2, 10)}`;
   const SPEED_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+  const TROOPS_CACHE_TTL_MS = 30 * 1000;
+  const TIMING_COPY_HISTORY_MAX_ITEMS = 200;
   const MAX_FETCHES_PER_SECOND = 4;
   const FETCH_REQUEST_TIMEOUT_MS = 12000;
   const FETCH_MIN_INTERVAL_MS = Math.max(
@@ -43,6 +45,7 @@
     hiddenVillageGroups: "scriptmm.hidden_village_groups.v1",
     favorites: "scriptmm.favorites.v1",
     uiMigrations: "scriptmm.ui_migrations.v1",
+    timingCopyHistory: "scriptmm.timing_copy_history.v1",
   };
   const SUPPORT_COMMAND_DETAILS_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
   const COMMAND_ROUTE_DETAILS_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
@@ -2049,9 +2052,42 @@
     };
   };
 
+  let detectedPageSigilCacheValue = null;
+  let detectedPageSigilCacheAtMs = 0;
+  const getDetectedPageSigilPercentCached = () => {
+    const nowMs = Date.now();
+    if (
+      Number.isFinite(detectedPageSigilCacheValue) &&
+      nowMs - detectedPageSigilCacheAtMs <= 1500
+    ) {
+      return normalizeSigilPercent(detectedPageSigilCacheValue);
+    }
+    const liveSigil = normalizeSigilPercent(detectActiveSigilPercent());
+    detectedPageSigilCacheValue = liveSigil;
+    detectedPageSigilCacheAtMs = nowMs;
+    return liveSigil;
+  };
+
   const getDefaultSigilForAction = (action) => {
     if (!actionUsesSigil(action)) return 0;
-    return normalizeSigilPercent(state.detectedSigilPercent);
+    const liveSigil = getDetectedPageSigilPercentCached();
+    if (liveSigil > 0) {
+      state.detectedSigilPercent = liveSigil;
+      return liveSigil;
+    }
+
+    const stateSigil = normalizeSigilPercent(state.detectedSigilPercent);
+    if (stateSigil > 0) return stateSigil;
+
+    const snapshotSigil = normalizeSigilPercent(
+      toNumber(state.snapshot && state.snapshot.sigilPercent),
+    );
+    if (snapshotSigil > 0) {
+      state.detectedSigilPercent = snapshotSigil;
+      return snapshotSigil;
+    }
+
+    return stateSigil;
   };
 
   const getIncomingSigilPercent = (incoming) => {
@@ -2077,10 +2113,37 @@
     const explicitSigil = toNumber(explicitSigilRaw);
     if (Number.isFinite(explicitSigil))
       return normalizeSigilPercent(explicitSigil);
+    const defaultSigil = normalizeSigilPercent(getDefaultSigilForAction(action));
     const incomingSigil = getIncomingSigilPercent(incoming);
-    if (Number.isFinite(incomingSigil))
-      return normalizeSigilPercent(incomingSigil);
-    return normalizeSigilPercent(getDefaultSigilForAction(action));
+    const shouldPreferIncomingSigil = Boolean(
+      incoming &&
+        (incoming.isHubIncoming ||
+          incoming.isHubMass ||
+          incoming.isTribeIncoming ||
+          incoming.isTribeAllyCommand ||
+          incoming.isTribeAllyPlanned ||
+          incoming.isFavoriteEntry),
+    );
+    if (Number.isFinite(incomingSigil)) {
+      if (shouldPreferIncomingSigil) {
+        return normalizeSigilPercent(incomingSigil);
+      }
+    }
+    return defaultSigil;
+  };
+
+  const restoreDetectedSigilPercentFromSnapshot = () => {
+    const snapshot = readJson(STORAGE_KEYS.snapshot);
+    if (!snapshot || typeof snapshot !== "object") return false;
+    state.snapshot = snapshot;
+    const snapshotSigil = normalizeSigilPercent(
+      toNumber(snapshot && snapshot.sigilPercent),
+    );
+    if (snapshotSigil > 0) {
+      state.detectedSigilPercent = snapshotSigil;
+      return true;
+    }
+    return false;
   };
 
   const isSameVillageAsIncomingTarget = (incoming, village) => {
@@ -2167,14 +2230,72 @@
     return Number.isFinite(epochMs) ? epochMs : null;
   };
 
+  const parseTimingServerDate = (rawValue) => {
+    if (rawValue === null || rawValue === undefined) return null;
+    if (rawValue instanceof Date) {
+      const rawMs = rawValue.getTime();
+      return Number.isFinite(rawMs) ? new Date(rawMs) : null;
+    }
+
+    const normalizeEpochMs = (value) => {
+      const numeric = Number(value);
+      if (!Number.isFinite(numeric) || numeric <= 0) return null;
+      if (numeric >= 1000000000000) return Math.round(numeric);
+      if (numeric >= 1000000000) return Math.round(numeric * 1000);
+      return null;
+    };
+
+    const numericEpochMs = normalizeEpochMs(rawValue);
+    if (Number.isFinite(numericEpochMs)) {
+      const dt = new Date(numericEpochMs);
+      if (Number.isFinite(dt.getTime())) return dt;
+    }
+
+    const textValue = cleanText(rawValue);
+    if (!textValue) return null;
+
+    const textEpochMs = normalizeEpochMs(textValue);
+    if (Number.isFinite(textEpochMs)) {
+      const dt = new Date(textEpochMs);
+      if (Number.isFinite(dt.getTime())) return dt;
+    }
+
+    const parsedMs = Number(Date.parse(textValue));
+    if (Number.isFinite(parsedMs)) {
+      const dt = new Date(parsedMs);
+      if (Number.isFinite(dt.getTime())) return dt;
+    }
+    return null;
+  };
+
   const getServerNow = () => {
+    // Критично: в первую очередь берём время только из игрового Timing API.
+    const timingApi = safe(() => window.Timing, null);
+    if (timingApi && typeof timingApi === "object") {
+      const timingMethods = ["getCurrentServerTime", "getServerTime"];
+      for (let index = 0; index < timingMethods.length; index += 1) {
+        const methodName = timingMethods[index];
+        if (typeof timingApi[methodName] !== "function") continue;
+        const timingValue = safe(() => timingApi[methodName](), null);
+        const parsedDate = parseTimingServerDate(timingValue);
+        if (parsedDate) return parsedDate;
+      }
+      const timingProps = [
+        safe(() => timingApi.currentServerTime, null),
+        safe(() => timingApi.serverTime, null),
+      ];
+      for (let index = 0; index < timingProps.length; index += 1) {
+        const parsedDate = parseTimingServerDate(timingProps[index]);
+        if (parsedDate) return parsedDate;
+      }
+    }
+
     const dateText = cleanText(
       safe(() => document.querySelector("#serverDate").textContent, null),
     );
     const timeText = cleanText(
       safe(() => document.querySelector("#serverTime").textContent, null),
     );
-
     if (dateText && timeText) {
       const dateParts = dateText.match(/\d+/g);
       const timeParts = timeText.match(/\d+/g);
@@ -2184,36 +2305,32 @@
         timeParts &&
         timeParts.length >= 2
       ) {
-        const epochMs = buildServerEpochMs(
+        const dt = new Date(
           Number(dateParts[2]),
-          Number(dateParts[1]),
+          Number(dateParts[1]) - 1,
           Number(dateParts[0]),
           Number(timeParts[0]),
           Number(timeParts[1]),
           Number(timeParts[2] || 0),
           0,
         );
-        if (Number.isFinite(epochMs)) return new Date(epochMs);
+        if (Number.isFinite(dt.getTime())) return dt;
       }
     }
 
-    const timingServerTime = safe(
-      () => window.Timing.getCurrentServerTime(),
-      null,
-    );
-    if (timingServerTime) {
-      const dt = new Date(timingServerTime);
-      if (Number.isFinite(dt.getTime())) return dt;
-    }
-
     if (serverGeneratedMs) {
-      const dt = new Date(
-        Number(serverGeneratedMs) + (Date.now() - scriptStartMs),
-      );
-      if (Number.isFinite(dt.getTime())) return dt;
+      const baseMs =
+        Number(serverGeneratedMs) >= 1000000000000
+          ? Number(serverGeneratedMs)
+          : Number(serverGeneratedMs) >= 1000000000
+            ? Number(serverGeneratedMs) * 1000
+            : NaN;
+      if (Number.isFinite(baseMs)) {
+        const dt = new Date(baseMs + (Date.now() - scriptStartMs));
+        if (Number.isFinite(dt.getTime())) return dt;
+      }
     }
-
-    return new Date();
+    return new Date(Date.now());
   };
 
   const saveJson = (key, value) =>
@@ -2228,6 +2345,91 @@
       if (!raw) return null;
       return JSON.parse(raw);
     }, null);
+  const normalizeTimingCopyHistoryEntry = (raw) => {
+    if (!raw || typeof raw !== "object") return null;
+    const timingCenter = cleanText(raw.timingCenter);
+    if (!timingCenter) return null;
+    const savedAtMsRaw = Number(raw.savedAtMs);
+    const savedAtMsFromText = Number(
+      safe(() => new Date(cleanText(raw.savedAt) || "").getTime(), NaN),
+    );
+    const savedAtMs = Number.isFinite(savedAtMsRaw)
+      ? Math.round(savedAtMsRaw)
+      : Number.isFinite(savedAtMsFromText)
+        ? Math.round(savedAtMsFromText)
+        : getServerNowMs();
+    const id =
+      cleanText(raw.id) ||
+      `timing_copy_${savedAtMs}_${Math.random().toString(36).slice(2, 10)}`;
+    return {
+      id,
+      savedAtMs,
+      savedAt: new Date(savedAtMs).toISOString(),
+      timingCenter,
+      source: cleanText(raw.source) || null,
+      action: cleanText(raw.action) || null,
+      incomingId: cleanText(raw.incomingId) || null,
+      commandId: cleanText(raw.commandId) || null,
+      fromVillageCoord: cleanText(raw.fromVillageCoord) || null,
+      targetCoord: cleanText(raw.targetCoord) || null,
+      goUrl: cleanText(raw.goUrl) || null,
+    };
+  };
+  const loadTimingCopyHistory = () => {
+    const raw = readJson(STORAGE_KEYS.timingCopyHistory);
+    return (Array.isArray(raw) ? raw : [])
+      .map((entry) => normalizeTimingCopyHistoryEntry(entry))
+      .filter(Boolean)
+      .sort(
+        (left, right) =>
+          Number(right && right.savedAtMs) - Number(left && left.savedAtMs),
+      )
+      .slice(0, TIMING_COPY_HISTORY_MAX_ITEMS);
+  };
+  const saveTimingCopyHistory = (entries) =>
+    saveJson(
+      STORAGE_KEYS.timingCopyHistory,
+      (Array.isArray(entries) ? entries : [])
+        .map((entry) => normalizeTimingCopyHistoryEntry(entry))
+        .filter(Boolean)
+        .sort(
+          (left, right) =>
+            Number(right && right.savedAtMs) - Number(left && left.savedAtMs),
+        )
+        .slice(0, TIMING_COPY_HISTORY_MAX_ITEMS),
+    );
+  const appendTimingCopyHistory = (entryRaw) => {
+    const normalizedEntry = normalizeTimingCopyHistoryEntry(entryRaw);
+    if (!normalizedEntry) return null;
+    const history = loadTimingCopyHistory();
+    const dedupeKey = [
+      normalizedEntry.timingCenter,
+      normalizedEntry.source,
+      normalizedEntry.action,
+      normalizedEntry.incomingId,
+      normalizedEntry.commandId,
+      normalizedEntry.fromVillageCoord,
+      normalizedEntry.targetCoord,
+      normalizedEntry.goUrl,
+    ].join("|");
+    const dedupedHistory = history.filter((entry) => {
+      if (!entry || typeof entry !== "object") return false;
+      const key = [
+        cleanText(entry.timingCenter) || "",
+        cleanText(entry.source) || "",
+        cleanText(entry.action) || "",
+        cleanText(entry.incomingId) || "",
+        cleanText(entry.commandId) || "",
+        cleanText(entry.fromVillageCoord) || "",
+        cleanText(entry.targetCoord) || "",
+        cleanText(entry.goUrl) || "",
+      ].join("|");
+      return key !== dedupeKey;
+    });
+    const nextHistory = [normalizedEntry].concat(dedupedHistory);
+    saveTimingCopyHistory(nextHistory);
+    return normalizedEntry;
+  };
   const normalizeMultiTabPresenceMap = (raw, nowMs = Date.now()) => {
     const source =
       raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
@@ -2831,6 +3033,44 @@
     }
     return source;
   };
+  const normalizeExternalIncoming = (incomingRaw, fallbackId = null) => {
+    const source =
+      incomingRaw && typeof incomingRaw === "object"
+        ? cloneSerializable(incomingRaw, null)
+        : null;
+    if (!source || typeof source !== "object") return null;
+    const etaMs = toFiniteEpochMs(source.etaEpochMs || source.arrivalEpochMs);
+    const targetCoord = cleanText(source.targetCoord || source.target);
+    if (!Number.isFinite(etaMs) || !targetCoord) return null;
+    const normalizedId =
+      cleanText(source.id) ||
+      cleanText(fallbackId) ||
+      `ext_${Math.random().toString(36).slice(2, 10)}`;
+    const sourceIncomingId =
+      cleanText(source.sourceIncomingId) || cleanText(source.id) || normalizedId;
+    source.id = normalizedId;
+    source.sourceIncomingId = sourceIncomingId;
+    source.targetCoord = targetCoord;
+    source.target = cleanText(source.target) || targetCoord;
+    source.arrivalText =
+      cleanText(source.arrivalText) || formatArrivalTextFromEpochMs(etaMs);
+    source.etaEpochMs = etaMs;
+    source.arrivalEpochMs = etaMs;
+    source.commandType = cleanText(source.commandType) || "attack";
+    source.displayType =
+      cleanText(source.displayType) || cleanText(source.commandType) || "attack";
+    source.isHubIncoming = false;
+    source.isHubMass = false;
+    source.isTribeIncoming = false;
+    source.isTribeAllyCommand = false;
+    source.isTribeAllyPlanned = false;
+    source.isFavoriteEntry = false;
+    const normalizedSigil = getIncomingSigilPercent(source);
+    if (Number.isFinite(normalizedSigil)) {
+      source.sigilPercent = normalizeSigilPercent(normalizedSigil);
+    }
+    return source;
+  };
   const normalizeFavoriteEntry = (raw) => {
     if (!raw || typeof raw !== "object") return null;
     const id = cleanText(raw.id) || `fav_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
@@ -3268,6 +3508,24 @@
   };
 
   const getServerNowMs = () => getServerNow().getTime();
+  const resolvePayloadFetchedAtMs = (payload) => {
+    if (!payload || typeof payload !== "object") return NaN;
+    const fetchedAtMs = Number(payload.fetchedAtMs);
+    if (Number.isFinite(fetchedAtMs) && fetchedAtMs > 0) return fetchedAtMs;
+    const fetchedAtText =
+      cleanText(payload.fetchedAt) || cleanText(payload.generatedAt) || null;
+    if (!fetchedAtText) return NaN;
+    return Number(safe(() => new Date(fetchedAtText).getTime(), NaN));
+  };
+  const isPayloadFreshByFetchedAt = (payload, ttlMs) => {
+    if (!payload || typeof payload !== "object") return false;
+    const maxAgeMs = Math.max(0, Number(ttlMs) || 0);
+    if (!maxAgeMs) return false;
+    const fetchedAtMs = resolvePayloadFetchedAtMs(payload);
+    if (!Number.isFinite(fetchedAtMs)) return false;
+    const ageMs = getServerNowMs() - fetchedAtMs;
+    return Number.isFinite(ageMs) && ageMs <= maxAgeMs;
+  };
   const normalizePlanAction = (action) => {
     const value = cleanText(action);
     return value && PLAN_ACTIONS.includes(value) ? value : "slice";
@@ -9149,6 +9407,10 @@
 .smm-msg-manual-status{font-size:10px;color:#6b532b;min-width:160px}
 .smm-msg-inline-panel{position:absolute;left:0;top:0;display:block;margin:0;padding:24px 6px 6px 6px;border:1px solid #d3bc8f;border-radius:9px;background:linear-gradient(180deg,#fff9ec 0%,#f4ead6 100%);box-shadow:0 12px 30px rgba(41,26,5,.22);max-width:none;overflow-x:visible;overflow-y:auto;z-index:2147483200}
 .smm-msg-inline-panel.smm-dragging{cursor:grabbing}
+.smm-msg-inline-panel.smm-spotlight-inline-panel{position:relative;left:auto;top:auto;width:100%;max-width:100%;max-height:none;margin:0;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none;overflow:visible;z-index:auto}
+.smm-msg-inline-panel.smm-spotlight-inline-panel .smm-plan-panel{margin-top:6px}
+.smm-msg-inline-panel.smm-spotlight-inline-panel .smm-slice-scroll{max-height:280px}
+.smm-msg-inline-panel.smm-spotlight-inline-panel .smm-msg-inline-status{margin-top:6px}
 .smm-msg-inline-open-plan{position:absolute;top:4px;left:5px;border:1px solid #b7904f;background:linear-gradient(180deg,#f7e9ca 0%,#e1c58f 100%);color:#4c2f0c;border-radius:6px;padding:1px 7px;font-size:10px;line-height:1.2;font-weight:700;cursor:pointer}
 .smm-msg-inline-open-plan:hover{filter:brightness(1.05)}
 .smm-msg-inline-group-select{position:absolute;top:4px;left:62px;min-width:86px;max-width:170px;height:20px;border:1px solid #b7904f;background:linear-gradient(180deg,#fff9e8 0%,#f4e4c4 100%);color:#4c2f0c;border-radius:6px;padding:0 20px 0 6px;font-size:10px;line-height:1.2;font-weight:700}
@@ -9264,6 +9526,7 @@
 #scriptmm-overlay-root.smm-mobile .smm-settings-inline-title{font-size:10px}
 #scriptmm-overlay-root.smm-mobile .smm-settings-number-input{width:60px;padding:2px 4px;font-size:10px}
 .smm-msg-inline-panel.smm-mobile{padding:18px 0 0 0;border-left:0;border-right:0;border-radius:0}
+.smm-msg-inline-panel.smm-spotlight-inline-panel.smm-mobile{padding:0;border:0}
 .smm-msg-inline-panel.smm-mobile .smm-msg-inline-group-select{top:2px;left:54px;min-width:56px;max-width:74px;height:15px;padding:0 10px 0 2px;font-size:7px;border-radius:3px}
 #smm-msg-inline-fallback{margin:8px 0;padding:8px;border:1px solid #c9b084;border-radius:8px;background:#fff7e5}
 #smm-msg-inline-fallback .smm-msg-inline-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:4px 0}
@@ -10218,12 +10481,15 @@
       if (Number.isFinite(Number(favoriteSigil))) {
         incoming.sigilPercent = normalizeSigilPercent(Number(favoriteSigil));
       }
+      const explicitSigilPercent =
+        Number.isFinite(Number(favoriteSigil)) &&
+        normalizeSigilPercent(Number(favoriteSigil)) > 0
+          ? Number(favoriteSigil)
+          : undefined;
       const defaultSigilPercent = resolveSigilPercentForAction(
         "slice",
         incoming,
-        Number.isFinite(Number(favoriteSigil))
-          ? Number(favoriteSigil)
-          : incoming && incoming.sigilPercent,
+        explicitSigilPercent,
       );
       const villagePlan = buildIncomingVillagePlans(incoming, {
         action: "slice",
@@ -16218,7 +16484,7 @@
       return;
     }
     stopHubSyncLoop();
-    runHubSyncCycle({ forceCommandsRefresh: true });
+    runHubSyncCycle({ forceCommandsRefresh: false });
     void loadHubQueryIncomingsAsync({ force: true, silent: true });
     void loadHubOwnQueriesAsync({ force: true, silent: true });
     void loadHubMassIncomingsAsync({ force: true, silent: true });
@@ -18269,6 +18535,8 @@ ${panelHtml}`;
       clearMessageInlineActionButtons();
       return;
     }
+    ensureMessageStorageLoaded();
+    restoreDetectedSigilPercentFromSnapshot();
     state.messageMode = true;
     const payload = parseMessagePlanningPayload(document);
     const fallbackSpeedModel =
@@ -18313,15 +18581,9 @@ ${panelHtml}`;
     } else {
       state.infoVillageTargetCoord = null;
     }
-    const messageSigilPercent = detectActiveSigilPercent();
-    if (Number.isFinite(messageSigilPercent)) {
-      state.detectedSigilPercent = normalizeSigilPercent(
-        Math.max(
-          0,
-          Number(state.detectedSigilPercent) || 0,
-          messageSigilPercent,
-        ),
-      );
+    const messageSigilPercent = normalizeSigilPercent(detectActiveSigilPercent());
+    if (messageSigilPercent > 0) {
+      state.detectedSigilPercent = messageSigilPercent;
     }
     renderMessageInlineActionButtons(
       payload && Array.isArray(payload.anchors) ? payload.anchors : [],
@@ -18408,6 +18670,7 @@ ${panelHtml}`;
     if (!Array.isArray(state.hubEntries)) {
       state.hubEntries = [];
     }
+    restoreDetectedSigilPercentFromSnapshot();
     state.messageStorageLoaded = true;
   };
   const buildTroopsModelFromOverviewUnitsDump = (dump, warning = null) => ({
@@ -18494,10 +18757,23 @@ ${panelHtml}`;
     const hasTroops =
       state.troops &&
       Array.isArray(state.troops.villages) &&
-      state.troops.villages.length > 0;
+      state.troops.villages.length > 0 &&
+      isPayloadFreshByFetchedAt(state.troops, TROOPS_CACHE_TTL_MS);
     if (!hasTroops) {
-      const cachedOverviewUnits = readJson(STORAGE_KEYS.overviewUnits);
-      const cachedTroops = readJson(STORAGE_KEYS.troops);
+      const cachedOverviewUnitsRaw = readJson(STORAGE_KEYS.overviewUnits);
+      const cachedOverviewUnits = isPayloadFreshByFetchedAt(
+        cachedOverviewUnitsRaw,
+        TROOPS_CACHE_TTL_MS,
+      )
+        ? cachedOverviewUnitsRaw
+        : null;
+      const cachedTroopsRaw = readJson(STORAGE_KEYS.troops);
+      const cachedTroops = isPayloadFreshByFetchedAt(
+        cachedTroopsRaw,
+        TROOPS_CACHE_TTL_MS,
+      )
+        ? cachedTroopsRaw
+        : null;
       if (
         cachedOverviewUnits &&
         Array.isArray(cachedOverviewUnits.villages) &&
@@ -18552,12 +18828,25 @@ ${panelHtml}`;
     const hasDefenseTroops =
       state.troopsDefense &&
       Array.isArray(state.troopsDefense.villages) &&
-      state.troopsDefense.villages.length > 0;
+      state.troopsDefense.villages.length > 0 &&
+      isPayloadFreshByFetchedAt(state.troopsDefense, TROOPS_CACHE_TTL_MS);
     if (!hasDefenseTroops) {
-      const cachedOverviewUnitsDefense = readJson(
+      const cachedOverviewUnitsDefenseRaw = readJson(
         STORAGE_KEYS.overviewUnitsDefense,
       );
-      const cachedTroopsDefense = readJson(STORAGE_KEYS.troopsDefense);
+      const cachedOverviewUnitsDefense = isPayloadFreshByFetchedAt(
+        cachedOverviewUnitsDefenseRaw,
+        TROOPS_CACHE_TTL_MS,
+      )
+        ? cachedOverviewUnitsDefenseRaw
+        : null;
+      const cachedTroopsDefenseRaw = readJson(STORAGE_KEYS.troopsDefense);
+      const cachedTroopsDefense = isPayloadFreshByFetchedAt(
+        cachedTroopsDefenseRaw,
+        TROOPS_CACHE_TTL_MS,
+      )
+        ? cachedTroopsDefenseRaw
+        : null;
       if (
         cachedOverviewUnitsDefense &&
         Array.isArray(cachedOverviewUnitsDefense.villages) &&
@@ -18650,6 +18939,12 @@ ${panelHtml}`;
     }
     statusNode.textContent = cleanText(message) || "";
   };
+  const isSpotlightInlinePanel = (panelNode) =>
+    Boolean(
+      panelNode &&
+        panelNode.classList &&
+        panelNode.classList.contains("smm-spotlight-inline-panel"),
+    );
   const getMessageInlinePanelAnchorId = (actionsNode) => {
     if (!actionsNode) return null;
     const existing = cleanText(actionsNode.getAttribute("data-smm-anchor-id"));
@@ -18659,7 +18954,17 @@ ${panelHtml}`;
     return generated;
   };
   const positionMessageInlinePanel = (panelNode, actionsNode) => {
-    if (!panelNode || !actionsNode || !actionsNode.isConnected) return;
+    if (!panelNode) return;
+    if (isSpotlightInlinePanel(panelNode)) {
+      panelNode.style.position = "relative";
+      panelNode.style.width = "100%";
+      panelNode.style.maxWidth = "100%";
+      panelNode.style.left = "";
+      panelNode.style.top = "";
+      panelNode.style.maxHeight = "none";
+      return;
+    }
+    if (!actionsNode || !actionsNode.isConnected) return;
     const viewportPad = 12;
     const minWidth = 980;
     const maxWidth = 1650;
@@ -18724,7 +19029,7 @@ ${panelHtml}`;
     return panelNode;
   };
   const ensureMessageInlinePanelCloseButton = (panelNode) => {
-    if (!panelNode) return null;
+    if (!panelNode || isSpotlightInlinePanel(panelNode)) return null;
     let closeButton = panelNode.querySelector(".smm-msg-inline-close");
     if (!closeButton) {
       closeButton = document.createElement("button");
@@ -18738,7 +19043,7 @@ ${panelHtml}`;
     return closeButton;
   };
   const ensureMessageInlinePanelOpenPlanButton = (panelNode) => {
-    if (!panelNode) return null;
+    if (!panelNode || isSpotlightInlinePanel(panelNode)) return null;
     let openPlanButton = panelNode.querySelector(".smm-msg-inline-open-plan");
     if (!openPlanButton) {
       openPlanButton = document.createElement("button");
@@ -18751,7 +19056,7 @@ ${panelHtml}`;
     return openPlanButton;
   };
   const ensureMessageInlinePanelGroupSelect = (panelNode) => {
-    if (!panelNode) return null;
+    if (!panelNode || isSpotlightInlinePanel(panelNode)) return null;
     let groupSelect = panelNode.querySelector(".smm-msg-inline-group-select");
     if (!groupSelect) {
       groupSelect = document.createElement("select");
@@ -18766,6 +19071,7 @@ ${panelHtml}`;
   const enableMessageInlinePanelDrag = (panelNode) => {
     if (!panelNode || panelNode.getAttribute("data-smm-drag-bound") === "1")
       return;
+    if (isSpotlightInlinePanel(panelNode)) return;
     panelNode.setAttribute("data-smm-drag-bound", "1");
 
     const isDragTargetAllowed = (target) => {
@@ -18907,12 +19213,19 @@ ${panelHtml}`;
       return false;
     }
 
-    const nearestSigilPercent = detectNearestSigilPercentAboveNode(actionsNode);
-    const fallbackSigilPercent = detectActiveSigilPercent();
-    const messageSigilPercent = Number.isFinite(nearestSigilPercent)
-      ? nearestSigilPercent
-      : fallbackSigilPercent;
-    if (Number.isFinite(messageSigilPercent)) {
+    const nearestSigilPercent = normalizeSigilPercent(
+      detectNearestSigilPercentAboveNode(actionsNode),
+    );
+    const fallbackSigilPercent = normalizeSigilPercent(
+      getDefaultSigilForAction("slice"),
+    );
+    const messageSigilPercent =
+      nearestSigilPercent > 0
+        ? nearestSigilPercent
+        : fallbackSigilPercent > 0
+          ? fallbackSigilPercent
+          : null;
+    if (Number.isFinite(messageSigilPercent) && messageSigilPercent > 0) {
       state.detectedSigilPercent = normalizeSigilPercent(messageSigilPercent);
       incoming.sigilPercent = normalizeSigilPercent(messageSigilPercent);
     }
@@ -18920,7 +19233,8 @@ ${panelHtml}`;
     setPlanAction(incomingId, action);
     const actionLabel = PLAN_ACTION_LABELS[action] || action;
     panelNode.innerHTML = renderSlicePlanPanel(incoming, action, actionLabel, {
-      sigilPercent: Number.isFinite(messageSigilPercent)
+      sigilPercent:
+        Number.isFinite(messageSigilPercent) && messageSigilPercent > 0
         ? messageSigilPercent
         : undefined,
       renderGroupSelectInHeader: false,
@@ -18941,6 +19255,107 @@ ${panelHtml}`;
     startCountdownTicker();
     return true;
   };
+  const renderSpotlightPlanPanel = async ({
+    mountNode,
+    incoming,
+    incomings = null,
+    action = "slice",
+    actionLabel = null,
+    sigilPercent = undefined,
+    statusMessage = null,
+  } = {}) => {
+    if (!mountNode || !incoming || typeof incoming !== "object") {
+      return { ok: false, reason: "invalid_arguments" };
+    }
+
+    const panelNode =
+      mountNode.classList &&
+      mountNode.classList.contains("smm-msg-inline-panel")
+        ? mountNode
+        : (() => {
+            mountNode.innerHTML = "";
+            const nextPanel = document.createElement("div");
+            mountNode.appendChild(nextPanel);
+            return nextPanel;
+          })();
+    panelNode.className = "smm-msg-inline-panel smm-spotlight-inline-panel";
+    panelNode.classList.toggle("smm-mobile", isMobileUi());
+
+    const actionKey = PLAN_ACTIONS.includes(cleanText(action))
+      ? cleanText(action)
+      : "slice";
+    const resolvedActionLabel =
+      cleanText(actionLabel) ||
+      (actionKey === "slice" ? "Срез/дефф" : "Атака/двор");
+    const explicitSigil = toNumber(sigilPercent);
+    if (Number.isFinite(explicitSigil)) {
+      panelNode.setAttribute(
+        "data-smm-explicit-sigil",
+        String(normalizeSigilPercent(explicitSigil)),
+      );
+    } else {
+      panelNode.removeAttribute("data-smm-explicit-sigil");
+    }
+    const normalizedIncomings = (Array.isArray(incomings) ? incomings : [incoming])
+      .map((item, index) =>
+        normalizeExternalIncoming(item, `spotlight_${index}_${Date.now()}`),
+      )
+      .filter(Boolean);
+    const normalizedIncoming = normalizeExternalIncoming(
+      incoming,
+      cleanText(incoming && incoming.id) || "spotlight_current",
+    );
+    if (!normalizedIncoming) {
+      panelNode.innerHTML =
+        '<section class="smm-plan-panel smm-slice-panel"><div class="smm-plan-empty">Не удалось подготовить приказ для расчёта.</div></section>';
+      return { ok: false, reason: "incoming_invalid", panelNode };
+    }
+
+    normalizedIncomings.forEach((item) => {
+      upsertIncomingItem(item);
+    });
+    upsertIncomingItem(normalizedIncoming);
+
+    panelNode.setAttribute("data-smm-incoming-id", cleanText(normalizedIncoming.id));
+    panelNode.setAttribute("data-smm-panel-action", actionKey);
+    panelNode.setAttribute("data-smm-action-label", resolvedActionLabel);
+    panelNode.innerHTML =
+      '<section class="smm-plan-panel smm-slice-panel"><div class="smm-plan-empty">Загрузка данных для расчёта...</div></section>';
+
+    ensureMessageStorageLoaded();
+    ensureMessageActionListenerBound();
+    await ensureVillageGroupsLoaded();
+    const runtimeReady = await ensureMessageRuntimeDataLoaded();
+    if (!runtimeReady) {
+      panelNode.innerHTML =
+        '<section class="smm-plan-panel smm-slice-panel"><div class="smm-plan-empty">Не удалось загрузить войска/скорость для расчёта.</div></section>';
+      return { ok: false, reason: "runtime_unavailable", panelNode };
+    }
+
+    const liveIncoming = getIncomingById(normalizedIncoming.id) || normalizedIncoming;
+    setPlanAction(liveIncoming.id, actionKey);
+    panelNode.innerHTML = renderSlicePlanPanel(
+      liveIncoming,
+      actionKey,
+      resolvedActionLabel,
+      {
+        sigilPercent: Number.isFinite(explicitSigil)
+          ? normalizeSigilPercent(explicitSigil)
+          : undefined,
+        renderGroupSelectInHeader: true,
+      },
+    );
+    initSliceRows(panelNode);
+    scheduleApplySliceScrollLimits(panelNode);
+    positionMessageInlinePanel(panelNode, null);
+    updateCountdownNodes();
+    startCountdownTicker();
+    setMessageInlinePanelStatus(
+      panelNode,
+      cleanText(statusMessage) || `Выбрано: ${resolvedActionLabel}.`,
+    );
+    return { ok: true, panelNode, incomingId: liveIncoming.id };
+  };
   const findMessageInlineActionsNodeByAnchorId = (anchorIdRaw) => {
     const anchorId = cleanText(anchorIdRaw);
     if (!anchorId) return null;
@@ -18957,12 +19372,15 @@ ${panelHtml}`;
   };
   const rerenderMessageInlinePanel = (panelNode, options = {}) => {
     if (!panelNode) return false;
+    const spotlightPanel = isSpotlightInlinePanel(panelNode);
     const firstRow = panelNode.querySelector(".smm-slice-row");
     const incomingId =
       cleanText(options.incomingId) ||
+      cleanText(panelNode.getAttribute("data-smm-incoming-id")) ||
       cleanText(firstRow && firstRow.getAttribute("data-incoming-id"));
     const action =
       cleanText(options.action) ||
+      cleanText(panelNode.getAttribute("data-smm-panel-action")) ||
       cleanText(firstRow && firstRow.getAttribute("data-action")) ||
       "slice";
     const fallbackIncoming =
@@ -18975,28 +19393,53 @@ ${panelHtml}`;
     if (!incoming) return false;
     const currentSigilInput = panelNode.querySelector(".smm-sigil-input");
     const currentSigil = toNumber(currentSigilInput && currentSigilInput.value);
-    const actionLabel = PLAN_ACTION_LABELS[action] || action;
+    const panelSigil = toNumber(
+      cleanText(panelNode.getAttribute("data-smm-explicit-sigil")),
+    );
+    const actionLabel =
+      (spotlightPanel && cleanText(panelNode.getAttribute("data-smm-action-label"))) ||
+      PLAN_ACTION_LABELS[action] ||
+      action;
+    const resolvedSigil = Number.isFinite(currentSigil)
+      ? currentSigil
+      : Number.isFinite(panelSigil)
+        ? panelSigil
+        : undefined;
+    if (Number.isFinite(resolvedSigil)) {
+      panelNode.setAttribute(
+        "data-smm-explicit-sigil",
+        String(normalizeSigilPercent(resolvedSigil)),
+      );
+    } else {
+      panelNode.removeAttribute("data-smm-explicit-sigil");
+    }
     panelNode.innerHTML = renderSlicePlanPanel(incoming, action, actionLabel, {
-      sigilPercent: Number.isFinite(currentSigil) ? currentSigil : undefined,
-      renderGroupSelectInHeader: false,
+      sigilPercent: resolvedSigil,
+      renderGroupSelectInHeader: spotlightPanel,
     });
-    ensureMessageInlinePanelCloseButton(panelNode);
-    ensureMessageInlinePanelOpenPlanButton(panelNode);
-    ensureMessageInlinePanelGroupSelect(panelNode);
-    enableMessageInlinePanelDrag(panelNode);
-    const anchorId = cleanText(panelNode.getAttribute("data-smm-anchor-id"));
-    const actionsNode = findMessageInlineActionsNodeByAnchorId(anchorId);
-    if (actionsNode) {
-      if (options.setButtonsActive !== false) {
-        setMessageInlineButtonsActive(actionsNode, action);
+    if (!spotlightPanel) {
+      ensureMessageInlinePanelCloseButton(panelNode);
+      ensureMessageInlinePanelOpenPlanButton(panelNode);
+      ensureMessageInlinePanelGroupSelect(panelNode);
+      enableMessageInlinePanelDrag(panelNode);
+      const anchorId = cleanText(panelNode.getAttribute("data-smm-anchor-id"));
+      const actionsNode = findMessageInlineActionsNodeByAnchorId(anchorId);
+      if (actionsNode) {
+        if (options.setButtonsActive !== false) {
+          setMessageInlineButtonsActive(actionsNode, action);
+        }
+        positionMessageInlinePanel(panelNode, actionsNode);
       }
-      positionMessageInlinePanel(panelNode, actionsNode);
+      if (actionsNode) {
+        positionMessageInlinePanel(panelNode, actionsNode);
+      }
+    } else {
+      panelNode.classList.add("smm-msg-inline-panel", "smm-spotlight-inline-panel");
+      panelNode.classList.toggle("smm-mobile", isMobileUi());
+      positionMessageInlinePanel(panelNode, null);
     }
     initSliceRows(panelNode);
     scheduleApplySliceScrollLimits(panelNode);
-    if (actionsNode) {
-      positionMessageInlinePanel(panelNode, actionsNode);
-    }
     updateCountdownNodes();
     startCountdownTicker();
     const statusText = cleanText(options.statusMessage);
@@ -19347,6 +19790,20 @@ ${panelHtml}`;
       const timingCenter =
         cleanText(goButton.getAttribute("data-copy-time")) ||
         getSliceRowTimingCenterCopyValue(row);
+      if (timingCenter) {
+        appendTimingCopyHistory({
+          timingCenter,
+          source: "go_click_message_inline",
+          action: cleanText(row && row.getAttribute("data-action")) || null,
+          incomingId:
+            cleanText(row && row.getAttribute("data-incoming-id")) || null,
+          fromVillageCoord:
+            cleanText(row && row.getAttribute("data-village-coord")) || null,
+          targetCoord:
+            cleanText(row && row.getAttribute("data-target-coord")) || null,
+          goUrl: url || null,
+        });
+      }
       const copiedSync = timingCenter
         ? copyTextToClipboardSync(timingCenter)
         : false;
@@ -19824,10 +20281,19 @@ ${panelHtml}`;
       };
     }
 
-    const cachedTroops = readJson(STORAGE_KEYS.troops);
+    const cachedTroopsRaw = readJson(STORAGE_KEYS.troops);
+    const cachedTroops = isPayloadFreshByFetchedAt(
+      cachedTroopsRaw,
+      TROOPS_CACHE_TTL_MS,
+    )
+      ? cachedTroopsRaw
+      : null;
     if (cachedTroops && Array.isArray(cachedTroops.villages)) {
       state.troops = cachedTroops;
-    } else if (!state.troops) {
+    } else if (
+      !state.troops ||
+      !isPayloadFreshByFetchedAt(state.troops, TROOPS_CACHE_TTL_MS)
+    ) {
       state.troops = {
         version: 1,
         fetchedAt: new Date(getServerNowMs()).toISOString(),
@@ -19838,10 +20304,19 @@ ${panelHtml}`;
       };
     }
 
-    const cachedTroopsDefense = readJson(STORAGE_KEYS.troopsDefense);
+    const cachedTroopsDefenseRaw = readJson(STORAGE_KEYS.troopsDefense);
+    const cachedTroopsDefense = isPayloadFreshByFetchedAt(
+      cachedTroopsDefenseRaw,
+      TROOPS_CACHE_TTL_MS,
+    )
+      ? cachedTroopsDefenseRaw
+      : null;
     if (cachedTroopsDefense && Array.isArray(cachedTroopsDefense.villages)) {
       state.troopsDefense = cachedTroopsDefense;
-    } else if (!state.troopsDefense) {
+    } else if (
+      !state.troopsDefense ||
+      !isPayloadFreshByFetchedAt(state.troopsDefense, TROOPS_CACHE_TTL_MS)
+    ) {
       state.troopsDefense = state.troops;
     }
 
@@ -19862,10 +20337,19 @@ ${panelHtml}`;
       };
     }
 
-    const cachedOverviewUnits = readJson(STORAGE_KEYS.overviewUnits);
+    const cachedOverviewUnitsRaw = readJson(STORAGE_KEYS.overviewUnits);
+    const cachedOverviewUnits = isPayloadFreshByFetchedAt(
+      cachedOverviewUnitsRaw,
+      TROOPS_CACHE_TTL_MS,
+    )
+      ? cachedOverviewUnitsRaw
+      : null;
     if (cachedOverviewUnits && typeof cachedOverviewUnits === "object") {
       state.overviewUnitsDump = cachedOverviewUnits;
-    } else if (!state.overviewUnitsDump) {
+    } else if (
+      !state.overviewUnitsDump ||
+      !isPayloadFreshByFetchedAt(state.overviewUnitsDump, TROOPS_CACHE_TTL_MS)
+    ) {
       state.overviewUnitsDump = {
         version: 1,
         fetchedAt: new Date(getServerNowMs()).toISOString(),
@@ -19878,15 +20362,27 @@ ${panelHtml}`;
       };
     }
 
-    const cachedOverviewUnitsDefense = readJson(
+    const cachedOverviewUnitsDefenseRaw = readJson(
       STORAGE_KEYS.overviewUnitsDefense,
     );
+    const cachedOverviewUnitsDefense = isPayloadFreshByFetchedAt(
+      cachedOverviewUnitsDefenseRaw,
+      TROOPS_CACHE_TTL_MS,
+    )
+      ? cachedOverviewUnitsDefenseRaw
+      : null;
     if (
       cachedOverviewUnitsDefense &&
       typeof cachedOverviewUnitsDefense === "object"
     ) {
       state.overviewUnitsDefenseDump = cachedOverviewUnitsDefense;
-    } else if (!state.overviewUnitsDefenseDump) {
+    } else if (
+      !state.overviewUnitsDefenseDump ||
+      !isPayloadFreshByFetchedAt(
+        state.overviewUnitsDefenseDump,
+        TROOPS_CACHE_TTL_MS,
+      )
+    ) {
       state.overviewUnitsDefenseDump = {
         version: 1,
         fetchedAt: new Date(getServerNowMs()).toISOString(),
@@ -19958,13 +20454,37 @@ ${panelHtml}`;
       ) || "unknown";
     const cachedIncomings = readJson(STORAGE_KEYS.incomings);
     const cachedSupports = readJson(STORAGE_KEYS.incomingsSupports);
-    const cachedTroops = readJson(STORAGE_KEYS.troops);
-    const cachedTroopsDefense = readJson(STORAGE_KEYS.troopsDefense);
+    const cachedTroopsRaw = readJson(STORAGE_KEYS.troops);
+    const cachedTroops = isPayloadFreshByFetchedAt(
+      cachedTroopsRaw,
+      TROOPS_CACHE_TTL_MS,
+    )
+      ? cachedTroopsRaw
+      : null;
+    const cachedTroopsDefenseRaw = readJson(STORAGE_KEYS.troopsDefense);
+    const cachedTroopsDefense = isPayloadFreshByFetchedAt(
+      cachedTroopsDefenseRaw,
+      TROOPS_CACHE_TTL_MS,
+    )
+      ? cachedTroopsDefenseRaw
+      : null;
     const cachedOverviewCommands = readJson(STORAGE_KEYS.overviewCommands);
-    const cachedOverviewUnits = readJson(STORAGE_KEYS.overviewUnits);
-    const cachedOverviewUnitsDefense = readJson(
+    const cachedOverviewUnitsRaw = readJson(STORAGE_KEYS.overviewUnits);
+    const cachedOverviewUnits = isPayloadFreshByFetchedAt(
+      cachedOverviewUnitsRaw,
+      TROOPS_CACHE_TTL_MS,
+    )
+      ? cachedOverviewUnitsRaw
+      : null;
+    const cachedOverviewUnitsDefenseRaw = readJson(
       STORAGE_KEYS.overviewUnitsDefense,
     );
+    const cachedOverviewUnitsDefense = isPayloadFreshByFetchedAt(
+      cachedOverviewUnitsDefenseRaw,
+      TROOPS_CACHE_TTL_MS,
+    )
+      ? cachedOverviewUnitsDefenseRaw
+      : null;
     saveScheduledCommands();
     const progressTracker = createProgressTracker(state.ui, 7);
     try {
@@ -19987,6 +20507,69 @@ ${panelHtml}`;
           supportsResultPromise,
           tribeSigilResultPromise,
         ]);
+
+      // Показываем "Входящие" сразу после их fetch,
+      // не ожидая тяжёлых запросов по приказам/войскам/хабу.
+      const previewSpeedModel =
+        speedResult.status === "fulfilled"
+          ? speedResult.value
+          : buildSpeedModel({
+              worldSpeed: null,
+              unitSpeed: null,
+              unitBaseMinutes: UNIT_BASE_MINUTES_FALLBACK,
+              source: "fallback",
+              warning: "Speed model failed, fallback used",
+              error: cleanText(speedResult.reason && speedResult.reason.message),
+            });
+      state.speedModel = previewSpeedModel;
+      state.incomings =
+        incomingsResult.status === "fulfilled"
+          ? enrichIncomingsWithSpeed(incomingsResult.value, previewSpeedModel)
+          : cachedIncomings && Array.isArray(cachedIncomings.items)
+            ? enrichIncomingsWithSpeed(cachedIncomings, previewSpeedModel)
+            : {
+                version: 1,
+                fetchedAt: new Date(getServerNowMs()).toISOString(),
+                sourceUrl: null,
+                count: 0,
+                items: [],
+              };
+      state.supportIncomings =
+        supportsResult.status === "fulfilled"
+          ? enrichIncomingsWithSpeed(supportsResult.value, previewSpeedModel)
+          : cachedSupports && Array.isArray(cachedSupports.items)
+            ? enrichIncomingsWithSpeed(cachedSupports, previewSpeedModel)
+            : {
+                version: 1,
+                fetchedAt: new Date(getServerNowMs()).toISOString(),
+                sourceUrl: null,
+                count: 0,
+                items: [],
+              };
+      if (!messageInlineMode && state.ui) {
+        const liveSigilPreview = normalizeSigilPercent(detectActiveSigilPercent());
+        if (liveSigilPreview > 0) {
+          state.detectedSigilPercent = liveSigilPreview;
+        }
+        state.snapshot = buildSnapshot({
+          speedModel: state.speedModel,
+          incomings: state.incomings,
+          troops: state.troops,
+          overviewCommands: state.overviewCommandsDump,
+          detectedSigilPercent: state.detectedSigilPercent,
+          sigilSource: "early_preview",
+          errors: state.errors.slice(),
+        });
+        renderMeta(state.ui, state.snapshot);
+        state.hasPrimaryIncomingsRender = true;
+        requestIncomingsRerender("refresh_preview_incomings", { force: true });
+        setUpdated(state.ui, state.snapshot.generatedAt);
+        setStatus(
+          state.ui,
+          "Входящие обновлены. Догружаю приказы, войска и данные хаба...",
+        );
+      }
+
       await sleep(220);
       const overviewCommandsResult = await toSettledResult(
         progressTracker.track(
@@ -20472,18 +21055,23 @@ ${panelHtml}`;
       state.hasPrimaryIncomingsRender = true;
       const activeHubConnection = normalizeHubConnection(state.hubConnection);
       if (cleanText(activeHubConnection && activeHubConnection.url)) {
-        void loadHubQueryIncomingsAsync({ force: true, silent: true });
-        void loadHubOwnQueriesAsync({ force: true, silent: true });
-        void loadHubMassIncomingsAsync({ force: true, silent: true });
-        if (getUiSetting("exchangeTribeAttacks")) {
-          void loadHubTribeIncomingsAsync({ force: true, silent: true });
+        if (!state.hubSyncTimerId && !state.hubSyncInFlight) {
+          startHubSyncLoop();
         } else {
-          clearHubTribeIncomings();
-        }
-        if (getUiSetting("loadPlanFromHub")) {
-          void loadHubPlanFromHubAsync({ force: true, silent: true });
+          void loadHubQueryIncomingsAsync({ force: true, silent: true });
+          void loadHubOwnQueriesAsync({ force: true, silent: true });
+          void loadHubMassIncomingsAsync({ force: true, silent: true });
+          if (getUiSetting("exchangeTribeAttacks")) {
+            void loadHubTribeIncomingsAsync({ force: true, silent: true });
+          } else {
+            clearHubTribeIncomings();
+          }
+          if (getUiSetting("loadPlanFromHub")) {
+            void loadHubPlanFromHubAsync({ force: true, silent: true });
+          }
         }
       } else {
+        stopHubSyncLoop();
         clearHubQueryIncomings();
         clearHubOwnQueries();
         clearHubMassIncomings();
@@ -21437,6 +22025,23 @@ ${panelHtml}`;
         const timingCenter = cleanText(
           planGoButton.getAttribute("data-copy-time"),
         );
+        if (timingCenter) {
+          appendTimingCopyHistory({
+            timingCenter,
+            source: "go_click_plan",
+            action:
+              cleanText(scheduledCommand && scheduledCommand.action) || null,
+            incomingId:
+              cleanText(scheduledCommand && scheduledCommand.incomingId) || null,
+            commandId: cleanText(scheduledCommand && scheduledCommand.id) || null,
+            fromVillageCoord:
+              cleanText(scheduledCommand && scheduledCommand.fromVillageCoord) ||
+              null,
+            targetCoord:
+              cleanText(scheduledCommand && scheduledCommand.targetCoord) || null,
+            goUrl: url || null,
+          });
+        }
         const copiedSync = timingCenter
           ? copyTextToClipboardSync(timingCenter)
           : false;
@@ -21759,6 +22364,20 @@ ${panelHtml}`;
         const timingCenter =
           cleanText(goButton.getAttribute("data-copy-time")) ||
           getSliceRowTimingCenterCopyValue(row);
+        if (timingCenter) {
+          appendTimingCopyHistory({
+            timingCenter,
+            source: "go_click_main_overlay",
+            action: cleanText(row && row.getAttribute("data-action")) || null,
+            incomingId:
+              cleanText(row && row.getAttribute("data-incoming-id")) || null,
+            fromVillageCoord:
+              cleanText(row && row.getAttribute("data-village-coord")) || null,
+            targetCoord:
+              cleanText(row && row.getAttribute("data-target-coord")) || null,
+            goUrl: url || null,
+          });
+        }
         const copiedSync = timingCenter
           ? copyTextToClipboardSync(timingCenter)
           : false;
@@ -21972,35 +22591,37 @@ ${panelHtml}`;
       })();
     });
 
-    // Важно: сначала полностью поднимаем интерактивный UI,
-    // и только после этого запускаем сетевой цикл хаба в фоне.
-    setTimeout(() => {
-      if (!state.ui) return;
-      startHubSyncLoop();
-    }, 0);
+    // Старт цикла хаба переносим на этап после первичной загрузки "Входящих"
+    // (см. refreshData), чтобы хаб не забивал очередь fetch при старте.
   };
 
   const messagePlanningScreen = isMessagePlanningScreen();
   const useMessageInlineScenario = shouldUseMessageInlineScenario();
-  startMultiTabPresenceHeartbeat();
+  const externalOnlyMode = Boolean(window.__ScriptMMExternalOnly);
+  if (!externalOnlyMode) {
+    startMultiTabPresenceHeartbeat();
+  }
   ensureMessageActionListenerBound();
-  if (messagePlanningScreen && useMessageInlineScenario) {
-    bootstrapMessageInlinePlanning();
-  } else {
-    if (messagePlanningScreen) {
-      state.messageMode = false;
-      clearMessageInlineActionButtons();
+  if (!externalOnlyMode) {
+    if (messagePlanningScreen && useMessageInlineScenario) {
+      bootstrapMessageInlinePlanning();
+    } else {
+      if (messagePlanningScreen) {
+        state.messageMode = false;
+        clearMessageInlineActionButtons();
+      }
+      initUi();
+      setTimeout(() => {
+        void refreshData();
+      }, 0);
     }
-    initUi();
-    setTimeout(() => {
-      void refreshData();
-    }, 0);
   }
 
   window.ScriptMM = {
     version: VERSION,
     refresh: refreshData,
     storageKeys: STORAGE_KEYS,
+    getTimingCopyHistory: () => loadTimingCopyHistory(),
     getMessageParserDebug: () => {
       const payload = parseMessagePlanningPayload(document);
       const dumpItems =
@@ -22120,5 +22741,6 @@ ${panelHtml}`;
       };
     },
     getState: () => state,
+    renderSpotlightPlanPanel,
   };
 })();
