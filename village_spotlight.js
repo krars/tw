@@ -7,6 +7,7 @@
   const LOAD_ENDPOINT = "/map/village.txt";
   const GAME_REQUEST_MIN_INTERVAL_MS = 250;
   const COMMAND_CACHE_TTL_MS = 30 * 60 * 1000;
+  const COMMAND_DETAILS_WORKERS = 8;
   const UNIT_ORDER = [
     "spear",
     "sword",
@@ -474,6 +475,16 @@
     coord: cleanText(village && village.coord) || null,
     mapName: cleanText(village && village.name) || null,
     title: cleanText(village && village.name) || cleanText(village && village.coord) || "?",
+    mapUrl:
+      Number.isFinite(toInt(village && village.x)) &&
+      Number.isFinite(toInt(village && village.y))
+        ? buildGameUrl({
+            screen: "map",
+            x: toInt(village.x),
+            y: toInt(village.y),
+            beacon: 1,
+          })
+        : null,
     infoStatus: "loading",
     infoUrl: null,
     commands: [],
@@ -508,8 +519,7 @@
 
   const renderIdle = () => {
     if (!state.resultEl) return;
-    state.resultEl.innerHTML =
-      '<div class="svs-empty">Введи координаты в формате <code>454|435</code>.</div>';
+    state.resultEl.innerHTML = "";
   };
 
   const renderNotFound = (coordKey) => {
@@ -610,9 +620,15 @@
                 .join("")}</tbody></table></div>`
             : '<div class="svs-empty">По этой деревне видимых приказов нет.</div>';
 
-    state.resultEl.innerHTML = `<div class="svs-village-head"><div><div class="svs-card-title">${escapeHtml(
+    state.resultEl.innerHTML = `<div class="svs-village-head"><div><div class="svs-title-row"><div class="svs-card-title">${escapeHtml(
       cleanText(view.title),
-    )}</div><div class="svs-card-coord">${escapeHtml(
+    )}</div>${
+      view.mapUrl
+        ? `<a class="svs-map-link" href="${escapeHtml(
+            view.mapUrl,
+          )}" target="_blank" rel="noopener noreferrer">Показать на карте</a>`
+        : ""
+    }</div><div class="svs-card-coord">${escapeHtml(
       cleanText(view.coord),
     )}</div></div><div class="svs-card-meta">${escapeHtml(commandsMeta)}</div></div><div class="svs-card"><div class="svs-grid"><div class="svs-label">ID деревни</div><div class="svs-value">${escapeHtml(
       cleanText(view.villageId),
@@ -746,34 +762,59 @@
         );
       }
 
-      for (let index = 0; index < view.commands.length; index += 1) {
-        if (token !== state.searchToken) return;
-
-        const command = view.commands[index];
-        if (!command) continue;
+      const pendingIndexes = [];
+      view.commands.forEach((command, index) => {
+        if (!command) return;
         if (
           ["loaded", "empty", "error", "unavailable"].includes(
             cleanText(command.unitsStatus),
           )
         ) {
-          continue;
+          return;
         }
-
         const commandUrl = cleanText(command.commandUrl);
-        const cacheKey = cleanText(command.commandId) || commandUrl;
         if (!commandUrl) {
           markCommandResult(view, index, {
             unitsStatus: "unavailable",
             unitsError: "Нет ссылки на info_command",
           });
-          continue;
+          return;
         }
+        pendingIndexes.push(index);
+      });
 
-        markCommandResult(view, index, { unitsStatus: "loading" });
+      if (!pendingIndexes.length) {
         setStatus(
-          `Догружаю войска ${index + 1}/${view.commands.length}. Лимит очереди: до 4 запросов в секунду.`,
+          `Готово: ${view.commands.length} приказов, войска обработаны для ${countResolvedCommands(
+            view.commands,
+          )}/${view.commands.length}.`,
+          "success",
+        );
+        return;
+      }
+
+      let nextPendingCursor = 0;
+      let completedPending = 0;
+      const totalPending = pendingIndexes.length;
+      const updateUnitsProgressStatus = () => {
+        if (token !== state.searchToken) return;
+        setStatus(
+          `Догружаю войска: ${countResolvedCommands(
+            view.commands,
+          )}/${view.commands.length}. Детальные запросы: ${completedPending}/${totalPending}. Лимит до 4 запросов в секунду.`,
           "muted",
         );
+      };
+
+      updateUnitsProgressStatus();
+
+      const loadCommandDetails = async (index) => {
+        const command = view.commands[index];
+        if (!command) return;
+
+        const commandUrl = cleanText(command.commandUrl);
+        const cacheKey = cleanText(command.commandId) || commandUrl;
+        markCommandResult(view, index, { unitsStatus: "loading" });
 
         try {
           const commandDoc = await fetchDocument(commandUrl, { rateLimited: true });
@@ -800,8 +841,23 @@
             unitsStatus: "error",
             unitsError: cleanText(error && error.message) || "Ошибка info_command",
           });
+        } finally {
+          completedPending += 1;
+          updateUnitsProgressStatus();
         }
-      }
+      };
+
+      const workerCount = Math.min(COMMAND_DETAILS_WORKERS, totalPending);
+      await Promise.all(
+        Array.from({ length: workerCount }, async () => {
+          while (token === state.searchToken) {
+            const index = pendingIndexes[nextPendingCursor];
+            nextPendingCursor += 1;
+            if (index == null) return;
+            await loadCommandDetails(index);
+          }
+        }),
+      );
 
       if (token !== state.searchToken) return;
       setStatus(
@@ -891,70 +947,75 @@
     style.textContent = `
 #${ROOT_ID}{position:fixed;inset:0;z-index:2147483646;display:flex;align-items:center;justify-content:center;padding:18px;font-family:Trebuchet MS,Segoe UI,sans-serif}
 #${ROOT_ID}[hidden]{display:none}
-#${ROOT_ID} .svs-backdrop{position:absolute;inset:0;background:radial-gradient(circle at center,rgba(255,215,146,.18),transparent 28%),rgba(9,12,18,.62);backdrop-filter:blur(5px)}
-#${ROOT_ID} .svs-panel{position:relative;display:flex;flex-direction:column;width:min(1180px,96vw);max-height:min(92vh,980px);padding:18px;border:1px solid rgba(236,201,130,.72);border-radius:18px;background:linear-gradient(180deg,rgba(34,27,19,.98) 0%,rgba(21,17,12,.98) 100%);box-shadow:0 26px 90px rgba(0,0,0,.46);color:#f8ecd0;overflow:hidden}
-#${ROOT_ID} .svs-top{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin-bottom:12px}
-#${ROOT_ID} .svs-title{font-size:24px;line-height:1;font-weight:800;letter-spacing:.04em;text-transform:uppercase;color:#f8d48e}
-#${ROOT_ID} .svs-subtitle{margin-top:6px;font-size:12px;line-height:1.35;color:#d6c5a4}
-#${ROOT_ID} .svs-close{width:34px;height:34px;border:1px solid rgba(236,201,130,.45);border-radius:10px;background:rgba(255,255,255,.04);color:#f8ecd0;font-size:20px;line-height:1;cursor:pointer}
+#${ROOT_ID} .svs-backdrop{position:absolute;inset:0;background:radial-gradient(circle at center,rgba(255,215,146,.1),transparent 26%),rgba(9,12,18,.24);backdrop-filter:blur(2px)}
+#${ROOT_ID} .svs-panel{position:relative;display:flex;flex-direction:column;width:min(960px,92vw);max-height:min(84vh,760px);padding:14px 14px 12px;border:1px solid rgba(236,201,130,.5);border-radius:14px;background:linear-gradient(180deg,rgba(34,27,19,.94) 0%,rgba(21,17,12,.94) 100%);box-shadow:0 18px 60px rgba(0,0,0,.32);color:#f8ecd0;overflow:hidden}
+#${ROOT_ID} .svs-top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:8px}
+#${ROOT_ID} .svs-title{font-size:18px;line-height:1;font-weight:800;letter-spacing:.04em;text-transform:uppercase;color:#f8d48e}
+#${ROOT_ID} .svs-subtitle{margin-top:4px;font-size:11px;line-height:1.3;color:#d6c5a4}
+#${ROOT_ID} .svs-close{width:30px;height:30px;border:1px solid rgba(236,201,130,.38);border-radius:9px;background:rgba(255,255,255,.03);color:#f8ecd0;font-size:18px;line-height:1;cursor:pointer}
 #${ROOT_ID} .svs-close:hover{background:rgba(255,255,255,.09)}
 #${ROOT_ID} .svs-input-wrap{position:relative}
-#${ROOT_ID} .svs-input{width:100%;box-sizing:border-box;border:1px solid rgba(236,201,130,.45);border-radius:14px;padding:16px 18px;background:rgba(255,248,231,.06);color:#fff6e5;font-size:28px;line-height:1.1;font-weight:700;letter-spacing:.04em;outline:none}
-#${ROOT_ID} .svs-input::placeholder{color:rgba(248,236,208,.34)}
-#${ROOT_ID} .svs-input:focus{border-color:#f0c676;box-shadow:0 0 0 3px rgba(240,198,118,.16)}
+#${ROOT_ID} .svs-input{width:100%;box-sizing:border-box;border:1px solid rgba(236,201,130,.38);border-radius:12px;padding:11px 14px;background:rgba(255,248,231,.04);color:#fff6e5;font-size:20px;line-height:1.05;font-weight:700;letter-spacing:.03em;outline:none}
+#${ROOT_ID} .svs-input::placeholder{color:rgba(248,236,208,.28)}
+#${ROOT_ID} .svs-input:focus{border-color:#f0c676;box-shadow:0 0 0 2px rgba(240,198,118,.12)}
 #${ROOT_ID} .svs-input:disabled{opacity:.6;cursor:wait}
-#${ROOT_ID} .svs-status{margin-top:10px;min-height:18px;font-size:12px;line-height:1.35}
+#${ROOT_ID} .svs-status{margin-top:6px;min-height:15px;font-size:11px;line-height:1.3}
 #${ROOT_ID} .svs-status[data-svs-status="muted"]{color:#d6c5a4}
 #${ROOT_ID} .svs-status[data-svs-status="success"]{color:#9ad58e}
 #${ROOT_ID} .svs-status[data-svs-status="error"]{color:#ff9d91}
-#${ROOT_ID} .svs-result{margin-top:14px;overflow:auto;padding-right:2px}
-#${ROOT_ID} .svs-empty{padding:22px 18px;border:1px dashed rgba(236,201,130,.26);border-radius:14px;background:rgba(255,248,231,.03);font-size:14px;line-height:1.45;color:#d9ccb4;text-align:center}
+#${ROOT_ID} .svs-result{margin-top:10px;overflow:auto;padding-right:2px}
+#${ROOT_ID} .svs-result:empty{display:none}
+#${ROOT_ID} .svs-empty{padding:14px 12px;border:1px dashed rgba(236,201,130,.22);border-radius:12px;background:rgba(255,248,231,.025);font-size:13px;line-height:1.35;color:#d9ccb4;text-align:center}
 #${ROOT_ID} .svs-empty code{color:#ffe2a9}
-#${ROOT_ID} .svs-village-head{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin-bottom:10px}
-#${ROOT_ID} .svs-card{padding:14px 16px;border:1px solid rgba(236,201,130,.28);border-radius:16px;background:linear-gradient(180deg,rgba(255,248,231,.08) 0%,rgba(255,248,231,.04) 100%)}
-#${ROOT_ID} .svs-card-title{font-size:22px;font-weight:800;color:#fff1cf}
-#${ROOT_ID} .svs-card-coord{margin-top:4px;font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:#d0b88a}
-#${ROOT_ID} .svs-card-meta{font-size:12px;color:#d2bd96;white-space:nowrap}
-#${ROOT_ID} .svs-grid{display:grid;grid-template-columns:140px 1fr;gap:10px 14px}
+#${ROOT_ID} .svs-village-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:8px}
+#${ROOT_ID} .svs-title-row{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+#${ROOT_ID} .svs-card{padding:10px 12px;border:1px solid rgba(236,201,130,.24);border-radius:12px;background:linear-gradient(180deg,rgba(255,248,231,.06) 0%,rgba(255,248,231,.03) 100%)}
+#${ROOT_ID} .svs-card-title{font-size:18px;font-weight:800;color:#fff1cf}
+#${ROOT_ID} .svs-map-link{font-size:11px;color:#ffe2a9;text-decoration:none;border-bottom:1px dotted rgba(255,226,169,.45)}
+#${ROOT_ID} .svs-map-link:hover{color:#fff2d0;border-bottom-color:rgba(255,242,208,.95)}
+#${ROOT_ID} .svs-card-coord{margin-top:2px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#d0b88a}
+#${ROOT_ID} .svs-card-meta{font-size:11px;color:#d2bd96;white-space:nowrap}
+#${ROOT_ID} .svs-grid{display:grid;grid-template-columns:108px 1fr;gap:6px 12px}
 #${ROOT_ID} .svs-label{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#c8b185}
-#${ROOT_ID} .svs-value{font-size:18px;font-weight:800;color:#ffffff}
-#${ROOT_ID} .svs-section-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:14px 0 8px}
-#${ROOT_ID} .svs-section-title{font-size:14px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:#f0c979}
-#${ROOT_ID} .svs-open-link{font-size:12px;color:#ffe2a9;text-decoration:underline}
+#${ROOT_ID} .svs-value{font-size:15px;font-weight:800;color:#ffffff}
+#${ROOT_ID} .svs-section-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:10px 0 6px}
+#${ROOT_ID} .svs-section-title{font-size:12px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:#f0c979}
+#${ROOT_ID} .svs-open-link{font-size:11px;color:#ffe2a9;text-decoration:underline}
 #${ROOT_ID} .svs-open-link:hover{color:#fff2d0}
-#${ROOT_ID} .svs-commands-wrap{border:1px solid rgba(236,201,130,.22);border-radius:14px;overflow:auto;background:rgba(255,248,231,.04)}
-#${ROOT_ID} .svs-commands-table{width:100%;border-collapse:separate;border-spacing:0;min-width:860px}
-#${ROOT_ID} .svs-commands-table th{position:sticky;top:0;padding:10px 12px;background:#f0dfbb;color:#4f320c;text-align:left;font-size:12px;letter-spacing:.05em;text-transform:uppercase;z-index:1}
-#${ROOT_ID} .svs-commands-table td{padding:10px 12px;border-top:1px solid rgba(236,201,130,.16);vertical-align:top;background:rgba(255,248,231,.02);font-size:13px;color:#f8ecd0}
-#${ROOT_ID} .svs-commands-table tbody tr:nth-child(even) td{background:rgba(255,248,231,.05)}
-#${ROOT_ID} .svs-command-cell{min-width:340px}
-#${ROOT_ID} .svs-command-main{display:flex;align-items:flex-start;gap:10px}
-#${ROOT_ID} .svs-command-icons{display:inline-flex;align-items:center;gap:4px;min-width:44px;flex-wrap:wrap}
-#${ROOT_ID} .svs-command-icon{width:18px;height:18px;object-fit:contain;display:block}
+#${ROOT_ID} .svs-commands-wrap{border:1px solid rgba(236,201,130,.2);border-radius:12px;overflow:auto;background:rgba(255,248,231,.03)}
+#${ROOT_ID} .svs-commands-table{width:100%;border-collapse:separate;border-spacing:0;min-width:740px}
+#${ROOT_ID} .svs-commands-table th{position:sticky;top:0;padding:8px 10px;background:#f0dfbb;color:#4f320c;text-align:left;font-size:11px;letter-spacing:.05em;text-transform:uppercase;z-index:1}
+#${ROOT_ID} .svs-commands-table td{padding:7px 10px;border-top:1px solid rgba(236,201,130,.14);vertical-align:top;background:rgba(255,248,231,.015);font-size:12px;color:#f8ecd0}
+#${ROOT_ID} .svs-commands-table tbody tr:nth-child(even) td{background:rgba(255,248,231,.035)}
+#${ROOT_ID} .svs-command-cell{min-width:300px}
+#${ROOT_ID} .svs-command-main{display:flex;align-items:flex-start;gap:8px}
+#${ROOT_ID} .svs-command-icons{display:inline-flex;align-items:center;gap:3px;min-width:38px;flex-wrap:wrap}
+#${ROOT_ID} .svs-command-icon{width:15px;height:15px;object-fit:contain;display:block}
 #${ROOT_ID} .svs-command-text{min-width:0}
-#${ROOT_ID} .svs-command-label{font-size:13px;font-weight:700;line-height:1.35;color:#fff5dd;word-break:break-word}
+#${ROOT_ID} .svs-command-label{font-size:12px;font-weight:700;line-height:1.25;color:#fff5dd;word-break:break-word}
 #${ROOT_ID} .svs-command-label a{color:inherit;text-decoration:none;border-bottom:1px dotted rgba(255,245,221,.45)}
 #${ROOT_ID} .svs-command-label a:hover{border-bottom-color:rgba(255,245,221,.95)}
-#${ROOT_ID} .svs-command-sub{margin-top:3px;font-size:11px;color:#c9b28b}
-#${ROOT_ID} .svs-arrival-cell{white-space:nowrap;min-width:180px}
-#${ROOT_ID} .svs-timer-cell{white-space:nowrap;min-width:100px;font-weight:700;color:#ffe3a4}
-#${ROOT_ID} .svs-units-cell{min-width:250px}
-#${ROOT_ID} .svs-units-wrap{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-#${ROOT_ID} .svs-unit-chip{display:inline-flex;align-items:center;gap:4px;padding:3px 7px;border:1px solid rgba(236,201,130,.28);border-radius:999px;background:rgba(255,248,231,.08);color:#fff5dd;font-size:11px;font-weight:700;line-height:1}
-#${ROOT_ID} .svs-unit-icon{width:14px;height:14px;object-fit:contain;display:block}
+#${ROOT_ID} .svs-command-sub{margin-top:2px;font-size:10px;color:#c9b28b}
+#${ROOT_ID} .svs-arrival-cell{white-space:nowrap;min-width:160px}
+#${ROOT_ID} .svs-timer-cell{white-space:nowrap;min-width:92px;font-weight:700;color:#ffe3a4}
+#${ROOT_ID} .svs-units-cell{min-width:220px}
+#${ROOT_ID} .svs-units-wrap{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
+#${ROOT_ID} .svs-unit-chip{display:inline-flex;align-items:center;gap:3px;padding:2px 6px;border:1px solid rgba(236,201,130,.24);border-radius:999px;background:rgba(255,248,231,.06);color:#fff5dd;font-size:10px;font-weight:700;line-height:1}
+#${ROOT_ID} .svs-unit-icon{width:13px;height:13px;object-fit:contain;display:block}
 #${ROOT_ID} .svs-unit-fallback{font-size:10px;text-transform:uppercase}
 #${ROOT_ID} .svs-unit-count{font-variant-numeric:tabular-nums}
 #${ROOT_ID} .svs-units-loading{color:#ffe3a4}
 #${ROOT_ID} .svs-units-empty{color:#d4c6ac}
 #${ROOT_ID} .svs-units-error{color:#ff9d91}
-#${ROOT_ID} .svs-hint{margin-top:12px;font-size:11px;line-height:1.4;color:#ad9a77;text-align:right}
+#${ROOT_ID} .svs-hint{margin-top:8px;font-size:10px;line-height:1.3;color:#ad9a77;text-align:right}
 @media (max-width: 760px){
   #${ROOT_ID}{padding:10px}
-  #${ROOT_ID} .svs-panel{width:100%;max-height:96vh;padding:14px;border-radius:16px}
-  #${ROOT_ID} .svs-title{font-size:18px}
+  #${ROOT_ID} .svs-panel{width:100%;max-height:94vh;padding:12px;border-radius:12px}
+  #${ROOT_ID} .svs-title{font-size:16px}
   #${ROOT_ID} .svs-subtitle{font-size:11px}
-  #${ROOT_ID} .svs-input{padding:14px 16px;font-size:22px;border-radius:12px}
+  #${ROOT_ID} .svs-input{padding:10px 12px;font-size:18px;border-radius:10px}
   #${ROOT_ID} .svs-village-head{display:block}
+  #${ROOT_ID} .svs-title-row{gap:8px}
   #${ROOT_ID} .svs-card-meta{margin-top:6px;white-space:normal}
   #${ROOT_ID} .svs-grid{grid-template-columns:1fr;gap:4px}
   #${ROOT_ID} .svs-value{margin-bottom:8px}
@@ -995,16 +1056,16 @@
             <div class="svs-title">Village Spotlight</div>
             <div class="svs-subtitle">Поиск деревни по координатам, загрузка <code>${escapeHtml(
               LOAD_ENDPOINT,
-            )}</code>, таблица приказов и состав войск по <code>info_command</code>.</div>
+            )}</code>, приказы и состав войск.</div>
           </div>
           <button class="svs-close" type="button" data-svs-action="close" aria-label="Закрыть">×</button>
         </div>
         <div class="svs-input-wrap">
           <input class="svs-input" type="text" inputmode="text" autocomplete="off" spellcheck="false" placeholder="454|435" disabled />
         </div>
-        <div class="svs-status" data-svs-status="muted">Подготовка...</div>
+        <div class="svs-status" data-svs-status="muted">Введи координаты в формате 454|435.</div>
         <div class="svs-result"></div>
-        <div class="svs-hint">Esc закрыть. Ctrl/⌘+K открыть снова.</div>
+        <div class="svs-hint">Esc закрыть.</div>
       </div>
     `;
 
@@ -1042,15 +1103,6 @@
       (target.tagName === "INPUT" ||
         target.tagName === "TEXTAREA" ||
         target.isContentEditable);
-
-    if (
-      (event.ctrlKey || event.metaKey) &&
-      String(event.key || "").toLowerCase() === "k"
-    ) {
-      event.preventDefault();
-      setVisible(true);
-      return;
-    }
 
     if (event.key === "Escape" && state.visible) {
       event.preventDefault();
