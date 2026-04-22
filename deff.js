@@ -25,7 +25,6 @@
             NEW_WINDOW_BLOCKED: 'Браузер блокирует открытие новых вкладок',
             EMPTY_DEFF_SELECTION: 'Не удалось подобрать отряд',
             INVALID_VILLAGE_INFO: 'Целевая деревня не найдена: __1__',
-            NO_OTHER_SUPPORT_CONFLICT: 'Мир не позволяет слать деф в деревню __1__ (другая семья)',
             EMPTY_GROUP: 'В выбранной группе нет деревень',
             NO_TEMPLATE: 'Не выбран шаблон отряда',
             EMPTY_TARGETS: 'Не найдено ни одной валидной коры',
@@ -2798,13 +2797,6 @@
                     const target_info = await Guard.fetch_village_info([target.x, target.y]);
                     if (!target_info) {
                         throw i18n.ERROR.INVALID_VILLAGE_INFO.replace('__1__', target.text);
-                    }
-
-                    if (Number(Guard.world_info.config.ally.no_other_support) !== 0) {
-                        if (Number(game_data.player.ally) === 0 ||
-                            Number(target_info[Guard._village_info.ALLY_ID]) !== Number(game_data.player.ally)) {
-                            throw i18n.ERROR.NO_OTHER_SUPPORT_CONFLICT.replace('__1__', target.text);
-                        }
                     }
 
                     target_infos.push({
