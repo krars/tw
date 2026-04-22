@@ -7,6 +7,8 @@
   const LOAD_ENDPOINT = "/map/village.txt";
   const GAME_REQUEST_MIN_INTERVAL_MS = 250;
   const COMMAND_CACHE_TTL_MS = 30 * 60 * 1000;
+  const SIGIL_CACHE_TTL_MS = 10 * 60 * 1000;
+  const PLACE_FORM_CACHE_TTL_MS = 5 * 60 * 1000;
   const COMMAND_DETAILS_WORKERS = 8;
   const UNIT_ORDER = [
     "spear",
@@ -38,6 +40,21 @@
     snob: "двор",
     militia: "ополч",
   };
+  const UNIT_SPEED_FALLBACK = {
+    spear: 18,
+    sword: 22,
+    axe: 18,
+    archer: 18,
+    spy: 9,
+    light: 10,
+    marcher: 10,
+    heavy: 11,
+    ram: 30,
+    catapult: 30,
+    knight: 10,
+    snob: 35,
+    militia: 0,
+  };
 
   if (window[SCRIPT_KEY] && typeof window[SCRIPT_KEY].destroy === "function") {
     window[SCRIPT_KEY].destroy();
@@ -62,6 +79,9 @@
     villagesByCoord: new Map(),
     villagesLoadPromise: null,
     commandUnitsCache: new Map(),
+    sigilCache: new Map(),
+    placeCommandFormCache: new Map(),
+    speedModelPromise: null,
     rootEl: null,
     inputEl: null,
     statusEl: null,
@@ -90,6 +110,13 @@
     if (!text) return NaN;
     const parsed = Number(text);
     return Number.isFinite(parsed) ? Math.trunc(parsed) : NaN;
+  };
+
+  const toNumber = (value) => {
+    const text = cleanText(value).replace(",", ".");
+    if (!text) return NaN;
+    const parsed = Number(text);
+    return Number.isFinite(parsed) ? parsed : NaN;
   };
 
   const escapeHtml = (value) =>
@@ -219,13 +246,19 @@
     return slotPromise;
   };
 
-  const fetchText = async (url, { rateLimited = false } = {}) => {
+  const fetchText = async (
+    url,
+    { rateLimited = false, method = "GET", headers = undefined, body = undefined } = {},
+  ) => {
     if (rateLimited) {
       await reserveGameRequestSlot();
     }
     const response = await fetch(url, {
       credentials: "include",
       cache: "no-store",
+      method,
+      headers,
+      body,
     });
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
@@ -241,6 +274,15 @@
   const fetchDocument = async (url, { rateLimited = false } = {}) => {
     const text = await fetchText(url, { rateLimited });
     return new DOMParser().parseFromString(text, "text/html");
+  };
+
+  const fetchJson = async (url, options = {}) => {
+    const text = await fetchText(url, options);
+    try {
+      return JSON.parse(text);
+    } catch (error) {
+      throw new Error("Не удалось разобрать JSON ответ.");
+    }
   };
 
   const normalizeUnitKey = (value) => {
@@ -281,6 +323,109 @@
       Math.max(0, toInt(match[2]) || 0) * 60 +
       Math.max(0, toInt(match[3]) || 0)
     );
+  };
+
+  const parseDurationSeconds = (value) => {
+    const parts = String(value == null ? "" : value).match(/\d+/g);
+    if (!parts || !parts.length) return null;
+    const nums = parts
+      .map((part) => Number(part))
+      .filter((part) => Number.isFinite(part));
+    if (!nums.length) return null;
+    if (nums.length === 4) {
+      return (((nums[0] * 24 + nums[1]) * 60 + nums[2]) * 60) + nums[3];
+    }
+    if (nums.length === 3) {
+      return nums[0] * 3600 + nums[1] * 60 + nums[2];
+    }
+    if (nums.length === 2) {
+      return nums[0] * 60 + nums[1];
+    }
+    return null;
+  };
+
+  const readXmlText = (root, selectors) => {
+    const selectorList = Array.isArray(selectors) ? selectors : [selectors];
+    for (const selector of selectorList) {
+      const node = root && root.querySelector ? root.querySelector(selector) : null;
+      const text = cleanText(node && node.textContent);
+      if (text) return text;
+    }
+    return "";
+  };
+
+  const fetchXmlDoc = async (url, { rateLimited = false } = {}) => {
+    const text = await fetchText(url, { rateLimited });
+    return new DOMParser().parseFromString(text, "text/xml");
+  };
+
+  const parseUnitInfoBaseSpeeds = (unitDoc) => {
+    const parsed = {};
+    if (!unitDoc || !unitDoc.documentElement) return parsed;
+    Array.from(unitDoc.documentElement.children || []).forEach((node) => {
+      const key = cleanText(node && node.tagName).toLowerCase();
+      const speed = toNumber(readXmlText(node, "speed"));
+      if (!key || !Number.isFinite(speed) || speed <= 0) return;
+      parsed[key] = speed;
+    });
+    return parsed;
+  };
+
+  const loadSpeedModel = () => {
+    if (state.speedModelPromise) return state.speedModelPromise;
+    state.speedModelPromise = (async () => {
+      let base = { ...UNIT_SPEED_FALLBACK };
+      let worldSpeed = 1;
+      let unitSpeed = 1;
+      let source = "fallback";
+
+      try {
+        const [configDoc, unitDoc] = await Promise.all([
+          fetchXmlDoc("/interface.php?func=get_config", { rateLimited: true }),
+          fetchXmlDoc("/interface.php?func=get_unit_info", { rateLimited: true }),
+        ]);
+
+        const parsedWorldSpeed = toNumber(
+          readXmlText(configDoc, ["config > speed", "speed"]),
+        );
+        const parsedUnitSpeed = toNumber(
+          readXmlText(configDoc, ["config > unit_speed", "unit_speed"]),
+        );
+        if (Number.isFinite(parsedWorldSpeed) && parsedWorldSpeed > 0) {
+          worldSpeed = parsedWorldSpeed;
+        }
+        if (Number.isFinite(parsedUnitSpeed) && parsedUnitSpeed > 0) {
+          unitSpeed = parsedUnitSpeed;
+        }
+
+        const parsedBase = parseUnitInfoBaseSpeeds(unitDoc);
+        if (Object.keys(parsedBase).length) {
+          base = { ...base, ...parsedBase };
+        }
+
+        source = "live";
+      } catch (error) {
+        void error;
+        source = "fallback";
+      }
+
+      const factor = Math.max(0.0001, worldSpeed * unitSpeed);
+      const effectiveMinutesPerField = {};
+      UNIT_ORDER.forEach((unit) => {
+        const baseMinutes = toNumber(base[unit]);
+        if (!Number.isFinite(baseMinutes) || baseMinutes <= 0) return;
+        effectiveMinutesPerField[unit] = baseMinutes / factor;
+      });
+
+      return {
+        worldSpeed,
+        unitSpeed,
+        factor,
+        source,
+        effectiveMinutesPerField,
+      };
+    })();
+    return state.speedModelPromise;
   };
 
   const parseVillageTitle = (doc, fallbackVillage) => {
@@ -469,6 +614,365 @@
     });
   };
 
+  const getCurrentVillageCoord = () => {
+    const village =
+      window.game_data && window.game_data.village ? window.game_data.village : null;
+    const x = toInt(village && village.x);
+    const y = toInt(village && village.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    return { x, y, coord: `${x}|${y}` };
+  };
+
+  const readTableValueByLabel = (doc, labelRegex) => {
+    const rows = Array.from(
+      doc.querySelectorAll("#command-data-form table.vis tr, table.vis tr"),
+    );
+    for (const row of rows) {
+      const cells = Array.from(row.querySelectorAll("td"));
+      if (cells.length < 2) continue;
+      const label = cleanText(cells[0].textContent);
+      if (!labelRegex.test(label)) continue;
+      return cleanText(cells[1].textContent);
+    }
+    return "";
+  };
+
+  const getCachedSigil = (cacheKey) => {
+    const key = cleanText(cacheKey);
+    if (!key) return null;
+    const cached = state.sigilCache.get(key);
+    if (!cached) return null;
+    const ageMs = Date.now() - (Number(cached.loadedAtMs) || 0);
+    if (ageMs > SIGIL_CACHE_TTL_MS) {
+      state.sigilCache.delete(key);
+      return null;
+    }
+    return cached;
+  };
+
+  const setCachedSigil = (cacheKey, entry) => {
+    const key = cleanText(cacheKey);
+    if (!key) return;
+    state.sigilCache.set(key, {
+      loadedAtMs: Date.now(),
+      ...entry,
+    });
+  };
+
+  const getCachedPlaceCommandForm = (villageId) => {
+    const key = cleanText(villageId);
+    if (!key) return null;
+    const cached = state.placeCommandFormCache.get(key);
+    if (!cached) return null;
+    const ageMs = Date.now() - (Number(cached.loadedAtMs) || 0);
+    if (ageMs > PLACE_FORM_CACHE_TTL_MS) {
+      state.placeCommandFormCache.delete(key);
+      return null;
+    }
+    return cached;
+  };
+
+  const setCachedPlaceCommandForm = (snapshot) => {
+    const key = cleanText(snapshot && snapshot.currentVillageId);
+    if (!key) return;
+    state.placeCommandFormCache.set(key, {
+      loadedAtMs: Date.now(),
+      ...snapshot,
+    });
+  };
+
+  const parsePlaceCommandFormSnapshot = (doc, currentVillageId) => {
+    const form =
+      doc.querySelector("form#command-data-form[name='units'][action*='try=confirm']") ||
+      doc.querySelector("form[name='units'][action*='try=confirm']") ||
+      doc.querySelector("form#command-data-form[action*='try=confirm']");
+    if (!form) {
+      throw new Error("Не найдена форма площади для расчета сигила.");
+    }
+
+    const baseParams = [];
+    Array.from(form.elements || []).forEach((element) => {
+      if (!element || !element.tagName) return;
+      const name = cleanText(element.name || element.getAttribute("name"));
+      if (!name || element.disabled) return;
+      const type = cleanText(element.type || element.getAttribute("type")).toLowerCase();
+      if (["submit", "button", "image", "file"].includes(type)) return;
+      if ((type === "checkbox" || type === "radio") && !element.checked) return;
+      baseParams.push([name, String(element.value == null ? "" : element.value)]);
+    });
+
+    const availableUnits = {};
+    UNIT_ORDER.forEach((unit) => {
+      const input = form.querySelector(`input[name="${unit}"]`);
+      if (!input) return;
+      const attrCount = toInt(input.getAttribute("data-all-count"));
+      const fallbackText = cleanText(
+        form.querySelector(`#units_entry_all_${unit}`) &&
+          form.querySelector(`#units_entry_all_${unit}`).textContent,
+      );
+      const fallbackCount = toInt(fallbackText.replace(/[()]/g, ""));
+      const count = Number.isFinite(attrCount)
+        ? attrCount
+        : Number.isFinite(fallbackCount)
+          ? fallbackCount
+          : 0;
+      availableUnits[unit] = Math.max(0, count);
+    });
+
+    return {
+      currentVillageId: cleanText(currentVillageId),
+      sourceVillageId:
+        cleanText(
+          form.querySelector('input[name="source_village"]') &&
+            form.querySelector('input[name="source_village"]').value,
+        ) || cleanText(currentVillageId),
+      baseParams,
+      availableUnits,
+    };
+  };
+
+  const loadPlaceCommandFormSnapshot = async ({ force = false } = {}) => {
+    const currentVillageId = resolveCurrentVillageId();
+    if (!currentVillageId) {
+      throw new Error("Не удалось определить текущую деревню.");
+    }
+
+    if (!force) {
+      const cached = getCachedPlaceCommandForm(currentVillageId);
+      if (cached) return cached;
+    }
+
+    const liveForm = document.querySelector(
+      "form#command-data-form[name='units'][action*='try=confirm']",
+    );
+    if (liveForm && !force) {
+      const liveSnapshot = parsePlaceCommandFormSnapshot(document, currentVillageId);
+      setCachedPlaceCommandForm(liveSnapshot);
+      return liveSnapshot;
+    }
+
+    const placeDoc = await fetchDocument(buildGameUrl({ screen: "place" }), {
+      rateLimited: true,
+    });
+    const snapshot = parsePlaceCommandFormSnapshot(placeDoc, currentVillageId);
+    setCachedPlaceCommandForm(snapshot);
+    return snapshot;
+  };
+
+  const chooseSigilProbeUnit = (availableUnits) => {
+    for (const unit of UNIT_ORDER) {
+      if (unit === "militia") continue;
+      const count = Math.max(0, toInt(availableUnits && availableUnits[unit]) || 0);
+      if (count > 0) {
+        return { unit, count };
+      }
+    }
+    return null;
+  };
+
+  const parseSigilDialog = (dialogHtml) => {
+    const doc = new DOMParser().parseFromString(String(dialogHtml || ""), "text/html");
+    return {
+      durationText: readTableValueByLabel(doc, /длительн|duration/i),
+    };
+  };
+
+  const formatSigilLabel = (sigilPercent) => {
+    if (!Number.isFinite(sigilPercent) || sigilPercent < 0.1) {
+      return "без сигила";
+    }
+    if (sigilPercent < 10) {
+      return `сигил ${sigilPercent.toFixed(1)}%`;
+    }
+    return `сигил ${Math.round(sigilPercent)}%`;
+  };
+
+  const buildSigilTooltip = (result) => {
+    if (!result) return "";
+    return [
+      `Маршрут ${result.sourceCoord} -> ${result.targetCoord}`,
+      `Юнит ${UNIT_LABELS[result.probeUnit] || result.probeUnit}`,
+      `База ${formatCountdown(result.baseDurationSec)}`,
+      `Факт ${formatCountdown(result.observedDurationSec)}`,
+      `Сигил ${result.sigilPercent.toFixed(2)}%`,
+    ].join(" | ");
+  };
+
+  const requestVillageSigil = async (village, { refreshPlaceForm = false } = {}) => {
+    const currentVillageId = resolveCurrentVillageId();
+    const currentVillageCoord = getCurrentVillageCoord();
+    if (!currentVillageId || !currentVillageCoord) {
+      throw new Error("Не удалось определить свою деревню для расчета сигила.");
+    }
+
+    const targetX = toInt(village && village.x);
+    const targetY = toInt(village && village.y);
+    if (!Number.isFinite(targetX) || !Number.isFinite(targetY)) {
+      throw new Error("Не удалось определить координаты цели.");
+    }
+
+    const snapshot = await loadPlaceCommandFormSnapshot({ force: refreshPlaceForm });
+    const probe = chooseSigilProbeUnit(snapshot.availableUnits);
+    if (!probe) {
+      throw new Error("Нет доступной юниты для тестового расчета сигила.");
+    }
+
+    const speedModel = await loadSpeedModel();
+    const minutesPerField = toNumber(speedModel.effectiveMinutesPerField[probe.unit]);
+    if (!Number.isFinite(minutesPerField) || minutesPerField <= 0) {
+      throw new Error("Не удалось получить скорость тестовой юниты.");
+    }
+
+    const params = new URLSearchParams();
+    snapshot.baseParams.forEach(([name, value]) => {
+      params.append(name, value);
+    });
+
+    UNIT_ORDER.forEach((unit) => {
+      if (unit === "militia") return;
+      params.set(unit, unit === probe.unit ? "1" : "");
+    });
+
+    params.set("source_village", cleanText(snapshot.sourceVillageId) || currentVillageId);
+    params.set("village", currentVillageId);
+    params.set("screen", "place");
+    params.set("ajax", "confirm");
+    params.set("template_id", "");
+    params.set("target_type", "coord");
+    params.set("x", String(targetX));
+    params.set("y", String(targetY));
+    params.set("input", `${targetX}|${targetY}`);
+    params.delete("attack");
+    params.delete("submit_confirm");
+    params.set("support", "");
+
+    const csrf = cleanText(window.game_data && window.game_data.csrf);
+    if (csrf) {
+      params.set("h", csrf);
+    }
+
+    const payload = await fetchJson(buildGameUrl({ screen: "place", ajax: "confirm" }), {
+      rateLimited: true,
+      method: "POST",
+      headers: {
+        accept: "application/json, text/javascript, */*; q=0.01",
+        "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "tribalwars-ajax": "1",
+        "x-requested-with": "XMLHttpRequest",
+      },
+      body: params.toString(),
+    });
+
+    const dialogHtml =
+      payload &&
+      payload.response &&
+      typeof payload.response.dialog === "string"
+        ? payload.response.dialog
+        : "";
+    if (!dialogHtml) {
+      const message =
+        cleanText(payload && payload.error) ||
+        cleanText(payload && payload.message) ||
+        cleanText(payload && payload.response && payload.response.error) ||
+        "Пустой ответ ajax=confirm.";
+      throw new Error(message);
+    }
+
+    const { durationText } = parseSigilDialog(dialogHtml);
+    const observedDurationSec = parseDurationSeconds(durationText);
+    if (!Number.isFinite(observedDurationSec) || observedDurationSec <= 0) {
+      throw new Error("Не удалось вытащить длительность из ajax=confirm.");
+    }
+
+    const dx = targetX - currentVillageCoord.x;
+    const dy = targetY - currentVillageCoord.y;
+    const distance = Math.hypot(dx, dy);
+    if (!Number.isFinite(distance) || distance <= 0) {
+      throw new Error("Некорректная дистанция между деревнями.");
+    }
+
+    const baseDurationSec = distance * minutesPerField * 60;
+    let sigilPercent = (baseDurationSec / observedDurationSec - 1) * 100;
+    sigilPercent = Math.max(0, Math.min(100, sigilPercent));
+
+    return {
+      sigilPercent,
+      baseDurationSec,
+      observedDurationSec,
+      probeUnit: probe.unit,
+      probeLabel: UNIT_LABELS[probe.unit] || probe.unit,
+      distance,
+      sourceCoord: currentVillageCoord.coord,
+      targetCoord: `${targetX}|${targetY}`,
+      speedModelSource: cleanText(speedModel.source) || "fallback",
+    };
+  };
+
+  const updateView = (view, patch) => {
+    if (!view || typeof patch !== "object" || !patch) return;
+    Object.assign(view, patch);
+    if (state.currentView === view) {
+      renderCurrentView();
+    }
+  };
+
+  const loadVillageSigil = async (view, village, token) => {
+    const currentVillageId = resolveCurrentVillageId();
+    const cacheKey = `${cleanText(currentVillageId)}::${cleanText(village && village.coord)}`;
+    const cached = getCachedSigil(cacheKey);
+    if (cached) {
+      updateView(view, {
+        sigilStatus: cleanText(cached.status) || "loaded",
+        sigilPercent: Number(cached.sigilPercent),
+        sigilLabel: cleanText(cached.label),
+        sigilTooltip: cleanText(cached.tooltip),
+      });
+      return;
+    }
+
+    updateView(view, {
+      sigilStatus: "loading",
+      sigilPercent: null,
+      sigilLabel: "сигил...",
+      sigilTooltip: "",
+    });
+
+    try {
+      let result;
+      try {
+        result = await requestVillageSigil(village);
+      } catch (firstError) {
+        state.placeCommandFormCache.delete(cleanText(currentVillageId));
+        result = await requestVillageSigil(village, { refreshPlaceForm: true });
+      }
+      if (token !== state.searchToken) return;
+
+      const label = formatSigilLabel(result.sigilPercent);
+      const tooltip = buildSigilTooltip(result);
+      setCachedSigil(cacheKey, {
+        status: "loaded",
+        sigilPercent: result.sigilPercent,
+        label,
+        tooltip,
+      });
+
+      updateView(view, {
+        sigilStatus: "loaded",
+        sigilPercent: result.sigilPercent,
+        sigilLabel: label,
+        sigilTooltip: tooltip,
+      });
+    } catch (error) {
+      if (token !== state.searchToken) return;
+      updateView(view, {
+        sigilStatus: "error",
+        sigilPercent: null,
+        sigilLabel: "сигил ?",
+        sigilTooltip: cleanText(error && error.message) || "Ошибка расчета сигила",
+      });
+    }
+  };
+
   const buildBaseView = (village) => ({
     villageId: cleanText(village && village.id) || null,
     playerId: cleanText(village && village.playerId) || "0",
@@ -485,6 +989,10 @@
             beacon: 1,
           })
         : null,
+    sigilStatus: "idle",
+    sigilPercent: null,
+    sigilLabel: "",
+    sigilTooltip: "",
     infoStatus: "loading",
     infoUrl: null,
     commands: [],
@@ -619,6 +1127,14 @@
     state.resultEl.innerHTML = `<div class="svs-village-head"><div><div class="svs-title-row"><div class="svs-card-title">${escapeHtml(
       cleanText(view.title),
     )}</div>${
+      view.sigilStatus !== "idle" && cleanText(view.sigilLabel)
+        ? `<span class="svs-sigil-badge svs-sigil-${escapeHtml(
+            cleanText(view.sigilStatus),
+          )}" title="${escapeHtml(cleanText(view.sigilTooltip))}">${escapeHtml(
+            cleanText(view.sigilLabel),
+          )}</span>`
+        : ""
+    }${
       view.mapUrl
         ? `<a class="svs-map-link" href="${escapeHtml(
             view.mapUrl,
@@ -732,6 +1248,7 @@
 
       state.currentView = view;
       renderCurrentView();
+      void loadVillageSigil(view, village, token).catch(() => null);
 
       if (!view.commands.length) {
         setStatus(
@@ -960,6 +1477,10 @@
 #${ROOT_ID} .svs-village-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:8px}
 #${ROOT_ID} .svs-title-row{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
 #${ROOT_ID} .svs-card-title{font-size:18px;font-weight:800;color:#fff1cf}
+#${ROOT_ID} .svs-sigil-badge{display:inline-flex;align-items:center;padding:2px 7px;border:1px solid rgba(236,201,130,.22);border-radius:999px;background:rgba(255,248,231,.05);font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;line-height:1;color:#f5dfb4}
+#${ROOT_ID} .svs-sigil-loading{color:#d9ccb4}
+#${ROOT_ID} .svs-sigil-loaded{color:#9ad58e;border-color:rgba(154,213,142,.28);background:rgba(154,213,142,.08)}
+#${ROOT_ID} .svs-sigil-error{color:#ffb1a6;border-color:rgba(255,157,145,.28);background:rgba(255,157,145,.08)}
 #${ROOT_ID} .svs-map-link{font-size:11px;color:#ffe2a9;text-decoration:none;border-bottom:1px dotted rgba(255,226,169,.45)}
 #${ROOT_ID} .svs-map-link:hover{color:#fff2d0;border-bottom-color:rgba(255,242,208,.95)}
 #${ROOT_ID} .svs-card-coord{margin-top:2px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#d0b88a}
