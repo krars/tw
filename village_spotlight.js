@@ -562,10 +562,6 @@
       return;
     }
 
-    const ownerText =
-      cleanText(view.playerId) === "0"
-        ? "0 (варварская деревня)"
-        : cleanText(view.playerId);
     const commands = Array.isArray(view.commands) ? view.commands : [];
     const resolvedCount = countResolvedCommands(commands);
     const commandsMeta = commands.length
@@ -630,11 +626,7 @@
         : ""
     }</div><div class="svs-card-coord">${escapeHtml(
       cleanText(view.coord),
-    )}</div></div><div class="svs-card-meta">${escapeHtml(commandsMeta)}</div></div><div class="svs-card"><div class="svs-grid"><div class="svs-label">ID деревни</div><div class="svs-value">${escapeHtml(
-      cleanText(view.villageId),
-    )}</div><div class="svs-label">ID игрока</div><div class="svs-value">${escapeHtml(
-      ownerText,
-    )}</div></div></div><div class="svs-section-head"><div class="svs-section-title">Приказы в деревню</div>${
+    )}</div></div><div class="svs-card-meta">${escapeHtml(commandsMeta)}</div></div><div class="svs-section-head"><div class="svs-section-title">Приказы в деревню</div>${
       view.infoUrl
         ? `<a class="svs-open-link" href="${escapeHtml(
             view.infoUrl,
@@ -949,9 +941,7 @@
 #${ROOT_ID}[hidden]{display:none}
 #${ROOT_ID} .svs-backdrop{position:absolute;inset:0;background:radial-gradient(circle at center,rgba(255,215,146,.1),transparent 26%),rgba(9,12,18,.24);backdrop-filter:blur(2px)}
 #${ROOT_ID} .svs-panel{position:relative;display:flex;flex-direction:column;width:min(960px,92vw);max-height:min(84vh,760px);padding:14px 14px 12px;border:1px solid rgba(236,201,130,.5);border-radius:14px;background:linear-gradient(180deg,rgba(34,27,19,.94) 0%,rgba(21,17,12,.94) 100%);box-shadow:0 18px 60px rgba(0,0,0,.32);color:#f8ecd0;overflow:hidden}
-#${ROOT_ID} .svs-top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:8px}
-#${ROOT_ID} .svs-title{font-size:18px;line-height:1;font-weight:800;letter-spacing:.04em;text-transform:uppercase;color:#f8d48e}
-#${ROOT_ID} .svs-subtitle{margin-top:4px;font-size:11px;line-height:1.3;color:#d6c5a4}
+#${ROOT_ID} .svs-top{display:flex;align-items:center;justify-content:flex-end;gap:12px;margin-bottom:8px}
 #${ROOT_ID} .svs-close{width:30px;height:30px;border:1px solid rgba(236,201,130,.38);border-radius:9px;background:rgba(255,255,255,.03);color:#f8ecd0;font-size:18px;line-height:1;cursor:pointer}
 #${ROOT_ID} .svs-close:hover{background:rgba(255,255,255,.09)}
 #${ROOT_ID} .svs-input-wrap{position:relative}
@@ -969,15 +959,11 @@
 #${ROOT_ID} .svs-empty code{color:#ffe2a9}
 #${ROOT_ID} .svs-village-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:8px}
 #${ROOT_ID} .svs-title-row{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
-#${ROOT_ID} .svs-card{padding:10px 12px;border:1px solid rgba(236,201,130,.24);border-radius:12px;background:linear-gradient(180deg,rgba(255,248,231,.06) 0%,rgba(255,248,231,.03) 100%)}
 #${ROOT_ID} .svs-card-title{font-size:18px;font-weight:800;color:#fff1cf}
 #${ROOT_ID} .svs-map-link{font-size:11px;color:#ffe2a9;text-decoration:none;border-bottom:1px dotted rgba(255,226,169,.45)}
 #${ROOT_ID} .svs-map-link:hover{color:#fff2d0;border-bottom-color:rgba(255,242,208,.95)}
 #${ROOT_ID} .svs-card-coord{margin-top:2px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#d0b88a}
 #${ROOT_ID} .svs-card-meta{font-size:11px;color:#d2bd96;white-space:nowrap}
-#${ROOT_ID} .svs-grid{display:grid;grid-template-columns:108px 1fr;gap:6px 12px}
-#${ROOT_ID} .svs-label{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#c8b185}
-#${ROOT_ID} .svs-value{font-size:15px;font-weight:800;color:#ffffff}
 #${ROOT_ID} .svs-section-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:10px 0 6px}
 #${ROOT_ID} .svs-section-title{font-size:12px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:#f0c979}
 #${ROOT_ID} .svs-open-link{font-size:11px;color:#ffe2a9;text-decoration:underline}
@@ -1011,14 +997,10 @@
 @media (max-width: 760px){
   #${ROOT_ID}{padding:10px}
   #${ROOT_ID} .svs-panel{width:100%;max-height:94vh;padding:12px;border-radius:12px}
-  #${ROOT_ID} .svs-title{font-size:16px}
-  #${ROOT_ID} .svs-subtitle{font-size:11px}
   #${ROOT_ID} .svs-input{padding:10px 12px;font-size:18px;border-radius:10px}
   #${ROOT_ID} .svs-village-head{display:block}
   #${ROOT_ID} .svs-title-row{gap:8px}
   #${ROOT_ID} .svs-card-meta{margin-top:6px;white-space:normal}
-  #${ROOT_ID} .svs-grid{grid-template-columns:1fr;gap:4px}
-  #${ROOT_ID} .svs-value{margin-bottom:8px}
   #${ROOT_ID} .svs-section-head{display:block}
   #${ROOT_ID} .svs-open-link{display:inline-block;margin-top:4px}
   #${ROOT_ID} .svs-hint{text-align:left}
@@ -1052,12 +1034,6 @@
       <div class="svs-backdrop" data-svs-action="close"></div>
       <div class="svs-panel" role="dialog" aria-modal="true" aria-label="Village spotlight">
         <div class="svs-top">
-          <div>
-            <div class="svs-title">Village Spotlight</div>
-            <div class="svs-subtitle">Поиск деревни по координатам, загрузка <code>${escapeHtml(
-              LOAD_ENDPOINT,
-            )}</code>, приказы и состав войск.</div>
-          </div>
           <button class="svs-close" type="button" data-svs-action="close" aria-label="Закрыть">×</button>
         </div>
         <div class="svs-input-wrap">
