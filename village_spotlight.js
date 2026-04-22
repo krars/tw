@@ -5,7 +5,10 @@
   const STYLE_ID = "scriptmm-village-spotlight-style";
   const ROOT_ID = "scriptmm-village-spotlight-root";
   const LOAD_ENDPOINT = "/map/village.txt";
-  const MAIN_SCRIPT_REMOTE_URL = "https://raw.githubusercontent.com/krars/tw/main/main.js";
+  const MAIN_SCRIPT_REMOTE_URLS = [
+    "https://raw.githubusercontent.com/krars/tw/main/main.js",
+    "https://raw.githubusercontent.com/krars/tw/main/github_ru/main.js",
+  ];
   const GAME_REQUEST_MIN_INTERVAL_MS = 250;
   const COMMAND_CACHE_TTL_MS = 30 * 60 * 1000;
   const SIGIL_CACHE_TTL_MS = 10 * 60 * 1000;
@@ -1114,6 +1117,14 @@
       .filter(Boolean)
       .sort((left, right) => Number(left.etaEpochMs || 0) - Number(right.etaEpochMs || 0));
 
+  const scriptCodeHasSpotlightBridge = (codeRaw) => {
+    const code = String(codeRaw || "");
+    return (
+      /\brenderSpotlightPlanPanel\b/.test(code) &&
+      /\b__ScriptMMExternalOnly\b/.test(code)
+    );
+  };
+
   const ensureMainBridgeLoaded = () => {
     if (
       window.ScriptMM &&
@@ -1126,36 +1137,49 @@
     }
 
     state.mainBridgePromise = (async () => {
-      window.__ScriptMMExternalOnly = true;
-      try {
-        const url = `${MAIN_SCRIPT_REMOTE_URL}?ts=${Date.now()}`;
+      const errors = [];
+      for (const remoteUrl of MAIN_SCRIPT_REMOTE_URLS) {
+        const url = `${remoteUrl}?ts=${Date.now()}`;
         const response = await fetch(url, {
           credentials: "omit",
           cache: "no-store",
         });
         if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
+          errors.push(`${remoteUrl}: HTTP ${response.status}`);
+          continue;
         }
         let code = String(await response.text());
         code = code.replace(/^\s*javascript:\s*/i, "");
-        const script = document.createElement("script");
-        script.textContent = code;
-        document.documentElement.appendChild(script);
-        script.remove();
-        if (
-          !window.ScriptMM ||
-          typeof window.ScriptMM.renderSpotlightPlanPanel !== "function"
-        ) {
-          throw new Error("main.js загружен, но bridge не найден.");
+        if (!scriptCodeHasSpotlightBridge(code)) {
+          errors.push(`${remoteUrl}: bridge не найден в коде`);
+          continue;
         }
-        return window.ScriptMM;
-      } finally {
+        window.__ScriptMMExternalOnly = true;
         try {
-          delete window.__ScriptMMExternalOnly;
-        } catch (error) {
-          window.__ScriptMMExternalOnly = false;
+          const script = document.createElement("script");
+          script.textContent = code;
+          document.documentElement.appendChild(script);
+          script.remove();
+        } finally {
+          try {
+            delete window.__ScriptMMExternalOnly;
+          } catch (error) {
+            window.__ScriptMMExternalOnly = false;
+          }
         }
+        if (
+          window.ScriptMM &&
+          typeof window.ScriptMM.renderSpotlightPlanPanel === "function"
+        ) {
+          return window.ScriptMM;
+        }
+        errors.push(`${remoteUrl}: main.js исполнился, но bridge не зарегистрирован`);
       }
+      throw new Error(
+        errors.length
+          ? errors.join(" | ")
+          : "Не удалось найти bridge-версию main.js.",
+      );
     })();
 
     return state.mainBridgePromise.catch((error) => {
