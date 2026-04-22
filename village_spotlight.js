@@ -454,6 +454,30 @@
     return title || cleanText(fallbackVillage && fallbackVillage.name) || "?";
   };
 
+  const parseVillageOwnerName = (doc, fallbackVillage) => {
+    const rows = Array.from(
+      doc.querySelectorAll("#content_value table.vis tr, table.vis tr"),
+    );
+    for (const row of rows) {
+      const cells = Array.from(row.querySelectorAll("td"));
+      if (cells.length < 2) continue;
+      const label = cleanText(cells[0].textContent);
+      if (!/^(игрок|player)\s*:?\s*$/i.test(label)) continue;
+      const value = cleanText(cells[1].textContent);
+      if (value) return value;
+    }
+
+    const ownerLink = doc.querySelector(
+      '#content_value a[href*="screen=info_player"], a[href*="screen=info_player"]',
+    );
+    const ownerName = cleanText(ownerLink && ownerLink.textContent);
+    if (ownerName) return ownerName;
+    if (cleanText(fallbackVillage && fallbackVillage.playerId) === "0") {
+      return "Без владельца";
+    }
+    return "";
+  };
+
   const extractCommandIconsHtml = (commandCell) => {
     if (!commandCell) return "";
     const images = Array.from(
@@ -989,6 +1013,7 @@
     coord: cleanText(village && village.coord) || null,
     mapName: cleanText(village && village.name) || null,
     title: cleanText(village && village.name) || cleanText(village && village.coord) || "?",
+    ownerName: "",
     mapUrl:
       Number.isFinite(toInt(village && village.x)) &&
       Number.isFinite(toInt(village && village.y))
@@ -1450,7 +1475,7 @@
         : view.infoStatus === "loading" && !commands.length
           ? '<div class="svs-empty">Загружаю страницу деревни и список приказов...</div>'
           : commands.length
-            ? `<div class="svs-commands-wrap"><table class="svs-commands-table"><thead><tr><th>Приказ</th><th>Прибытие</th><th>Через</th><th>Войска</th><th>Срез/дефф</th><th>Атака/двор</th></tr></thead><tbody>${commands
+            ? `<div class="svs-commands-wrap"><table class="svs-commands-table"><thead><tr><th>Приказ</th><th>Прибытие</th><th>Через</th><th>Войска</th><th class="svs-actions-head">Расчет</th></tr></thead><tbody>${commands
                 .map((command) => {
                   const planState =
                     command && command.planState && typeof command.planState === "object"
@@ -1480,14 +1505,21 @@
                   const renderPlanButton = (action) => {
                     const disabled = !hasEta;
                     const isActive = activeAction === action;
-                    const buttonLabel = isActive ? "Скрыть" : "Показать";
+                    const buttonLabel =
+                      action === "slice" ? "Срез/дефф" : "Атака/двор";
+                    const title =
+                      action === "slice"
+                        ? "С учетом сигила"
+                        : "Без учета сигила";
                     return `<button class="svs-plan-btn${
                       isActive ? " is-active" : ""
                     }" type="button" data-svs-plan-action="${escapeHtml(
                       action,
                     )}" data-svs-command-key="${escapeHtml(
                       cleanText(command.key),
-                    )}"${disabled ? ' disabled title="Нет точного ETA"' : ""}>${escapeHtml(
+                    )}" title="${escapeHtml(
+                      disabled ? "Нет точного ETA" : title,
+                    )}"${disabled ? " disabled" : ""}>${escapeHtml(
                       buttonLabel,
                     )}</button>`;
                   };
@@ -1506,11 +1538,9 @@
                     command.commandId ? `id ${command.commandId}` : "id ?",
                   )}</div></div></div></td><td class="svs-arrival-cell">${escapeHtml(
                     command.arrivalText || "",
-                  )}</td><td class="svs-timer-cell">${timerHtml}</td><td class="svs-units-cell">${unitsCell}</td><td class="svs-plan-cell">${renderPlanButton(
+                  )}</td><td class="svs-timer-cell">${timerHtml}</td><td class="svs-units-cell">${unitsCell}</td><td class="svs-plan-cell svs-actions-cell"><div class="svs-plan-actions">${renderPlanButton(
                     "slice",
-                  )}</td><td class="svs-plan-cell">${renderPlanButton(
-                    "intercept",
-                  )}</td></tr>`;
+                  )}${renderPlanButton("intercept")}</div></td></tr>`;
 
                   if (!planState) {
                     return commandRowHtml;
@@ -1524,7 +1554,7 @@
                         )}</div>`
                       : '<div class="svs-plan-placeholder svs-plan-muted">Подключаю расчет...</div>';
 
-                  return `${commandRowHtml}<tr class="svs-plan-row"><td colspan="6" class="svs-plan-row-cell"><div id="${escapeHtml(
+                  return `${commandRowHtml}<tr class="svs-plan-row"><td colspan="5" class="svs-plan-row-cell"><div id="${escapeHtml(
                     slotId,
                   )}" class="svs-plan-slot" data-svs-plan-slot="${escapeHtml(
                     cleanText(command.key),
@@ -1549,9 +1579,11 @@
             view.mapUrl,
           )}" target="_blank" rel="noopener noreferrer">Показать на карте</a>`
         : ""
-    }</div><div class="svs-card-coord">${escapeHtml(
-      cleanText(view.coord),
-    )}</div></div><div class="svs-card-meta">${escapeHtml(commandsMeta)}</div></div><div class="svs-section-head"><div class="svs-section-title">Приказы в деревню</div>${
+    }</div>${
+      cleanText(view.ownerName)
+        ? `<div class="svs-card-owner">${escapeHtml(cleanText(view.ownerName))}</div>`
+        : ""
+    }</div><div class="svs-card-meta">${escapeHtml(commandsMeta)}</div></div><div class="svs-section-head"><div class="svs-section-title">Приказы в деревню</div>${
       view.infoUrl
         ? `<a class="svs-open-link" href="${escapeHtml(
             view.infoUrl,
@@ -1642,6 +1674,7 @@
       if (token !== state.searchToken) return;
 
       view.title = parseVillageTitle(doc, village);
+      view.ownerName = parseVillageOwnerName(doc, village);
       view.infoStatus = "loaded";
       view.commands = parseInfoVillageCommands(doc, village);
 
@@ -1893,14 +1926,14 @@
 #${ROOT_ID} .svs-sigil-error{color:#ffb1a6;border-color:rgba(255,157,145,.28);background:rgba(255,157,145,.08)}
 #${ROOT_ID} .svs-map-link{font-size:11px;color:#ffe2a9;text-decoration:none;border-bottom:1px dotted rgba(255,226,169,.45)}
 #${ROOT_ID} .svs-map-link:hover{color:#fff2d0;border-bottom-color:rgba(255,242,208,.95)}
-#${ROOT_ID} .svs-card-coord{margin-top:2px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#d0b88a}
+#${ROOT_ID} .svs-card-owner{margin-top:3px;font-size:12px;font-weight:600;color:#d7c29c}
 #${ROOT_ID} .svs-card-meta{font-size:11px;color:#d2bd96;white-space:nowrap}
 #${ROOT_ID} .svs-section-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:10px 0 6px}
 #${ROOT_ID} .svs-section-title{font-size:12px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:#f0c979}
 #${ROOT_ID} .svs-open-link{font-size:11px;color:#ffe2a9;text-decoration:underline}
 #${ROOT_ID} .svs-open-link:hover{color:#fff2d0}
-#${ROOT_ID} .svs-commands-wrap{border:1px solid rgba(236,201,130,.2);border-radius:12px;overflow:auto;background:rgba(255,248,231,.03)}
-#${ROOT_ID} .svs-commands-table{width:100%;border-collapse:separate;border-spacing:0;min-width:940px}
+#${ROOT_ID} .svs-commands-wrap{display:block;width:100%;max-width:100%;border:1px solid rgba(236,201,130,.2);border-radius:12px;overflow-x:auto;overflow-y:visible;background:rgba(255,248,231,.03);-webkit-overflow-scrolling:touch;touch-action:pan-x pan-y;overscroll-behavior:contain}
+#${ROOT_ID} .svs-commands-table{width:100%;border-collapse:separate;border-spacing:0;min-width:860px}
 #${ROOT_ID} .svs-commands-table th{position:sticky;top:0;padding:8px 10px;background:#f0dfbb;color:#4f320c;text-align:left;font-size:11px;letter-spacing:.05em;text-transform:uppercase;z-index:1}
 #${ROOT_ID} .svs-commands-table td{padding:7px 10px;border-top:1px solid rgba(236,201,130,.14);vertical-align:top;background:rgba(255,248,231,.015);font-size:12px;color:#f8ecd0}
 #${ROOT_ID} .svs-commands-table tbody tr:nth-child(even) td{background:rgba(255,248,231,.035)}
@@ -1916,8 +1949,13 @@
 #${ROOT_ID} .svs-arrival-cell{white-space:nowrap;min-width:160px}
 #${ROOT_ID} .svs-timer-cell{white-space:nowrap;min-width:92px;font-weight:700;color:#ffe3a4}
 #${ROOT_ID} .svs-units-cell{min-width:220px}
-#${ROOT_ID} .svs-plan-cell{white-space:nowrap;min-width:92px;text-align:center}
-#${ROOT_ID} .svs-plan-btn{min-width:74px;border:1px solid rgba(236,201,130,.34);border-radius:8px;padding:4px 9px;background:rgba(255,248,231,.06);color:#fff0cf;font-size:11px;font-weight:700;cursor:pointer}
+#${ROOT_ID} .svs-plan-cell{white-space:nowrap;min-width:178px;text-align:center}
+#${ROOT_ID} .svs-actions-head{position:sticky;right:0;z-index:3;box-shadow:-10px 0 16px rgba(19,14,10,.08)}
+#${ROOT_ID} .svs-actions-cell{position:sticky;right:0;z-index:2;box-shadow:-10px 0 16px rgba(19,14,10,.16)}
+#${ROOT_ID} .svs-commands-table tbody tr:nth-child(odd) .svs-actions-cell{background:rgba(36,29,20,.96)}
+#${ROOT_ID} .svs-commands-table tbody tr:nth-child(even) .svs-actions-cell{background:rgba(43,34,24,.98)}
+#${ROOT_ID} .svs-plan-actions{display:flex;align-items:center;justify-content:flex-end;gap:6px}
+#${ROOT_ID} .svs-plan-btn{min-width:82px;border:1px solid rgba(236,201,130,.34);border-radius:8px;padding:4px 8px;background:rgba(255,248,231,.06);color:#fff0cf;font-size:11px;font-weight:700;cursor:pointer}
 #${ROOT_ID} .svs-plan-btn:hover:not(:disabled){background:rgba(255,248,231,.11);border-color:rgba(255,226,169,.6)}
 #${ROOT_ID} .svs-plan-btn.is-active{background:rgba(240,201,121,.14);border-color:rgba(240,201,121,.62);color:#ffe2a9}
 #${ROOT_ID} .svs-plan-btn:disabled{opacity:.45;cursor:not-allowed}
