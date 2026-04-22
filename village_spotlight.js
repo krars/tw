@@ -5,7 +5,7 @@
   const STYLE_ID = "scriptmm-village-spotlight-style";
   const ROOT_ID = "scriptmm-village-spotlight-root";
   const LOAD_ENDPOINT = "/map/village.txt";
-  const GAME_REQUEST_MIN_INTERVAL_MS = 4000;
+  const GAME_REQUEST_MIN_INTERVAL_MS = 250;
   const COMMAND_CACHE_TTL_MS = 30 * 60 * 1000;
   const UNIT_ORDER = [
     "spear",
@@ -699,7 +699,7 @@
     view.infoUrl = infoUrl;
 
     setStatus(
-      `Запрашиваю info_village для ${cleanText(village && village.coord)}. Интервал: 4 сек.`,
+      `Запрашиваю info_village для ${cleanText(village && village.coord)}. Лимит: до 4 запросов в секунду.`,
       "muted",
     );
 
@@ -741,7 +741,7 @@
         );
       } else {
         setStatus(
-          `Приказы загружены: ${view.commands.length}. Догружаю войска по одному запросу раз в 4 сек.`,
+          `Приказы загружены: ${view.commands.length}. Догружаю войска с лимитом до 4 запросов в секунду.`,
           "muted",
         );
       }
@@ -771,7 +771,7 @@
 
         markCommandResult(view, index, { unitsStatus: "loading" });
         setStatus(
-          `Догружаю войска ${index + 1}/${view.commands.length}. Следующие запросы идут с шагом 4 сек.`,
+          `Догружаю войска ${index + 1}/${view.commands.length}. Лимит очереди: до 4 запросов в секунду.`,
           "muted",
         );
 
