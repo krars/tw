@@ -10,6 +10,7 @@ var millisReference,
 	targetVillageHref,
 	targetFrameWrapper,
 	targetFrameEl,
+	floatingLampEl,
 	uiResizeBound = false,
 	frameResizeBound = false,
 	first = true,
@@ -65,6 +66,7 @@ function applyResponsiveLayout(){
 		canvasWrap = $('#millis_canvas_wrap')[0],
 		second = $('#second_display')[0],
 		lamp = $('#window_lamp')[0],
+		floatingLamp = $('#window_lamp_floating')[0],
 		practiceBtn = $('#practice_button')[0],
 		viewBtn = $('#view_target_button')[0];
 
@@ -94,10 +96,14 @@ function applyResponsiveLayout(){
 		lamp.style.width = compact ? '16px' : '18px';
 		lamp.style.height = compact ? '16px' : '18px';
 		lamp.style.top = compact ? '3px' : '6px';
-		lamp.style.right = compact ? '3px' : '6px';
+		lamp.style.left = compact ? '3px' : '6px';
+		lamp.style.right = 'auto';
 		lamp.style.border = '2px solid #2a2a2a';
 		lamp.style.zIndex = '30';
 		lamp.style.display = 'block';
+	}
+	if(floatingLamp){
+		floatingLamp.style.display = compact ? 'block' : 'none';
 	}
 
 	if(practiceBtn){
@@ -107,11 +113,11 @@ function applyResponsiveLayout(){
 	}
 
 	if(targetWindowStartInput){
-		targetWindowStartInput.style.width = compact ? '102px' : '118px';
+		targetWindowStartInput.style.width = compact ? '86px' : '118px';
 		targetWindowStartInput.style.fontSize = compact ? '12px' : '';
 	}
 	if(targetWindowEndInput){
-		targetWindowEndInput.style.width = compact ? '102px' : '118px';
+		targetWindowEndInput.style.width = compact ? '86px' : '118px';
 		targetWindowEndInput.style.fontSize = compact ? '12px' : '';
 	}
 
@@ -244,7 +250,7 @@ function addTimer(){
 		secondDisplay.setAttributeNode(secondId);
 		secondDisplay.setAttributeNode(secondStyle);
 		windowLampId.value = 'window_lamp';
-		windowLampStyle.value = 'position:absolute;top:6px;right:6px;width:18px;height:18px;border:2px solid #2a2a2a;border-radius:50%;background:'+WINDOW_LAMP_OFF+';box-shadow:0 0 3px rgba(0,0,0,0.9);z-index:30;display:block;';
+		windowLampStyle.value = 'position:absolute;top:6px;left:6px;width:18px;height:18px;border:2px solid #2a2a2a;border-radius:50%;background:'+WINDOW_LAMP_OFF+';box-shadow:0 0 3px rgba(0,0,0,0.9);z-index:30;display:block;';
 		windowLampTitle.value = 'Индикатор целевого окна';
 		windowLamp.setAttributeNode(windowLampId);
 		windowLamp.setAttributeNode(windowLampStyle);
@@ -360,6 +366,7 @@ function addTimer(){
 		lastRow.appendChild(offsetTd);
 		lastRow.appendChild(missTd);
 		$('#ds_body')[0].setAttribute('onsubmit', 'practiceFunction()');
+		ensureFloatingLamp();
 		applyResponsiveLayout();
 		if(!uiResizeBound){
 			window.addEventListener('resize', applyResponsiveLayout);
@@ -540,9 +547,18 @@ function formatTargetWindowTime(msOfDay){
 function getCurrentServerClockMsOfDay(){
 	var serverTimeEl = document.getElementById('serverTime'),
 		match = serverTimeEl ? String(serverTimeEl.textContent || '').match(/(\d{1,2}):(\d{1,2}):(\d{1,2})/) : null,
-		serverNowMs = Math.floor(getCurrentReferenceTimeMs()),
-		millis = normalizeMsOfDay(serverNowMs) % 1000,
+		serverNowMs = Number(getCurrentReferenceTimeMs()),
+		millis,
 		d;
+
+	if(!isFinite(serverNowMs)){
+		serverNowMs = Date.now();
+	}
+	serverNowMs = Math.floor(serverNowMs);
+	millis = normalizeMsOfDay(serverNowMs) % 1000;
+	if(!isFinite(millis)){
+		millis = 0;
+	}
 
 	if(match){
 		return normalizeMsOfDay(
@@ -574,9 +590,9 @@ function parseTimeOfDayInput(rawValue){
 		return NaN;
 	}
 
-	match = value.match(/^(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?(?::(\d{1,3}))?$/);
+	match = value.match(/^(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?(?:[:.](\d{1,3}))?$/);
 	if(!match){
-		match = value.match(/(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?(?::(\d{1,3}))?$/);
+		match = value.match(/(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?(?:[:.](\d{1,3}))?$/);
 	}
 	if(!match){
 		return NaN;
@@ -803,29 +819,40 @@ function parseTargetWindowValue(rawValue){
 
 function updateWindowLamp(){
 	var lamp = $('#window_lamp')[0],
+		floatingLamp = $('#window_lamp_floating')[0],
 		nowMsOfDay = getCurrentServerClockMsOfDay(),
 		startMsOfDay = parseTargetWindowValue(targetWindowStartInput ? targetWindowStartInput.value : ''),
 		endMsOfDay = parseTargetWindowValue(targetWindowEndInput ? targetWindowEndInput.value : ''),
 		isActive,
-		isPreActive;
+		isPreActive,
+		lamps = [],
+		i;
 
-	if(!lamp){
+	if(lamp){
+		lamps.push(lamp);
+	}
+	if(floatingLamp){
+		lamps.push(floatingLamp);
+	}
+	if(!lamps.length){
 		return;
 	}
 
 	isActive = isTimeInWindow(nowMsOfDay, startMsOfDay, endMsOfDay);
 	isPreActive = !isActive && !isNaN(endMsOfDay) && isTimeInPreWindow(nowMsOfDay, startMsOfDay);
-	if(isActive){
-		lamp.style.background = WINDOW_LAMP_ON;
-		lamp.style.boxShadow = '0 0 8px '+WINDOW_LAMP_ON+', 0 0 2px rgba(0,0,0,0.8)';
-	}
-	else if(isPreActive){
-		lamp.style.background = WINDOW_LAMP_PRE;
-		lamp.style.boxShadow = '0 0 8px '+WINDOW_LAMP_PRE+', 0 0 2px rgba(0,0,0,0.8)';
-	}
-	else{
-		lamp.style.background = WINDOW_LAMP_OFF;
-		lamp.style.boxShadow = '0 0 2px rgba(0,0,0,0.8)';
+	for(i = 0; i < lamps.length; i++){
+		if(isActive){
+			lamps[i].style.background = WINDOW_LAMP_ON;
+			lamps[i].style.boxShadow = '0 0 8px '+WINDOW_LAMP_ON+', 0 0 2px rgba(0,0,0,0.8)';
+		}
+		else if(isPreActive){
+			lamps[i].style.background = WINDOW_LAMP_PRE;
+			lamps[i].style.boxShadow = '0 0 8px '+WINDOW_LAMP_PRE+', 0 0 2px rgba(0,0,0,0.8)';
+		}
+		else{
+			lamps[i].style.background = WINDOW_LAMP_OFF;
+			lamps[i].style.boxShadow = '0 0 2px rgba(0,0,0,0.8)';
+		}
 	}
 }
 
@@ -895,6 +922,28 @@ function updateTargetFrameLayout(){
 		targetFrameWrapper.style.width = '520px';
 		targetFrameWrapper.style.height = desktopHeight + 'px';
 	}
+}
+
+function ensureFloatingLamp(){
+	if(document.getElementById('window_lamp_floating')){
+		floatingLampEl = document.getElementById('window_lamp_floating');
+		return;
+	}
+	floatingLampEl = document.createElement('DIV');
+	floatingLampEl.id = 'window_lamp_floating';
+	floatingLampEl.title = 'Индикатор целевого окна';
+	floatingLampEl.style.position = 'fixed';
+	floatingLampEl.style.left = '8px';
+	floatingLampEl.style.bottom = '10px';
+	floatingLampEl.style.width = '20px';
+	floatingLampEl.style.height = '20px';
+	floatingLampEl.style.border = '2px solid #2a2a2a';
+	floatingLampEl.style.borderRadius = '50%';
+	floatingLampEl.style.background = WINDOW_LAMP_OFF;
+	floatingLampEl.style.boxShadow = '0 0 3px rgba(0,0,0,0.9)';
+	floatingLampEl.style.zIndex = '12000';
+	floatingLampEl.style.display = 'none';
+	document.body.appendChild(floatingLampEl);
 }
 
 function scrollTargetFrameToThirtyPercent(){
