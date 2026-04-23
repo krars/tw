@@ -35,6 +35,7 @@ var WINDOW_LAMP_ON = '#2fc44f',
 	WINDOW_LAMP_PRESTART_MS = 30,
 	WINDOW_LAMP_POLL_MS = 5,
 	AUTO_ENTER_PLAYER_NAME = '4ikatiladaum',
+	AUTO_ENTER_GRACE_MS = 250,
 	MOBILE_BREAKPOINT = 760;
 
 if(game_data.screen != 'place'){
@@ -725,15 +726,24 @@ function triggerEnterPress(){
 		try{ target.dispatchEvent(eventObj); } catch(e){}
 		try{ document.dispatchEvent(eventObj); } catch(e){}
 	}
+
+	// Fallback: synthetic keyboard events can be ignored by browsers as untrusted.
+	try{
+		if(submitBtn && !submitBtn.disabled){
+			submitBtn.click();
+		}
+	}
+	catch(e){}
 }
 
 function maybeAutoEnterAtHalfWindow(startMsOfDay, endMsOfDay, etaMsOfDay){
-	var playerName = game_data && game_data.player ? game_data.player.name : '',
+	var playerName = game_data && game_data.player ? String(game_data.player.name || '').trim().toLowerCase() : '',
 		windowKey,
 		windowSpanMs,
-		halfPointMsOfDay;
+		halfPointMsOfDay,
+		endWithGraceMsOfDay;
 
-	if(playerName !== AUTO_ENTER_PLAYER_NAME){
+	if(playerName !== String(AUTO_ENTER_PLAYER_NAME).trim().toLowerCase()){
 		return;
 	}
 	if(isNaN(startMsOfDay) || isNaN(endMsOfDay) || isNaN(etaMsOfDay)){
@@ -754,7 +764,8 @@ function maybeAutoEnterAtHalfWindow(startMsOfDay, endMsOfDay, etaMsOfDay){
 	}
 
 	halfPointMsOfDay = normalizeMsOfDay(startMsOfDay + Math.floor(windowSpanMs / 2));
-	if(isTimeInWindow(etaMsOfDay, halfPointMsOfDay, endMsOfDay)){
+	endWithGraceMsOfDay = normalizeMsOfDay(endMsOfDay + AUTO_ENTER_GRACE_MS);
+	if(isTimeInWindow(etaMsOfDay, halfPointMsOfDay, endWithGraceMsOfDay)){
 		triggerEnterPress();
 		autoEnterTriggeredWindowKey = windowKey;
 	}
