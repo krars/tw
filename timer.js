@@ -32,7 +32,7 @@ var WINDOW_LAMP_ON = '#2fc44f',
 	TARGET_WINDOW_CLIPBOARD_MAX_AHEAD_MS = 5 * 60 * 1000,
 	DAY_MS = 24 * 60 * 60 * 1000,
 	WINDOW_LAMP_PRESTART_MS = 30,
-	WINDOW_LAMP_POLL_MS = 20,
+	WINDOW_LAMP_POLL_MS = 5,
 	MOBILE_BREAKPOINT = 760;
 
 if(game_data.screen != 'place'){
@@ -67,8 +67,10 @@ function applyResponsiveLayout(){
 		second = $('#second_display')[0],
 		lamp = $('#window_lamp')[0],
 		floatingLamp = $('#window_lamp_floating')[0],
+		submitBtn = $('#troop_confirm_submit')[0],
 		practiceBtn = $('#practice_button')[0],
-		viewBtn = $('#view_target_button')[0];
+		viewBtn = $('#view_target_button')[0],
+		actionRow = $('#target_action_row')[0];
 
 	if(CANVAS_SIZE !== targetSize){
 		setCanvasMetrics(targetSize);
@@ -122,18 +124,34 @@ function applyResponsiveLayout(){
 	}
 
 	if(viewBtn){
-		if(compact){
-			viewBtn.style.display = 'block';
-			viewBtn.style.width = '100%';
-			viewBtn.style.marginLeft = '0';
-			viewBtn.style.marginTop = '6px';
-		}
-		else{
-			viewBtn.style.display = 'inline-block';
-			viewBtn.style.width = '';
-			viewBtn.style.marginLeft = '6px';
-			viewBtn.style.marginTop = '0';
-		}
+		viewBtn.style.display = 'inline-block';
+		viewBtn.style.width = 'auto';
+		viewBtn.style.margin = '0';
+		viewBtn.style.whiteSpace = 'nowrap';
+		viewBtn.style.fontSize = compact ? '12px' : '';
+		viewBtn.style.padding = compact ? '4px 8px' : '';
+	}
+	if(submitBtn){
+		submitBtn.style.whiteSpace = 'nowrap';
+		submitBtn.style.margin = '0';
+		submitBtn.style.fontSize = compact ? '13px' : '';
+		submitBtn.style.padding = compact ? '4px 10px' : '';
+		submitBtn.style.setProperty('width', 'auto', 'important');
+	}
+	if(actionRow){
+		actionRow.style.display = 'flex';
+		actionRow.style.flexWrap = 'nowrap';
+		actionRow.style.alignItems = 'center';
+		actionRow.style.maxWidth = '100%';
+		actionRow.style.boxSizing = 'border-box';
+		actionRow.style.gap = compact ? '14px' : '18px';
+		actionRow.style.margin = compact ? '6px 0 4px 0' : '6px 0 5px 0';
+	}
+	if(compact && submitBtn){
+		submitBtn.style.flex = '1 1 auto';
+	}
+	else if(submitBtn){
+		submitBtn.style.flex = '0 0 auto';
 	}
 
 	updateTargetFrameLayout();
@@ -616,11 +634,13 @@ function parseTimeOfDayInput(rawValue){
 }
 
 function getCurrentArrivalClockMsOfDay(){
-	var rel = $('.relative_time')[0],
+	var rel = $('#date_arrival .relative_time')[0] || $('.relative_time')[0],
 		text = rel ? String(rel.textContent || rel.innerText || '').trim() : '',
 		parsed = parseTimeOfDayInput(text),
 		hasMs = /[:.]\d{1,3}\s*$/.test(text),
-		serverMs;
+		serverMs,
+		dateArrivalText,
+		parsedFromCell;
 
 	if(!isNaN(parsed)){
 		if(hasMs){
@@ -628,6 +648,13 @@ function getCurrentArrivalClockMsOfDay(){
 		}
 		serverMs = getCurrentServerClockMsOfDay() % 1000;
 		return normalizeMsOfDay(Math.floor(parsed / 1000) * 1000 + serverMs);
+	}
+
+	dateArrivalText = $('#date_arrival').text();
+	parsedFromCell = parseTimeOfDayInput(dateArrivalText);
+	if(!isNaN(parsedFromCell)){
+		serverMs = getCurrentServerClockMsOfDay() % 1000;
+		return normalizeMsOfDay(Math.floor(parsedFromCell / 1000) * 1000 + serverMs);
 	}
 
 	return getCurrentServerClockMsOfDay();
@@ -844,7 +871,8 @@ function updateWindowLamp(){
 		isActive,
 		isPreActive,
 		lamps = [],
-		i;
+		i,
+		debugTitle;
 
 	if(lamp){
 		lamps.push(lamp);
@@ -858,7 +886,9 @@ function updateWindowLamp(){
 
 	isActive = isTimeInWindow(nowMsOfDay, startMsOfDay, endMsOfDay);
 	isPreActive = !isActive && !isNaN(endMsOfDay) && isTimeInPreWindow(nowMsOfDay, startMsOfDay);
+	debugTitle = 'arr:' + formatTargetWindowTime(nowMsOfDay) + ' | start:' + (isNaN(startMsOfDay) ? 'NaN' : formatTargetWindowTime(startMsOfDay)) + ' | end:' + (isNaN(endMsOfDay) ? 'NaN' : formatTargetWindowTime(endMsOfDay)) + ' | state:' + (isActive ? 'green' : (isPreActive ? 'yellow' : 'off'));
 	for(i = 0; i < lamps.length; i++){
+		lamps[i].title = debugTitle;
 		if(isActive){
 			lamps[i].style.background = WINDOW_LAMP_ON;
 			lamps[i].style.boxShadow = '0 0 8px '+WINDOW_LAMP_ON+', 0 0 2px rgba(0,0,0,0.8)';
@@ -1069,7 +1099,9 @@ function openTargetFrame(){
 
 function addViewTargetButton(){
 	var submitBtn = $('#troop_confirm_submit')[0],
-		viewBtn;
+		viewBtn,
+		buttonRow,
+		parentNode;
 
 	if(!submitBtn || $('#view_target_button').length){
 		return;
@@ -1079,11 +1111,20 @@ function addViewTargetButton(){
 	viewBtn.type = 'button';
 	viewBtn.id = 'view_target_button';
 	viewBtn.className = 'btn';
-	viewBtn.style.marginLeft = '6px';
+	viewBtn.style.marginLeft = '0';
 	viewBtn.innerHTML = 'Смотреть цель';
 	viewBtn.addEventListener('click', openTargetFrame);
 
-	submitBtn.parentNode.insertBefore(viewBtn, submitBtn.nextSibling);
+	buttonRow = $('#target_action_row')[0];
+	if(!buttonRow){
+		buttonRow = document.createElement('DIV');
+		buttonRow.id = 'target_action_row';
+		parentNode = submitBtn.parentNode;
+		parentNode.insertBefore(buttonRow, submitBtn);
+		buttonRow.appendChild(submitBtn);
+	}
+	buttonRow.appendChild(viewBtn);
+
 	applyResponsiveLayout();
 }
 
