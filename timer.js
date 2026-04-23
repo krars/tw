@@ -23,10 +23,12 @@ var CANVAS_SIZE = 150,
 	CIRCLE_OFFSET = -Math.PI / 2;
 
 var WINDOW_LAMP_ON = '#2fc44f',
+	WINDOW_LAMP_PRE = '#f0c419',
 	WINDOW_LAMP_OFF = '#8a8a8a',
 	TARGET_WINDOW_DEFAULT_SHIFT_MS = 15000,
 	TARGET_WINDOW_DEFAULT_SPAN_MS = 100,
 	TARGET_WINDOW_CENTER_HALF_SPAN_MS = 50,
+	WINDOW_LAMP_PRESTART_MS = 30,
 	WINDOW_LAMP_POLL_MS = 20,
 	MOBILE_BREAKPOINT = 760;
 
@@ -698,20 +700,24 @@ function saveTargetWindowInputs(){
 function parseTargetWindowValue(rawValue){
 	var value = String(rawValue || '').trim(),
 		parsed,
-		match;
+		match,
+		now,
+		baseDate;
 
 	if(!value){
 		return NaN;
 	}
 
-	parsed = Date.parse(value);
-	if(!isNaN(parsed)){
-		return parsed;
-	}
-
 	match = value.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?(?::(\d{1,3}))?$/);
 	if(match){
-		parsed = new Date(
+		if(
+			Number(match[2]) < 1 || Number(match[2]) > 12 ||
+			Number(match[1]) < 1 || Number(match[1]) > 31 ||
+			Number(match[4]) > 23 || Number(match[5]) > 59 || Number(match[6] || 0) > 59 || Number(match[7] || 0) > 999
+		){
+			return NaN;
+		}
+		return new Date(
 			Number(match[3]),
 			Number(match[2]) - 1,
 			Number(match[1]),
@@ -720,12 +726,59 @@ function parseTargetWindowValue(rawValue){
 			Number(match[6] || 0),
 			Number(match[7] || 0)
 		).getTime();
-		return parsed;
+	}
+
+	match = value.match(/^(\d{4})\.(\d{1,2})\.(\d{1,2})\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?(?::(\d{1,3}))?$/);
+	if(match){
+		if(
+			Number(match[2]) < 1 || Number(match[2]) > 12 ||
+			Number(match[3]) < 1 || Number(match[3]) > 31 ||
+			Number(match[4]) > 23 || Number(match[5]) > 59 || Number(match[6] || 0) > 59 || Number(match[7] || 0) > 999
+		){
+			return NaN;
+		}
+		return new Date(
+			Number(match[1]),
+			Number(match[2]) - 1,
+			Number(match[3]),
+			Number(match[4]),
+			Number(match[5]),
+			Number(match[6] || 0),
+			Number(match[7] || 0)
+		).getTime();
+	}
+
+	match = value.match(/^(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?(?::(\d{1,3}))?$/);
+	if(match){
+		if(
+			Number(match[1]) > 23 || Number(match[2]) > 59 ||
+			Number(match[3] || 0) > 59 || Number(match[4] || 0) > 999
+		){
+			return NaN;
+		}
+		now = new Date(getCurrentReferenceTimeMs());
+		baseDate = new Date(
+			now.getFullYear(),
+			now.getMonth(),
+			now.getDate(),
+			Number(match[1]),
+			Number(match[2]),
+			Number(match[3] || 0),
+			Number(match[4] || 0)
+		);
+		return baseDate.getTime();
 	}
 
 	match = value.match(/^(\d{4})-(\d{1,2})-(\d{1,2})[T\s](\d{1,2}):(\d{1,2}):(\d{1,2})(?:[.:](\d{1,3}))?$/);
 	if(match){
-		parsed = new Date(
+		if(
+			Number(match[2]) < 1 || Number(match[2]) > 12 ||
+			Number(match[3]) < 1 || Number(match[3]) > 31 ||
+			Number(match[4]) > 23 || Number(match[5]) > 59 || Number(match[6]) > 59 || Number(match[7] || 0) > 999
+		){
+			return NaN;
+		}
+		return new Date(
 			Number(match[1]),
 			Number(match[2]) - 1,
 			Number(match[3]),
@@ -734,6 +787,10 @@ function parseTargetWindowValue(rawValue){
 			Number(match[6]),
 			Number(match[7] || 0)
 		).getTime();
+	}
+
+	parsed = Date.parse(value);
+	if(!isNaN(parsed)){
 		return parsed;
 	}
 
@@ -742,18 +799,37 @@ function parseTargetWindowValue(rawValue){
 
 function updateWindowLamp(){
 	var lamp = $('#window_lamp')[0],
-		now = getCurrentReferenceTimeMs(),
+		now = Math.floor(getCurrentReferenceTimeMs()),
 		startMs = parseTargetWindowValue(targetWindowStartInput ? targetWindowStartInput.value : ''),
 		endMs = parseTargetWindowValue(targetWindowEndInput ? targetWindowEndInput.value : ''),
-		isActive;
+		isActive,
+		isPreActive,
+		tmp;
 
 	if(!lamp){
 		return;
 	}
 
+	if(!isNaN(startMs) && !isNaN(endMs) && endMs < startMs){
+		tmp = startMs;
+		startMs = endMs;
+		endMs = tmp;
+	}
+
 	isActive = !isNaN(startMs) && !isNaN(endMs) && endMs >= startMs && now >= startMs && now <= endMs;
-	lamp.style.background = isActive ? WINDOW_LAMP_ON : WINDOW_LAMP_OFF;
-	lamp.style.boxShadow = isActive ? '0 0 8px '+WINDOW_LAMP_ON+', 0 0 2px rgba(0,0,0,0.8)' : '0 0 2px rgba(0,0,0,0.8)';
+	isPreActive = !isActive && !isNaN(startMs) && !isNaN(endMs) && endMs >= startMs && now >= (startMs - WINDOW_LAMP_PRESTART_MS) && now < startMs;
+	if(isActive){
+		lamp.style.background = WINDOW_LAMP_ON;
+		lamp.style.boxShadow = '0 0 8px '+WINDOW_LAMP_ON+', 0 0 2px rgba(0,0,0,0.8)';
+	}
+	else if(isPreActive){
+		lamp.style.background = WINDOW_LAMP_PRE;
+		lamp.style.boxShadow = '0 0 8px '+WINDOW_LAMP_PRE+', 0 0 2px rgba(0,0,0,0.8)';
+	}
+	else{
+		lamp.style.background = WINDOW_LAMP_OFF;
+		lamp.style.boxShadow = '0 0 2px rgba(0,0,0,0.8)';
+	}
 }
 
 function toAbsoluteUrl(href){
