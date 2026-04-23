@@ -23,7 +23,8 @@ var CANVAS_SIZE = 150,
 var WINDOW_LAMP_ON = '#2fc44f',
 	WINDOW_LAMP_OFF = '#8a8a8a',
 	TARGET_WINDOW_START_KEY = worldNr + '_targetWindowStart',
-	TARGET_WINDOW_END_KEY = worldNr + '_targetWindowEnd';
+	TARGET_WINDOW_END_KEY = worldNr + '_targetWindowEnd',
+	TARGET_WINDOW_DEFAULT_SPAN_MS = 15000;
 
 if(game_data.screen != 'place'){
 	alert("This script must be run from the rally point.\nRunning during command execution will add millisecond assist.\nRunning after command excecution will show you by how many milliseconds you missed the target.");
@@ -371,6 +372,78 @@ function findInfoRow(tableBody, labelRegex){
 	return null;
 }
 
+function getCurrentReferenceTimeMs(){
+	var serverNow;
+	try{
+		if(typeof Timing !== 'undefined' && Timing && typeof Timing.getCurrentServerTime === 'function'){
+			serverNow = Number(Timing.getCurrentServerTime());
+			if(!isNaN(serverNow) && isFinite(serverNow) && serverNow > 0){
+				return serverNow;
+			}
+		}
+	}
+	catch(e){}
+	return Date.now();
+}
+
+function parseDurationToMs(text){
+	var parts = String(text || '').match(/\d+/g),
+		nums;
+	if(!parts || !parts.length){
+		return NaN;
+	}
+	nums = parts.map(function(v){ return Number(v); });
+	if(nums.length === 3){
+		return ((nums[0] * 60 + nums[1]) * 60 + nums[2]) * 1000;
+	}
+	if(nums.length === 4){
+		return ((((nums[0] * 24 + nums[1]) * 60 + nums[2]) * 60) + nums[3]) * 1000;
+	}
+	if(nums.length === 2){
+		return (nums[0] * 60 + nums[1]) * 1000;
+	}
+	return NaN;
+}
+
+function pad2(n){
+	return String(n).padStart(2, '0');
+}
+
+function pad3(n){
+	return String(n).padStart(3, '0');
+}
+
+function formatTargetWindowDate(dateObj){
+	return pad2(dateObj.getDate()) + '.' +
+		pad2(dateObj.getMonth() + 1) + '.' +
+		dateObj.getFullYear() + ' ' +
+		pad2(dateObj.getHours()) + ':' +
+		pad2(dateObj.getMinutes()) + ':' +
+		pad2(dateObj.getSeconds()) + ':' +
+		pad3(dateObj.getMilliseconds());
+}
+
+function buildDefaultWindowValues(tableBody){
+	var durationRow = findInfoRow(tableBody, /длительн|duration/i),
+		durationText = durationRow && durationRow.children && durationRow.children[1] ? durationRow.children[1].textContent : '',
+		durationMs = parseDurationToMs(durationText),
+		nowMs = getCurrentReferenceTimeMs(),
+		startMs,
+		endMs;
+
+	if(isNaN(durationMs) || durationMs < 0){
+		durationMs = 0;
+	}
+
+	startMs = nowMs + durationMs;
+	endMs = startMs + TARGET_WINDOW_DEFAULT_SPAN_MS;
+
+	return {
+		start: formatTargetWindowDate(new Date(startMs)),
+		end: formatTargetWindowDate(new Date(endMs))
+	};
+}
+
 function insertTargetWindowRow(tableBody){
 	if($('#target_window_row').length){
 		targetWindowStartInput = $('#target_window_start')[0];
@@ -387,24 +460,32 @@ function insertTargetWindowRow(tableBody){
 		endInput = document.createElement('INPUT'),
 		separator = document.createElement('SPAN'),
 		storedStart = localStorage.getItem(TARGET_WINDOW_START_KEY) || '',
-		storedEnd = localStorage.getItem(TARGET_WINDOW_END_KEY) || '';
+		storedEnd = localStorage.getItem(TARGET_WINDOW_END_KEY) || '',
+		defaultValues = buildDefaultWindowValues(tableBody);
+
+	if(!storedStart){
+		storedStart = defaultValues.start;
+	}
+	if(!storedEnd){
+		storedEnd = defaultValues.end;
+	}
 
 	windowRow.id = 'target_window_row';
 	labelTd.innerHTML = 'Целевое время:';
 
-	startInput.type = 'datetime-local';
+	startInput.type = 'text';
 	startInput.id = 'target_window_start';
-	startInput.step = '1';
-	startInput.style.width = '170px';
+	startInput.style.width = '190px';
+	startInput.title = 'Формат: дд.мм.гггг чч:мм:сс:мс';
 	startInput.value = storedStart;
 
 	separator.innerHTML = ' — ';
 	separator.style.margin = '0 4px';
 
-	endInput.type = 'datetime-local';
+	endInput.type = 'text';
 	endInput.id = 'target_window_end';
-	endInput.step = '1';
-	endInput.style.width = '170px';
+	endInput.style.width = '190px';
+	endInput.title = 'Формат: дд.мм.гггг чч:мм:сс:мс';
 	endInput.value = storedEnd;
 
 	startInput.addEventListener('change', saveTargetWindowInputs);
@@ -464,7 +545,7 @@ function parseTargetWindowValue(rawValue){
 		return parsed;
 	}
 
-	match = value.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?$/);
+	match = value.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?(?::(\d{1,3}))?$/);
 	if(match){
 		parsed = new Date(
 			Number(match[3]),
@@ -472,7 +553,22 @@ function parseTargetWindowValue(rawValue){
 			Number(match[1]),
 			Number(match[4]),
 			Number(match[5]),
-			Number(match[6] || 0)
+			Number(match[6] || 0),
+			Number(match[7] || 0)
+		).getTime();
+		return parsed;
+	}
+
+	match = value.match(/^(\d{4})-(\d{1,2})-(\d{1,2})[T\s](\d{1,2}):(\d{1,2}):(\d{1,2})(?:[.:](\d{1,3}))?$/);
+	if(match){
+		parsed = new Date(
+			Number(match[1]),
+			Number(match[2]) - 1,
+			Number(match[3]),
+			Number(match[4]),
+			Number(match[5]),
+			Number(match[6]),
+			Number(match[7] || 0)
 		).getTime();
 		return parsed;
 	}
@@ -482,7 +578,7 @@ function parseTargetWindowValue(rawValue){
 
 function updateWindowLamp(){
 	var lamp = $('#window_lamp')[0],
-		now = Date.now(),
+		now = getCurrentReferenceTimeMs(),
 		startMs = parseTargetWindowValue(targetWindowStartInput ? targetWindowStartInput.value : ''),
 		endMs = parseTargetWindowValue(targetWindowEndInput ? targetWindowEndInput.value : ''),
 		isActive;
