@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.18";
+  const VERSION = "0.10.19";
   const LOG_PREFIX = "[ScriptMM]";
   const MULTI_TAB_PRESENCE_KEY = "scriptmm.active_instances.v1";
   const MULTI_TAB_HEARTBEAT_INTERVAL_MS = 3000;
@@ -2199,6 +2199,42 @@
     return match ? match[1] : null;
   };
 
+  const parseServerClockDomParts = () => {
+    const dateText = cleanText(
+      safe(() => document.querySelector("#serverDate").textContent, null),
+    );
+    const timeText = cleanText(
+      safe(() => document.querySelector("#serverTime").textContent, null),
+    );
+    const dateParts = dateText ? dateText.match(/\d+/g) : null;
+    const timeParts = timeText ? timeText.match(/\d+/g) : null;
+    if (
+      !dateParts ||
+      dateParts.length < 3 ||
+      !timeParts ||
+      timeParts.length < 2
+    ) {
+      return null;
+    }
+    const day = Number(dateParts[0]);
+    const month = Number(dateParts[1]);
+    const year = Number(dateParts[2]);
+    const hour = Number(timeParts[0]);
+    const minute = Number(timeParts[1]);
+    const second = Number(timeParts[2] || 0);
+    if (
+      !Number.isFinite(day) ||
+      !Number.isFinite(month) ||
+      !Number.isFinite(year) ||
+      !Number.isFinite(hour) ||
+      !Number.isFinite(minute) ||
+      !Number.isFinite(second)
+    ) {
+      return null;
+    }
+    return { year, month, day, hour, minute, second };
+  };
+
   const buildServerEpochMs = (
     year,
     month,
@@ -2226,7 +2262,8 @@
     ) {
       return null;
     }
-    const epochMs = Date.UTC(y, m - 1, d, hh, mm, ss, ms);
+    const epochMs =
+      Date.UTC(y, m - 1, d, hh, mm, ss, ms) - getServerUtcOffsetMs();
     return Number.isFinite(epochMs) ? epochMs : null;
   };
 
@@ -2268,6 +2305,104 @@
     return null;
   };
 
+  let cachedServerUtcOffsetMs = null;
+
+  const resolveApproximateServerNowMs = () => {
+    const timingApi = safe(() => window.Timing, null);
+    if (timingApi && typeof timingApi === "object") {
+      const timingMethods = ["getCurrentServerTime", "getServerTime"];
+      for (let index = 0; index < timingMethods.length; index += 1) {
+        const methodName = timingMethods[index];
+        if (typeof timingApi[methodName] !== "function") continue;
+        const timingValue = safe(() => timingApi[methodName](), null);
+        const parsedDate = parseTimingServerDate(timingValue);
+        if (parsedDate) return parsedDate.getTime();
+      }
+      const timingProps = [
+        safe(() => timingApi.currentServerTime, null),
+        safe(() => timingApi.serverTime, null),
+      ];
+      for (let index = 0; index < timingProps.length; index += 1) {
+        const parsedDate = parseTimingServerDate(timingProps[index]);
+        if (parsedDate) return parsedDate.getTime();
+      }
+    }
+
+    if (serverGeneratedMs) {
+      const baseMs =
+        Number(serverGeneratedMs) >= 1000000000000
+          ? Number(serverGeneratedMs)
+          : Number(serverGeneratedMs) >= 1000000000
+            ? Number(serverGeneratedMs) * 1000
+            : NaN;
+      if (Number.isFinite(baseMs)) {
+        return baseMs + (Date.now() - scriptStartMs);
+      }
+    }
+
+    return null;
+  };
+
+  const getServerUtcOffsetMs = () => {
+    const directOffsetCandidates = [
+      safe(() => window.server_utc_diff, null),
+      safe(() => window.game_data.server_utc_diff, null),
+      safe(() => window.TribalWars.getGameData().server_utc_diff, null),
+    ];
+    for (let index = 0; index < directOffsetCandidates.length; index += 1) {
+      const rawSeconds = Number(directOffsetCandidates[index]);
+      if (!Number.isFinite(rawSeconds)) continue;
+      const offsetMs = Math.round(rawSeconds * 1000);
+      cachedServerUtcOffsetMs = offsetMs;
+      return offsetMs;
+    }
+
+    if (Number.isFinite(cachedServerUtcOffsetMs)) {
+      return cachedServerUtcOffsetMs;
+    }
+
+    const domParts = parseServerClockDomParts();
+    const approxNowMs = resolveApproximateServerNowMs();
+    if (domParts && Number.isFinite(approxNowMs)) {
+      const naiveUtcMs = Date.UTC(
+        domParts.year,
+        domParts.month - 1,
+        domParts.day,
+        domParts.hour,
+        domParts.minute,
+        domParts.second,
+        0,
+      );
+      const offsetMs =
+        Math.round((naiveUtcMs - approxNowMs) / (60 * 1000)) * 60 * 1000;
+      cachedServerUtcOffsetMs = offsetMs;
+      return offsetMs;
+    }
+
+    return 0;
+  };
+
+  const getServerWallClockDate = (dateLike) => {
+    const epochMs = Number(new Date(dateLike).getTime());
+    if (!Number.isFinite(epochMs)) return null;
+    const shifted = new Date(epochMs + getServerUtcOffsetMs());
+    return Number.isFinite(shifted.getTime()) ? shifted : null;
+  };
+
+  const getServerWallClockParts = (dateLike) => {
+    const dt = getServerWallClockDate(dateLike);
+    if (!dt) return null;
+    return {
+      year: dt.getUTCFullYear(),
+      month: dt.getUTCMonth() + 1,
+      day: dt.getUTCDate(),
+      hour: dt.getUTCHours(),
+      minute: dt.getUTCMinutes(),
+      second: dt.getUTCSeconds(),
+      millisecond: dt.getUTCMilliseconds(),
+    };
+  };
+
   const getServerNow = () => {
     // Критично: в первую очередь берём время только из игрового Timing API.
     const timingApi = safe(() => window.Timing, null);
@@ -2290,30 +2425,19 @@
       }
     }
 
-    const dateText = cleanText(
-      safe(() => document.querySelector("#serverDate").textContent, null),
-    );
-    const timeText = cleanText(
-      safe(() => document.querySelector("#serverTime").textContent, null),
-    );
-    if (dateText && timeText) {
-      const dateParts = dateText.match(/\d+/g);
-      const timeParts = timeText.match(/\d+/g);
-      if (
-        dateParts &&
-        dateParts.length >= 3 &&
-        timeParts &&
-        timeParts.length >= 2
-      ) {
-        const dt = new Date(
-          Number(dateParts[2]),
-          Number(dateParts[1]) - 1,
-          Number(dateParts[0]),
-          Number(timeParts[0]),
-          Number(timeParts[1]),
-          Number(timeParts[2] || 0),
-          0,
-        );
+    const domParts = parseServerClockDomParts();
+    if (domParts) {
+      const epochMs = buildServerEpochMs(
+        domParts.year,
+        domParts.month,
+        domParts.day,
+        domParts.hour,
+        domParts.minute,
+        domParts.second,
+        0,
+      );
+      if (Number.isFinite(epochMs)) {
+        const dt = new Date(epochMs);
         if (Number.isFinite(dt.getTime())) return dt;
       }
     }
@@ -6212,6 +6336,8 @@
     const ms = Math.max(0, toInt(arrivalMs) || 0);
     const now = getServerNow();
     const nowMs = now.getTime();
+    const nowParts = getServerWallClockParts(nowMs);
+    if (!nowParts) return null;
     const makeDateWithMs = (year, month, day, hour, minute, second) => {
       const epochMs = buildServerEpochMs(
         year,
@@ -6245,9 +6371,9 @@
       const time = parseTimeParts(todayMatch);
       if (time) {
         return makeDateWithMs(
-          now.getUTCFullYear(),
-          now.getUTCMonth() + 1,
-          now.getUTCDate(),
+          nowParts.year,
+          nowParts.month,
+          nowParts.day,
           time.hour,
           time.minute,
           time.second,
@@ -6262,9 +6388,9 @@
       const time = parseTimeParts(tomorrowMatch);
       if (time) {
         const epochMs = buildServerEpochMs(
-          now.getUTCFullYear(),
-          now.getUTCMonth() + 1,
-          now.getUTCDate() + 1,
+          nowParts.year,
+          nowParts.month,
+          nowParts.day + 1,
           time.hour,
           time.minute,
           time.second,
@@ -6283,7 +6409,7 @@
       const hour = Number(dateMatch[3]);
       const minute = Number(dateMatch[4]);
       const second = Number(dateMatch[5]);
-      const year = now.getUTCFullYear();
+      const year = nowParts.year;
       let candidate = makeDateWithMs(year, month, day, hour, minute, second);
       if (Number.isFinite(candidate)) {
         const sixMonthsMs = 183 * 24 * 60 * 60 * 1000;
@@ -6354,13 +6480,13 @@
     return Number.isInteger(byShort) ? byShort : null;
   };
   const formatArrivalTextFromEpochMs = (epochMs) => {
-    const dt = new Date(epochMs);
-    if (!Number.isFinite(dt.getTime())) return null;
-    const dd = String(dt.getUTCDate()).padStart(2, "0");
-    const mm = String(dt.getUTCMonth() + 1).padStart(2, "0");
-    const hh = String(dt.getUTCHours()).padStart(2, "0");
-    const mi = String(dt.getUTCMinutes()).padStart(2, "0");
-    const ss = String(dt.getUTCSeconds()).padStart(2, "0");
+    const parts = getServerWallClockParts(epochMs);
+    if (!parts) return null;
+    const dd = String(parts.day).padStart(2, "0");
+    const mm = String(parts.month).padStart(2, "0");
+    const hh = String(parts.hour).padStart(2, "0");
+    const mi = String(parts.minute).padStart(2, "0");
+    const ss = String(parts.second).padStart(2, "0");
     return `${dd}.${mm} в ${hh}:${mi}:${ss}`;
   };
   const getLastCoordKeyFromText = (text) => {
@@ -6426,7 +6552,7 @@
       const day = toInt(numericDateMatch[1]);
       const month = toInt(numericDateMatch[2]);
       const yearRaw = toInt(numericDateMatch[3]);
-      const nowYear = new Date(getServerNowMs()).getUTCFullYear();
+      const nowYear = (getServerWallClockParts(getServerNowMs()) || {}).year;
       const year = Number.isFinite(yearRaw)
         ? yearRaw < 100
           ? 2000 + yearRaw
@@ -6473,10 +6599,10 @@
     const arrivalText = extractArrivalDateTimeText(source) || cleanText(source);
     const etaEpochMs = parseCommandsArrivalEpochMs(arrivalText, arrivalMs);
     if (!Number.isFinite(etaEpochMs)) return null;
-    const dt = new Date(etaEpochMs);
-    const timeToken = Number.isFinite(dt.getTime())
-      ? `${String(dt.getUTCHours()).padStart(2, "0")}:${String(dt.getUTCMinutes()).padStart(2, "0")}:${String(
-          dt.getUTCSeconds(),
+    const parts = getServerWallClockParts(etaEpochMs);
+    const timeToken = parts
+      ? `${String(parts.hour).padStart(2, "0")}:${String(parts.minute).padStart(2, "0")}:${String(
+          parts.second,
         ).padStart(
           2,
           "0",
@@ -6490,15 +6616,15 @@
     };
   };
   const formatManualDateTimeInputValue = (epochMs) => {
-    const dt = new Date(epochMs);
-    if (!Number.isFinite(dt.getTime())) return "";
-    const dd = String(dt.getUTCDate()).padStart(2, "0");
-    const mm = String(dt.getUTCMonth() + 1).padStart(2, "0");
-    const yyyy = String(dt.getUTCFullYear());
-    const hh = String(dt.getUTCHours()).padStart(2, "0");
-    const mi = String(dt.getUTCMinutes()).padStart(2, "0");
-    const ss = String(dt.getUTCSeconds()).padStart(2, "0");
-    const ms = String(dt.getUTCMilliseconds()).padStart(3, "0");
+    const parts = getServerWallClockParts(epochMs);
+    if (!parts) return "";
+    const dd = String(parts.day).padStart(2, "0");
+    const mm = String(parts.month).padStart(2, "0");
+    const yyyy = String(parts.year);
+    const hh = String(parts.hour).padStart(2, "0");
+    const mi = String(parts.minute).padStart(2, "0");
+    const ss = String(parts.second).padStart(2, "0");
+    const ms = String(parts.millisecond).padStart(3, "0");
     return `${dd}.${mm}.${yyyy} ${hh}:${mi}:${ss}:${ms}`;
   };
   const parseManualDateTimeInputPayload = (rawValue) => {
@@ -6506,6 +6632,8 @@
     if (!text) return null;
     const now = getServerNow();
     const nowMs = now.getTime();
+    const nowParts = getServerWallClockParts(nowMs);
+    if (!nowParts) return null;
     const sixMonthsMs = 183 * 24 * 60 * 60 * 1000;
 
     const normalizeYear = (yearValue) => {
@@ -6559,14 +6687,15 @@
       }
       const epochMs = buildServerEpochMs(y, m, d, hh, mm, ss, ms);
       if (!Number.isFinite(epochMs)) return null;
-      const dt = new Date(epochMs);
+      const dt = getServerWallClockParts(epochMs);
       if (
-        dt.getUTCFullYear() !== y ||
-        dt.getUTCMonth() + 1 !== m ||
-        dt.getUTCDate() !== d ||
-        dt.getUTCHours() !== hh ||
-        dt.getUTCMinutes() !== mm ||
-        dt.getUTCSeconds() !== ss
+        !dt ||
+        dt.year !== y ||
+        dt.month !== m ||
+        dt.day !== d ||
+        dt.hour !== hh ||
+        dt.minute !== mm ||
+        dt.second !== ss
       ) {
         return null;
       }
@@ -6575,17 +6704,16 @@
         const nextYear = y + 1;
         const nextEpochMs = buildServerEpochMs(nextYear, m, d, hh, mm, ss, ms);
         const nextDt = Number.isFinite(nextEpochMs)
-          ? new Date(nextEpochMs)
+          ? getServerWallClockParts(nextEpochMs)
           : null;
         if (
           nextDt &&
-          Number.isFinite(nextDt.getTime()) &&
-          nextDt.getUTCFullYear() === nextYear &&
-          nextDt.getUTCMonth() + 1 === m &&
-          nextDt.getUTCDate() === d &&
-          nextDt.getUTCHours() === hh &&
-          nextDt.getUTCMinutes() === mm &&
-          nextDt.getUTCSeconds() === ss
+          nextDt.year === nextYear &&
+          nextDt.month === m &&
+          nextDt.day === d &&
+          nextDt.hour === hh &&
+          nextDt.minute === mm &&
+          nextDt.second === ss
         ) {
           etaEpochMs = nextEpochMs;
         }
@@ -6618,7 +6746,7 @@
       const explicitYear = normalizeYear(localMatch[3]);
       const year = Number.isFinite(explicitYear)
         ? explicitYear
-        : now.getUTCFullYear();
+        : nowParts.year;
       return parseParts({
         year,
         month: localMatch[2],
@@ -6637,21 +6765,22 @@
     if (dayTokenMatch) {
       const token = String(dayTokenMatch[1] || "").toLowerCase();
       const shiftDays = token === "завтра" || token === "tomorrow" ? 1 : 0;
-      const baseDate = new Date(
+      const baseDate = getServerWallClockParts(
         buildServerEpochMs(
-          now.getUTCFullYear(),
-          now.getUTCMonth() + 1,
-          now.getUTCDate() + shiftDays,
+          nowParts.year,
+          nowParts.month,
+          nowParts.day + shiftDays,
           0,
           0,
           0,
           0,
         ),
       );
+      if (!baseDate) return null;
       return parseParts({
-        year: baseDate.getUTCFullYear(),
-        month: baseDate.getUTCMonth() + 1,
-        day: baseDate.getUTCDate(),
+        year: baseDate.year,
+        month: baseDate.month,
+        day: baseDate.day,
         hour: dayTokenMatch[2],
         minute: dayTokenMatch[3],
         second: dayTokenMatch[4] || 0,
@@ -6664,9 +6793,9 @@
     );
     if (timeOnlyMatch) {
       return parseParts({
-        year: now.getUTCFullYear(),
-        month: now.getUTCMonth() + 1,
-        day: now.getUTCDate(),
+        year: nowParts.year,
+        month: nowParts.month,
+        day: nowParts.day,
         hour: timeOnlyMatch[1],
         minute: timeOnlyMatch[2],
         second: timeOnlyMatch[3] || 0,
@@ -9744,9 +9873,15 @@
   };
 
   const formatDateTime = (dateLike) => {
-    const dt = new Date(dateLike);
-    if (!Number.isFinite(dt.getTime())) return "n/a";
-    return dt.toLocaleString("ru-RU", { hour12: false, timeZone: "UTC" });
+    const parts = getServerWallClockParts(dateLike);
+    if (!parts) return "n/a";
+    const dd = String(parts.day).padStart(2, "0");
+    const mm = String(parts.month).padStart(2, "0");
+    const yyyy = String(parts.year);
+    const hh = String(parts.hour).padStart(2, "0");
+    const mi = String(parts.minute).padStart(2, "0");
+    const ss = String(parts.second).padStart(2, "0");
+    return `${dd}.${mm}.${yyyy} ${hh}:${mi}:${ss}`;
   };
 
   const extractClockFromEtaText = (text) => {
@@ -9808,43 +9943,43 @@
   };
 
   const formatDateTimeShort = (dateLike) => {
-    const dt = new Date(dateLike);
-    if (!Number.isFinite(dt.getTime())) return "n/a";
-    const dd = String(dt.getUTCDate()).padStart(2, "0");
-    const mm = String(dt.getUTCMonth() + 1).padStart(2, "0");
-    const hh = String(dt.getUTCHours()).padStart(2, "0");
-    const mi = String(dt.getUTCMinutes()).padStart(2, "0");
-    const ss = String(dt.getUTCSeconds()).padStart(2, "0");
+    const parts = getServerWallClockParts(dateLike);
+    if (!parts) return "n/a";
+    const dd = String(parts.day).padStart(2, "0");
+    const mm = String(parts.month).padStart(2, "0");
+    const hh = String(parts.hour).padStart(2, "0");
+    const mi = String(parts.minute).padStart(2, "0");
+    const ss = String(parts.second).padStart(2, "0");
     return `${dd}.${mm} ${hh}:${mi}:${ss}`;
   };
   const formatDateTimeShortWithMs = (dateLike) => {
-    const dt = new Date(dateLike);
-    if (!Number.isFinite(dt.getTime())) return "n/a";
-    const dd = String(dt.getUTCDate()).padStart(2, "0");
-    const mm = String(dt.getUTCMonth() + 1).padStart(2, "0");
-    const hh = String(dt.getUTCHours()).padStart(2, "0");
-    const mi = String(dt.getUTCMinutes()).padStart(2, "0");
-    const ss = String(dt.getUTCSeconds()).padStart(2, "0");
-    const ms = String(dt.getUTCMilliseconds()).padStart(3, "0");
+    const parts = getServerWallClockParts(dateLike);
+    if (!parts) return "n/a";
+    const dd = String(parts.day).padStart(2, "0");
+    const mm = String(parts.month).padStart(2, "0");
+    const hh = String(parts.hour).padStart(2, "0");
+    const mi = String(parts.minute).padStart(2, "0");
+    const ss = String(parts.second).padStart(2, "0");
+    const ms = String(parts.millisecond).padStart(3, "0");
     return `${dd}.${mm} ${hh}:${mi}:${ss}:${ms}`;
   };
 
   const formatTimeOnly = (dateLike) => {
-    const dt = new Date(dateLike);
-    if (!Number.isFinite(dt.getTime())) return "n/a";
-    const hh = String(dt.getUTCHours()).padStart(2, "0");
-    const mi = String(dt.getUTCMinutes()).padStart(2, "0");
-    const ss = String(dt.getUTCSeconds()).padStart(2, "0");
+    const parts = getServerWallClockParts(dateLike);
+    if (!parts) return "n/a";
+    const hh = String(parts.hour).padStart(2, "0");
+    const mi = String(parts.minute).padStart(2, "0");
+    const ss = String(parts.second).padStart(2, "0");
     return `${hh}:${mi}:${ss}`;
   };
 
   const formatTimeWithMs = (dateLike) => {
-    const dt = new Date(dateLike);
-    if (!Number.isFinite(dt.getTime())) return "n/a";
-    const hh = String(dt.getUTCHours()).padStart(2, "0");
-    const mi = String(dt.getUTCMinutes()).padStart(2, "0");
-    const ss = String(dt.getUTCSeconds()).padStart(2, "0");
-    const ms = String(dt.getUTCMilliseconds()).padStart(3, "0");
+    const parts = getServerWallClockParts(dateLike);
+    if (!parts) return "n/a";
+    const hh = String(parts.hour).padStart(2, "0");
+    const mi = String(parts.minute).padStart(2, "0");
+    const ss = String(parts.second).padStart(2, "0");
+    const ms = String(parts.millisecond).padStart(3, "0");
     return `${hh}:${mi}:${ss}:${ms}`;
   };
   const parseClockWithOptionalMsToDayMs = (value) => {
@@ -13573,13 +13708,11 @@
   const DAY_MS = 24 * 60 * 60 * 1000;
 
   const toDayMsFromEpochMs = (epochMs) => {
-    if (!Number.isFinite(epochMs)) return null;
-    const dt = new Date(epochMs);
-    if (!Number.isFinite(dt.getTime())) return null;
+    const parts = getServerWallClockParts(epochMs);
+    if (!parts) return null;
     return (
-      ((dt.getUTCHours() * 60 + dt.getUTCMinutes()) * 60 + dt.getUTCSeconds()) *
-        1000 +
-      dt.getUTCMilliseconds()
+      ((parts.hour * 60 + parts.minute) * 60 + parts.second) * 1000 +
+      parts.millisecond
     );
   };
 

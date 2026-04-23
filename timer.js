@@ -10,6 +10,8 @@ var millisReference,
 	targetVillageHref,
 	targetFrameWrapper,
 	targetFrameEl,
+	uiResizeBound = false,
+	frameResizeBound = false,
 	first = true,
 	changed = false,
 	worldNr = game_data.world;
@@ -22,10 +24,11 @@ var CANVAS_SIZE = 150,
 
 var WINDOW_LAMP_ON = '#2fc44f',
 	WINDOW_LAMP_OFF = '#8a8a8a',
-	TARGET_WINDOW_START_KEY = worldNr + '_targetWindowStart',
-	TARGET_WINDOW_END_KEY = worldNr + '_targetWindowEnd',
 	TARGET_WINDOW_DEFAULT_SHIFT_MS = 15000,
-	TARGET_WINDOW_DEFAULT_SPAN_MS = 100;
+	TARGET_WINDOW_DEFAULT_SPAN_MS = 100,
+	TARGET_WINDOW_CENTER_HALF_SPAN_MS = 50,
+	WINDOW_LAMP_POLL_MS = 20,
+	MOBILE_BREAKPOINT = 760;
 
 if(game_data.screen != 'place'){
 	alert("This script must be run from the rally point.\nRunning during command execution will add millisecond assist.\nRunning after command excecution will show you by how many milliseconds you missed the target.");
@@ -39,6 +42,85 @@ else{
 }
 
 $("#ds_body").before(`<div style="position: absolute; z-index: 50; width: `+ window.innerWidth + `px; height:`+ window.innerHeight + `px;pointer-events: none"></div>`);
+
+function setCanvasMetrics(size){
+	CANVAS_SIZE = size;
+	CANVAS_CENTER = Math.round(size / 2);
+	CANVAS_RADIUS = Math.round(size * 0.3867);
+	ARC_RADIUS = Math.round(size * 0.3334);
+}
+
+function isCompactLayout(){
+	return window.innerWidth <= MOBILE_BREAKPOINT;
+}
+
+function applyResponsiveLayout(){
+	var compact = isCompactLayout(),
+		targetSize = compact ? 118 : 150,
+		canvas = $('#millis_canvas')[0],
+		second = $('#second_display')[0],
+		lamp = $('#window_lamp')[0],
+		practiceBtn = $('#practice_button')[0],
+		viewBtn = $('#view_target_button')[0];
+
+	if(CANVAS_SIZE !== targetSize){
+		setCanvasMetrics(targetSize);
+	}
+
+	if(canvas){
+		canvas.width = CANVAS_SIZE;
+		canvas.height = CANVAS_SIZE;
+		canvas.style.width = CANVAS_SIZE + 'px';
+		canvas.style.height = CANVAS_SIZE + 'px';
+		drawDial(canvas.getContext('2d'));
+	}
+
+	if(second){
+		second.style.left = '50%';
+		second.style.top = '50%';
+		second.style.transform = 'translate(-50%, -52%)';
+		second.style.fontSize = compact ? '22px' : '28px';
+	}
+
+	if(lamp){
+		lamp.style.width = compact ? '12px' : '14px';
+		lamp.style.height = compact ? '12px' : '14px';
+		lamp.style.top = compact ? '8px' : '12px';
+		lamp.style.right = compact ? '8px' : '12px';
+	}
+
+	if(practiceBtn){
+		practiceBtn.style.width = compact ? '64px' : '80px';
+		practiceBtn.style.fontSize = compact ? '12px' : '';
+		practiceBtn.style.padding = compact ? '2px 4px' : '';
+	}
+
+	if(targetWindowStartInput){
+		targetWindowStartInput.style.width = compact ? '128px' : '190px';
+		targetWindowStartInput.style.fontSize = compact ? '12px' : '';
+	}
+	if(targetWindowEndInput){
+		targetWindowEndInput.style.width = compact ? '128px' : '190px';
+		targetWindowEndInput.style.fontSize = compact ? '12px' : '';
+	}
+
+	if(viewBtn){
+		if(compact){
+			viewBtn.style.display = 'block';
+			viewBtn.style.width = '100%';
+			viewBtn.style.marginLeft = '0';
+			viewBtn.style.marginTop = '6px';
+		}
+		else{
+			viewBtn.style.display = 'inline-block';
+			viewBtn.style.width = '';
+			viewBtn.style.marginLeft = '6px';
+			viewBtn.style.marginTop = '0';
+		}
+	}
+
+	updateTargetFrameLayout();
+}
 
 function timer(){
 	var arrival = $(".relative_time")[0].innerHTML,
@@ -133,10 +215,11 @@ function addTimer(){
 			windowLampTitle = document.createAttribute('title');
 		canvasRowspan.value = tableBody.children.length-2;
 		canvasColspan.value = 4;
+		canvasTd.id = 'millis_canvas_wrap';
 		canvasId.value = 'millis_canvas';
 		canvasWidth.value = String(CANVAS_SIZE);
 		canvasHeight.value = String(CANVAS_SIZE);
-		canvasStyle.value = 'height:150px;width:150px;display:block';
+		canvasStyle.value = 'height:'+CANVAS_SIZE+'px;width:'+CANVAS_SIZE+'px;display:block';
 		canvasTdStyle.value = 'position:relative;';
 		canvasTd.setAttributeNode(canvasRowspan);
 		canvasTd.setAttributeNode(canvasColspan);
@@ -145,7 +228,7 @@ function addTimer(){
 		canvasCanvas.setAttributeNode(canvasWidth);
 		canvasCanvas.setAttributeNode(canvasHeight);
 		canvasCanvas.setAttributeNode(canvasStyle);
-		secondStyle.value = 'position:absolute;top:48px;left:62px;margin:0;';
+		secondStyle.value = 'position:absolute;left:50%;top:50%;transform:translate(-50%, -52%);margin:0;font-size:28px;line-height:1;';
 		secondId.value = 'second_display';
 		secondDisplay.setAttributeNode(secondId);
 		secondDisplay.setAttributeNode(secondStyle);
@@ -266,10 +349,15 @@ function addTimer(){
 		lastRow.appendChild(offsetTd);
 		lastRow.appendChild(missTd);
 		$('#ds_body')[0].setAttribute('onsubmit', 'practiceFunction()');
+		applyResponsiveLayout();
+		if(!uiResizeBound){
+			window.addEventListener('resize', applyResponsiveLayout);
+			uiResizeBound = true;
+		}
 		if(windowLampInterval){
 			clearInterval(windowLampInterval);
 		}
-		windowLampInterval = setInterval(updateWindowLamp, 200);
+		windowLampInterval = setInterval(updateWindowLamp, WINDOW_LAMP_POLL_MS);
 		updateWindowLamp();
 		resetTimer($(".relative_time")[0].innerHTML, true);
 	}
@@ -441,14 +529,112 @@ function buildDefaultWindowValues(tableBody){
 
 	return {
 		start: formatTargetWindowDate(new Date(startMs)),
+		end: formatTargetWindowDate(new Date(endMs)),
+		startMs: startMs,
+		endMs: endMs
+	};
+}
+
+function parseClipboardCenterTime(rawValue){
+	var match = String(rawValue || '').trim().match(/^(\d{1,2}):(\d{1,2}):(\d{1,2}):(\d{1,3})$/),
+		hours,
+		minutes,
+		seconds,
+		millis;
+
+	if(!match){
+		return null;
+	}
+
+	hours = Number(match[1]);
+	minutes = Number(match[2]);
+	seconds = Number(match[3]);
+	millis = Number(match[4]);
+
+	if(
+		hours < 0 || hours > 23 ||
+		minutes < 0 || minutes > 59 ||
+		seconds < 0 || seconds > 59 ||
+		millis < 0 || millis > 999
+	){
+		return null;
+	}
+
+	return {
+		hours: hours,
+		minutes: minutes,
+		seconds: seconds,
+		millis: millis
+	};
+}
+
+function buildWindowValuesFromCenterMs(centerMs){
+	var startMs = centerMs - TARGET_WINDOW_CENTER_HALF_SPAN_MS,
+		endMs = centerMs + TARGET_WINDOW_CENTER_HALF_SPAN_MS;
+	return {
+		startMs: startMs,
+		endMs: endMs,
+		start: formatTargetWindowDate(new Date(startMs)),
 		end: formatTargetWindowDate(new Date(endMs))
 	};
 }
 
+function tryApplyClipboardCenterWindow(startInput, endInput, defaultStartMs){
+	if(!startInput || !endInput){
+		return;
+	}
+	if(!navigator.clipboard || typeof navigator.clipboard.readText !== 'function'){
+		return;
+	}
+
+	navigator.clipboard.readText().then(function(clipboardText){
+		var parsed = parseClipboardCenterTime(clipboardText),
+			nowMs,
+			baseDate,
+			centerMs,
+			windowValues;
+
+		if(!parsed){
+			return;
+		}
+
+		nowMs = getCurrentReferenceTimeMs();
+		baseDate = new Date(defaultStartMs || nowMs);
+		centerMs = new Date(
+			baseDate.getFullYear(),
+			baseDate.getMonth(),
+			baseDate.getDate(),
+			parsed.hours,
+			parsed.minutes,
+			parsed.seconds,
+			parsed.millis
+		).getTime();
+
+		if(centerMs < nowMs){
+			return;
+		}
+
+		windowValues = buildWindowValuesFromCenterMs(centerMs);
+		startInput.value = windowValues.start;
+		endInput.value = windowValues.end;
+		updateWindowLamp();
+	}).catch(function(){});
+}
+
 function insertTargetWindowRow(tableBody){
+	var defaultValues;
 	if($('#target_window_row').length){
 		targetWindowStartInput = $('#target_window_start')[0];
 		targetWindowEndInput = $('#target_window_end')[0];
+		defaultValues = buildDefaultWindowValues(tableBody);
+		if(targetWindowStartInput){
+			targetWindowStartInput.value = defaultValues.start;
+		}
+		if(targetWindowEndInput){
+			targetWindowEndInput.value = defaultValues.end;
+		}
+		tryApplyClipboardCenterWindow(targetWindowStartInput, targetWindowEndInput, defaultValues.startMs);
+		applyResponsiveLayout();
 		return;
 	}
 
@@ -460,16 +646,7 @@ function insertTargetWindowRow(tableBody){
 		startInput = document.createElement('INPUT'),
 		endInput = document.createElement('INPUT'),
 		separator = document.createElement('SPAN'),
-		storedStart = localStorage.getItem(TARGET_WINDOW_START_KEY) || '',
-		storedEnd = localStorage.getItem(TARGET_WINDOW_END_KEY) || '',
 		defaultValues = buildDefaultWindowValues(tableBody);
-
-	if(!storedStart){
-		storedStart = defaultValues.start;
-	}
-	if(!storedEnd){
-		storedEnd = defaultValues.end;
-	}
 
 	windowRow.id = 'target_window_row';
 	labelTd.innerHTML = 'Целевое время:';
@@ -478,7 +655,7 @@ function insertTargetWindowRow(tableBody){
 	startInput.id = 'target_window_start';
 	startInput.style.width = '190px';
 	startInput.title = 'Формат: дд.мм.гггг чч:мм:сс:мс';
-	startInput.value = storedStart;
+	startInput.value = defaultValues.start;
 
 	separator.innerHTML = ' — ';
 	separator.style.margin = '0 4px';
@@ -487,7 +664,7 @@ function insertTargetWindowRow(tableBody){
 	endInput.id = 'target_window_end';
 	endInput.style.width = '190px';
 	endInput.title = 'Формат: дд.мм.гггг чч:мм:сс:мс';
-	endInput.value = storedEnd;
+	endInput.value = defaultValues.end;
 
 	startInput.addEventListener('change', saveTargetWindowInputs);
 	endInput.addEventListener('change', saveTargetWindowInputs);
@@ -510,25 +687,11 @@ function insertTargetWindowRow(tableBody){
 
 	targetWindowStartInput = startInput;
 	targetWindowEndInput = endInput;
+	tryApplyClipboardCenterWindow(targetWindowStartInput, targetWindowEndInput, defaultValues.startMs);
+	applyResponsiveLayout();
 }
 
 function saveTargetWindowInputs(){
-	if(targetWindowStartInput){
-		if(targetWindowStartInput.value){
-			localStorage.setItem(TARGET_WINDOW_START_KEY, targetWindowStartInput.value);
-		}
-		else{
-			localStorage.removeItem(TARGET_WINDOW_START_KEY);
-		}
-	}
-	if(targetWindowEndInput){
-		if(targetWindowEndInput.value){
-			localStorage.setItem(TARGET_WINDOW_END_KEY, targetWindowEndInput.value);
-		}
-		else{
-			localStorage.removeItem(TARGET_WINDOW_END_KEY);
-		}
-	}
 	updateWindowLamp();
 }
 
@@ -622,6 +785,67 @@ function getTargetVillageHref(tableBody){
 	return toAbsoluteUrl(link.getAttribute('href'));
 }
 
+function updateTargetFrameLayout(){
+	var viewportWidth,
+		viewportHeight,
+		compact,
+		desktopHeight,
+		compactHeight;
+
+	if(!targetFrameWrapper){
+		return;
+	}
+
+	viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+	viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+	compact = viewportWidth <= MOBILE_BREAKPOINT;
+
+	if(compact){
+		compactHeight = Math.floor(viewportHeight * 0.82);
+		if(compactHeight > viewportHeight - 16){
+			compactHeight = viewportHeight - 16;
+		}
+		if(compactHeight < 120){
+			compactHeight = 120;
+		}
+		targetFrameWrapper.style.top = '8px';
+		targetFrameWrapper.style.left = '6px';
+		targetFrameWrapper.style.right = '6px';
+		targetFrameWrapper.style.width = 'auto';
+		targetFrameWrapper.style.height = compactHeight + 'px';
+	}
+	else{
+		desktopHeight = Math.max(320, Math.min(420, viewportHeight - 90));
+		targetFrameWrapper.style.top = '70px';
+		targetFrameWrapper.style.left = '';
+		targetFrameWrapper.style.right = '20px';
+		targetFrameWrapper.style.width = '520px';
+		targetFrameWrapper.style.height = desktopHeight + 'px';
+	}
+}
+
+function scrollTargetFrameToThirtyPercent(){
+	var frameWin,
+		frameDoc,
+		docEl,
+		body,
+		scrollHeight,
+		targetTop;
+	try{
+		if(!targetFrameEl || !targetFrameEl.contentWindow){
+			return;
+		}
+		frameWin = targetFrameEl.contentWindow;
+		frameDoc = frameWin.document;
+		docEl = frameDoc.documentElement;
+		body = frameDoc.body;
+		scrollHeight = Math.max(docEl ? docEl.scrollHeight : 0, body ? body.scrollHeight : 0);
+		targetTop = Math.round(scrollHeight * 0.3);
+		frameWin.scrollTo(0, targetTop);
+	}
+	catch(e){}
+}
+
 function createTargetFrame(){
 	var frameHead,
 		frameTitle,
@@ -669,10 +893,18 @@ function createTargetFrame(){
 	targetFrameEl.style.height = 'calc(100% - 38px)';
 	targetFrameEl.style.border = '0';
 	targetFrameEl.src = 'about:blank';
+	targetFrameEl.addEventListener('load', function(){
+		setTimeout(scrollTargetFrameToThirtyPercent, 60);
+	});
 
 	targetFrameWrapper.appendChild(frameHead);
 	targetFrameWrapper.appendChild(targetFrameEl);
 	document.body.appendChild(targetFrameWrapper);
+	updateTargetFrameLayout();
+	if(!frameResizeBound){
+		window.addEventListener('resize', updateTargetFrameLayout);
+		frameResizeBound = true;
+	}
 }
 
 function openTargetFrame(){
@@ -690,6 +922,7 @@ function openTargetFrame(){
 	if(!targetFrameWrapper){
 		createTargetFrame();
 	}
+	updateTargetFrameLayout();
 	targetFrameEl.src = href;
 	targetFrameWrapper.style.display = 'block';
 }
@@ -711,6 +944,7 @@ function addViewTargetButton(){
 	viewBtn.addEventListener('click', openTargetFrame);
 
 	submitBtn.parentNode.insertBefore(viewBtn, submitBtn.nextSibling);
+	applyResponsiveLayout();
 }
 
 function startCanvas(lastMillis, currentMillis){
