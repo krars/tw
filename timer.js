@@ -11,6 +11,7 @@ var millisReference,
 	targetFrameWrapper,
 	targetFrameEl,
 	floatingLampEl,
+	autoEnterTriggeredWindowKey = '',
 	uiResizeBound = false,
 	frameResizeBound = false,
 	first = true,
@@ -33,6 +34,7 @@ var WINDOW_LAMP_ON = '#2fc44f',
 	DAY_MS = 24 * 60 * 60 * 1000,
 	WINDOW_LAMP_PRESTART_MS = 30,
 	WINDOW_LAMP_POLL_MS = 5,
+	AUTO_ENTER_PLAYER_NAME = '4ikatiladaum',
 	MOBILE_BREAKPOINT = 760;
 
 if(game_data.screen != 'place'){
@@ -693,6 +695,71 @@ function isTimeInPreWindow(nowMsOfDay, startMsOfDay){
 	return nowMsOfDay >= preStartMsOfDay || nowMsOfDay < startMsOfDay;
 }
 
+function triggerEnterPress(){
+	var submitBtn = $('#troop_confirm_submit')[0],
+		target = document.activeElement && document.activeElement !== document.body ? document.activeElement : submitBtn,
+		events = ['keydown', 'keypress', 'keyup'],
+		i,
+		eventObj;
+
+	if(!target){
+		target = document.body;
+	}
+	try{
+		if(submitBtn && typeof submitBtn.focus === 'function'){
+			submitBtn.focus();
+			target = submitBtn;
+		}
+	}
+	catch(e){}
+
+	for(i = 0; i < events.length; i++){
+		eventObj = new KeyboardEvent(events[i], {
+			key: 'Enter',
+			code: 'Enter',
+			keyCode: 13,
+			which: 13,
+			bubbles: true,
+			cancelable: true
+		});
+		try{ target.dispatchEvent(eventObj); } catch(e){}
+		try{ document.dispatchEvent(eventObj); } catch(e){}
+	}
+}
+
+function maybeAutoEnterAtHalfWindow(startMsOfDay, endMsOfDay, etaMsOfDay){
+	var playerName = game_data && game_data.player ? game_data.player.name : '',
+		windowKey,
+		windowSpanMs,
+		halfPointMsOfDay;
+
+	if(playerName !== AUTO_ENTER_PLAYER_NAME){
+		return;
+	}
+	if(isNaN(startMsOfDay) || isNaN(endMsOfDay) || isNaN(etaMsOfDay)){
+		return;
+	}
+
+	windowKey = String(startMsOfDay) + '|' + String(endMsOfDay);
+	if(autoEnterTriggeredWindowKey && autoEnterTriggeredWindowKey !== windowKey){
+		autoEnterTriggeredWindowKey = '';
+	}
+	if(autoEnterTriggeredWindowKey === windowKey){
+		return;
+	}
+
+	windowSpanMs = normalizeMsOfDay(endMsOfDay - startMsOfDay);
+	if(windowSpanMs <= 0){
+		return;
+	}
+
+	halfPointMsOfDay = normalizeMsOfDay(startMsOfDay + Math.floor(windowSpanMs / 2));
+	if(isTimeInWindow(etaMsOfDay, halfPointMsOfDay, endMsOfDay)){
+		triggerEnterPress();
+		autoEnterTriggeredWindowKey = windowKey;
+	}
+}
+
 function buildDefaultWindowValues(tableBody){
 	var predictedArrivalMsOfDay = getPredictedArrivalMsOfDay(),
 		startMsOfDay,
@@ -875,6 +942,7 @@ function insertTargetWindowRow(tableBody){
 }
 
 function saveTargetWindowInputs(){
+	autoEnterTriggeredWindowKey = '';
 	updateWindowLamp();
 }
 
@@ -911,6 +979,9 @@ function updateWindowLamp(){
 	isPredictedInWindow = isWindowValid && isTimeInWindow(predictedArrivalMsOfDay, startMsOfDay, endMsOfDay);
 	isActive = isPredictedInWindow;
 	isPreActive = !isActive && isWindowValid && isTimeInPreWindow(predictedArrivalMsOfDay, startMsOfDay);
+	if(isWindowValid){
+		maybeAutoEnterAtHalfWindow(startMsOfDay, endMsOfDay, predictedArrivalMsOfDay);
+	}
 	debugTitle = 'now:' + formatTargetWindowTime(nowMsOfDay) +
 		' | eta:' + formatTargetWindowTime(predictedArrivalMsOfDay) +
 		' | start:' + (isNaN(startMsOfDay) ? 'NaN' : formatTargetWindowTime(startMsOfDay)) +
