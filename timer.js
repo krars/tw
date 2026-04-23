@@ -498,12 +498,22 @@ function findInfoRow(tableBody, labelRegex){
 }
 
 function getCurrentReferenceTimeMs(){
-	var serverNow;
+	var timingApi,
+		methods,
+		i,
+		serverNow;
 	try{
-		if(typeof Timing !== 'undefined' && Timing && typeof Timing.getCurrentServerTime === 'function'){
-			serverNow = Number(Timing.getCurrentServerTime());
-			if(!isNaN(serverNow) && isFinite(serverNow) && serverNow > 0){
-				return serverNow;
+		if(typeof Timing !== 'undefined' && Timing){
+			timingApi = Timing;
+			methods = ['getCorrectedServerTime', 'getCurrentServerTime', 'getServerTime'];
+			for(i = 0; i < methods.length; i++){
+				if(typeof timingApi[methods[i]] !== 'function'){
+					continue;
+				}
+				serverNow = Number(timingApi[methods[i]]());
+				if(!isNaN(serverNow) && isFinite(serverNow) && serverNow > 0){
+					return serverNow;
+				}
 			}
 		}
 	}
@@ -633,31 +643,32 @@ function parseTimeOfDayInput(rawValue){
 	return hours * 3600000 + minutes * 60000 + seconds * 1000 + millis;
 }
 
-function getCurrentArrivalClockMsOfDay(){
+function getCommandDurationMs(){
 	var rel = $('#date_arrival .relative_time')[0] || $('.relative_time')[0],
-		text = rel ? String(rel.textContent || rel.innerText || '').trim() : '',
-		parsed = parseTimeOfDayInput(text),
-		hasMs = /[:.]\d{1,3}\s*$/.test(text),
-		serverMs,
-		dateArrivalText,
-		parsedFromCell;
+		durationAttr = rel ? Number(rel.getAttribute('data-duration')) : NaN,
+		tableBody = $('#date_arrival').closest('tbody')[0],
+		durationRow,
+		durationText,
+		durationMs;
 
-	if(!isNaN(parsed)){
-		if(hasMs){
-			return normalizeMsOfDay(parsed);
+	if(!isNaN(durationAttr) && isFinite(durationAttr) && durationAttr >= 0){
+		return Math.round(durationAttr * 1000);
+	}
+
+	if(tableBody){
+		durationRow = findInfoRow(tableBody, /длительн|duration/i);
+		durationText = durationRow && durationRow.children && durationRow.children[1] ? durationRow.children[1].textContent : '';
+		durationMs = parseDurationToMs(durationText);
+		if(!isNaN(durationMs) && isFinite(durationMs) && durationMs >= 0){
+			return durationMs;
 		}
-		serverMs = getCurrentServerClockMsOfDay() % 1000;
-		return normalizeMsOfDay(Math.floor(parsed / 1000) * 1000 + serverMs);
 	}
 
-	dateArrivalText = $('#date_arrival').text();
-	parsedFromCell = parseTimeOfDayInput(dateArrivalText);
-	if(!isNaN(parsedFromCell)){
-		serverMs = getCurrentServerClockMsOfDay() % 1000;
-		return normalizeMsOfDay(Math.floor(parsedFromCell / 1000) * 1000 + serverMs);
-	}
+	return 0;
+}
 
-	return getCurrentServerClockMsOfDay();
+function getPredictedArrivalMsOfDay(){
+	return normalizeMsOfDay(Math.floor(getCurrentReferenceTimeMs() + getCommandDurationMs()));
 }
 
 function isTimeInWindow(nowMsOfDay, startMsOfDay, endMsOfDay){
@@ -683,18 +694,11 @@ function isTimeInPreWindow(nowMsOfDay, startMsOfDay){
 }
 
 function buildDefaultWindowValues(tableBody){
-	var durationRow = findInfoRow(tableBody, /длительн|duration/i),
-		durationText = durationRow && durationRow.children && durationRow.children[1] ? durationRow.children[1].textContent : '',
-		durationMs = parseDurationToMs(durationText),
-		nowMsOfDay = getCurrentServerClockMsOfDay(),
+	var predictedArrivalMsOfDay = getPredictedArrivalMsOfDay(),
 		startMsOfDay,
 		endMsOfDay;
 
-	if(isNaN(durationMs) || durationMs < 0){
-		durationMs = 0;
-	}
-
-	startMsOfDay = normalizeMsOfDay(nowMsOfDay + durationMs + TARGET_WINDOW_DEFAULT_SHIFT_MS);
+	startMsOfDay = normalizeMsOfDay(predictedArrivalMsOfDay + TARGET_WINDOW_DEFAULT_SHIFT_MS);
 	endMsOfDay = normalizeMsOfDay(startMsOfDay + TARGET_WINDOW_DEFAULT_SPAN_MS);
 
 	return {
@@ -754,6 +758,30 @@ function buildWindowValuesFromCenterMs(centerMsOfDay){
 }
 
 function tryApplyClipboardCenterWindow(startInput, endInput){
+	function runRead(){
+		navigator.clipboard.readText().then(function(clipboardText){
+			var parsed = parseClipboardCenterTime(clipboardText),
+				nowMsOfDay,
+				deltaForwardMs,
+				windowValues;
+
+			if(!parsed){
+				return;
+			}
+
+			nowMsOfDay = getCurrentServerClockMsOfDay();
+			deltaForwardMs = normalizeMsOfDay(parsed.msOfDay - nowMsOfDay);
+			if(deltaForwardMs > TARGET_WINDOW_CLIPBOARD_MAX_AHEAD_MS){
+				return;
+			}
+
+			windowValues = buildWindowValuesFromCenterMs(parsed.msOfDay);
+			startInput.value = windowValues.start;
+			endInput.value = windowValues.end;
+			updateWindowLamp();
+		}).catch(function(){});
+	}
+
 	if(!startInput || !endInput){
 		return;
 	}
@@ -761,27 +789,19 @@ function tryApplyClipboardCenterWindow(startInput, endInput){
 		return;
 	}
 
-	navigator.clipboard.readText().then(function(clipboardText){
-		var parsed = parseClipboardCenterTime(clipboardText),
-			nowMsOfDay,
-			deltaForwardMs,
-			windowValues;
+	if(navigator.permissions && typeof navigator.permissions.query === 'function'){
+		navigator.permissions.query({name: 'clipboard-read'}).then(function(status){
+			if(status && status.state === 'denied'){
+				return;
+			}
+			runRead();
+		}).catch(function(){
+			runRead();
+		});
+		return;
+	}
 
-		if(!parsed){
-			return;
-		}
-
-		nowMsOfDay = getCurrentServerClockMsOfDay();
-		deltaForwardMs = normalizeMsOfDay(parsed.msOfDay - nowMsOfDay);
-		if(deltaForwardMs > TARGET_WINDOW_CLIPBOARD_MAX_AHEAD_MS){
-			return;
-		}
-
-		windowValues = buildWindowValuesFromCenterMs(parsed.msOfDay);
-		startInput.value = windowValues.start;
-		endInput.value = windowValues.end;
-		updateWindowLamp();
-	}).catch(function(){});
+	runRead();
 }
 
 function insertTargetWindowRow(tableBody){
@@ -865,9 +885,12 @@ function parseTargetWindowValue(rawValue){
 function updateWindowLamp(){
 	var lamp = $('#window_lamp')[0],
 		floatingLamp = $('#window_lamp_floating')[0],
-		nowMsOfDay = getCurrentArrivalClockMsOfDay(),
+		nowMsOfDay = getCurrentServerClockMsOfDay(),
+		predictedArrivalMsOfDay = getPredictedArrivalMsOfDay(),
 		startMsOfDay = parseTargetWindowValue(targetWindowStartInput ? targetWindowStartInput.value : ''),
 		endMsOfDay = parseTargetWindowValue(targetWindowEndInput ? targetWindowEndInput.value : ''),
+		isWindowValid,
+		isPredictedInWindow,
 		isActive,
 		isPreActive,
 		lamps = [],
@@ -884,9 +907,16 @@ function updateWindowLamp(){
 		return;
 	}
 
-	isActive = isTimeInWindow(nowMsOfDay, startMsOfDay, endMsOfDay);
-	isPreActive = !isActive && !isNaN(endMsOfDay) && isTimeInPreWindow(nowMsOfDay, startMsOfDay);
-	debugTitle = 'arr:' + formatTargetWindowTime(nowMsOfDay) + ' | start:' + (isNaN(startMsOfDay) ? 'NaN' : formatTargetWindowTime(startMsOfDay)) + ' | end:' + (isNaN(endMsOfDay) ? 'NaN' : formatTargetWindowTime(endMsOfDay)) + ' | state:' + (isActive ? 'green' : (isPreActive ? 'yellow' : 'off'));
+	isWindowValid = !isNaN(startMsOfDay) && !isNaN(endMsOfDay);
+	isPredictedInWindow = isWindowValid && isTimeInWindow(predictedArrivalMsOfDay, startMsOfDay, endMsOfDay);
+	isActive = isPredictedInWindow;
+	isPreActive = !isActive && isWindowValid && isTimeInPreWindow(predictedArrivalMsOfDay, startMsOfDay);
+	debugTitle = 'now:' + formatTargetWindowTime(nowMsOfDay) +
+		' | eta:' + formatTargetWindowTime(predictedArrivalMsOfDay) +
+		' | start:' + (isNaN(startMsOfDay) ? 'NaN' : formatTargetWindowTime(startMsOfDay)) +
+		' | end:' + (isNaN(endMsOfDay) ? 'NaN' : formatTargetWindowTime(endMsOfDay)) +
+		' | inEta:' + (isPredictedInWindow ? '1' : '0') +
+		' | state:' + (isActive ? 'green' : (isPreActive ? 'yellow' : 'off'));
 	for(i = 0; i < lamps.length; i++){
 		lamps[i].title = debugTitle;
 		if(isActive){
