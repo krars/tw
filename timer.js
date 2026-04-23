@@ -24,10 +24,12 @@ var CANVAS_SIZE = 150,
 
 var WINDOW_LAMP_ON = '#2fc44f',
 	WINDOW_LAMP_PRE = '#f0c419',
-	WINDOW_LAMP_OFF = '#8a8a8a',
+	WINDOW_LAMP_OFF = '#4d4d4d',
 	TARGET_WINDOW_DEFAULT_SHIFT_MS = 15000,
 	TARGET_WINDOW_DEFAULT_SPAN_MS = 100,
 	TARGET_WINDOW_CENTER_HALF_SPAN_MS = 50,
+	TARGET_WINDOW_CLIPBOARD_MAX_AHEAD_MS = 5 * 60 * 1000,
+	DAY_MS = 24 * 60 * 60 * 1000,
 	WINDOW_LAMP_PRESTART_MS = 30,
 	WINDOW_LAMP_POLL_MS = 20,
 	MOBILE_BREAKPOINT = 760;
@@ -60,6 +62,7 @@ function applyResponsiveLayout(){
 	var compact = isCompactLayout(),
 		targetSize = compact ? 118 : 150,
 		canvas = $('#millis_canvas')[0],
+		canvasWrap = $('#millis_canvas_wrap')[0],
 		second = $('#second_display')[0],
 		lamp = $('#window_lamp')[0],
 		practiceBtn = $('#practice_button')[0],
@@ -76,6 +79,9 @@ function applyResponsiveLayout(){
 		canvas.style.height = CANVAS_SIZE + 'px';
 		drawDial(canvas.getContext('2d'));
 	}
+	if(canvasWrap){
+		canvasWrap.style.minWidth = CANVAS_SIZE + 'px';
+	}
 
 	if(second){
 		second.style.left = '50%';
@@ -85,10 +91,13 @@ function applyResponsiveLayout(){
 	}
 
 	if(lamp){
-		lamp.style.width = compact ? '12px' : '14px';
-		lamp.style.height = compact ? '12px' : '14px';
-		lamp.style.top = compact ? '8px' : '12px';
-		lamp.style.right = compact ? '8px' : '12px';
+		lamp.style.width = compact ? '16px' : '18px';
+		lamp.style.height = compact ? '16px' : '18px';
+		lamp.style.top = compact ? '3px' : '6px';
+		lamp.style.right = compact ? '3px' : '6px';
+		lamp.style.border = '2px solid #2a2a2a';
+		lamp.style.zIndex = '30';
+		lamp.style.display = 'block';
 	}
 
 	if(practiceBtn){
@@ -98,11 +107,11 @@ function applyResponsiveLayout(){
 	}
 
 	if(targetWindowStartInput){
-		targetWindowStartInput.style.width = compact ? '128px' : '190px';
+		targetWindowStartInput.style.width = compact ? '102px' : '118px';
 		targetWindowStartInput.style.fontSize = compact ? '12px' : '';
 	}
 	if(targetWindowEndInput){
-		targetWindowEndInput.style.width = compact ? '128px' : '190px';
+		targetWindowEndInput.style.width = compact ? '102px' : '118px';
 		targetWindowEndInput.style.fontSize = compact ? '12px' : '';
 	}
 
@@ -222,7 +231,7 @@ function addTimer(){
 		canvasWidth.value = String(CANVAS_SIZE);
 		canvasHeight.value = String(CANVAS_SIZE);
 		canvasStyle.value = 'height:'+CANVAS_SIZE+'px;width:'+CANVAS_SIZE+'px;display:block';
-		canvasTdStyle.value = 'position:relative;';
+		canvasTdStyle.value = 'position:relative;overflow:visible;min-width:'+CANVAS_SIZE+'px;';
 		canvasTd.setAttributeNode(canvasRowspan);
 		canvasTd.setAttributeNode(canvasColspan);
 		canvasTd.setAttributeNode(canvasTdStyle);
@@ -235,7 +244,7 @@ function addTimer(){
 		secondDisplay.setAttributeNode(secondId);
 		secondDisplay.setAttributeNode(secondStyle);
 		windowLampId.value = 'window_lamp';
-		windowLampStyle.value = 'position:absolute;top:12px;right:12px;width:14px;height:14px;border-radius:50%;background:'+WINDOW_LAMP_OFF+';box-shadow:0 0 2px rgba(0,0,0,0.8);';
+		windowLampStyle.value = 'position:absolute;top:6px;right:6px;width:18px;height:18px;border:2px solid #2a2a2a;border-radius:50%;background:'+WINDOW_LAMP_OFF+';box-shadow:0 0 3px rgba(0,0,0,0.9);z-index:30;display:block;';
 		windowLampTitle.value = 'Индикатор целевого окна';
 		windowLamp.setAttributeNode(windowLampId);
 		windowLamp.setAttributeNode(windowLampStyle);
@@ -504,36 +513,134 @@ function pad3(n){
 	return String(n).padStart(3, '0');
 }
 
-function formatTargetWindowDate(dateObj){
-	return pad2(dateObj.getDate()) + '.' +
-		pad2(dateObj.getMonth() + 1) + '.' +
-		dateObj.getFullYear() + ' ' +
-		pad2(dateObj.getHours()) + ':' +
-		pad2(dateObj.getMinutes()) + ':' +
-		pad2(dateObj.getSeconds()) + ':' +
-		pad3(dateObj.getMilliseconds());
+function normalizeMsOfDay(value){
+	var normalized = Number(value) % DAY_MS;
+	if(normalized < 0){
+		normalized += DAY_MS;
+	}
+	return normalized;
+}
+
+function formatTargetWindowTime(msOfDay){
+	var normalized = normalizeMsOfDay(Math.round(msOfDay)),
+		hours = Math.floor(normalized / 3600000),
+		minutes,
+		seconds,
+		millis;
+
+	normalized -= hours * 3600000;
+	minutes = Math.floor(normalized / 60000);
+	normalized -= minutes * 60000;
+	seconds = Math.floor(normalized / 1000);
+	millis = normalized - seconds * 1000;
+
+	return pad2(hours) + ':' + pad2(minutes) + ':' + pad2(seconds) + ':' + pad3(millis);
+}
+
+function getCurrentServerClockMsOfDay(){
+	var serverTimeEl = document.getElementById('serverTime'),
+		match = serverTimeEl ? String(serverTimeEl.textContent || '').match(/(\d{1,2}):(\d{1,2}):(\d{1,2})/) : null,
+		serverNowMs = Math.floor(getCurrentReferenceTimeMs()),
+		millis = normalizeMsOfDay(serverNowMs) % 1000,
+		d;
+
+	if(match){
+		return normalizeMsOfDay(
+			Number(match[1]) * 3600000 +
+			Number(match[2]) * 60000 +
+			Number(match[3]) * 1000 +
+			millis
+		);
+	}
+
+	d = new Date(serverNowMs);
+	return normalizeMsOfDay(
+		d.getHours() * 3600000 +
+		d.getMinutes() * 60000 +
+		d.getSeconds() * 1000 +
+		d.getMilliseconds()
+	);
+}
+
+function parseTimeOfDayInput(rawValue){
+	var value = String(rawValue || '').trim(),
+		match,
+		hours,
+		minutes,
+		seconds,
+		millis;
+
+	if(!value){
+		return NaN;
+	}
+
+	match = value.match(/^(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?(?::(\d{1,3}))?$/);
+	if(!match){
+		match = value.match(/(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?(?::(\d{1,3}))?$/);
+	}
+	if(!match){
+		return NaN;
+	}
+
+	hours = Number(match[1]);
+	minutes = Number(match[2]);
+	seconds = Number(match[3] || 0);
+	millis = Number(match[4] || 0);
+
+	if(
+		hours < 0 || hours > 23 ||
+		minutes < 0 || minutes > 59 ||
+		seconds < 0 || seconds > 59 ||
+		millis < 0 || millis > 999
+	){
+		return NaN;
+	}
+
+	return hours * 3600000 + minutes * 60000 + seconds * 1000 + millis;
+}
+
+function isTimeInWindow(nowMsOfDay, startMsOfDay, endMsOfDay){
+	if(isNaN(nowMsOfDay) || isNaN(startMsOfDay) || isNaN(endMsOfDay)){
+		return false;
+	}
+	if(startMsOfDay <= endMsOfDay){
+		return nowMsOfDay >= startMsOfDay && nowMsOfDay <= endMsOfDay;
+	}
+	return nowMsOfDay >= startMsOfDay || nowMsOfDay <= endMsOfDay;
+}
+
+function isTimeInPreWindow(nowMsOfDay, startMsOfDay){
+	var preStartMsOfDay;
+	if(isNaN(nowMsOfDay) || isNaN(startMsOfDay)){
+		return false;
+	}
+	preStartMsOfDay = normalizeMsOfDay(startMsOfDay - WINDOW_LAMP_PRESTART_MS);
+	if(preStartMsOfDay <= startMsOfDay){
+		return nowMsOfDay >= preStartMsOfDay && nowMsOfDay < startMsOfDay;
+	}
+	return nowMsOfDay >= preStartMsOfDay || nowMsOfDay < startMsOfDay;
 }
 
 function buildDefaultWindowValues(tableBody){
 	var durationRow = findInfoRow(tableBody, /длительн|duration/i),
 		durationText = durationRow && durationRow.children && durationRow.children[1] ? durationRow.children[1].textContent : '',
 		durationMs = parseDurationToMs(durationText),
-		nowMs = getCurrentReferenceTimeMs(),
-		startMs,
-		endMs;
+		nowMsOfDay = getCurrentServerClockMsOfDay(),
+		startMsOfDay,
+		endMsOfDay;
 
 	if(isNaN(durationMs) || durationMs < 0){
 		durationMs = 0;
 	}
 
-	startMs = nowMs + durationMs + TARGET_WINDOW_DEFAULT_SHIFT_MS;
-	endMs = startMs + TARGET_WINDOW_DEFAULT_SPAN_MS;
+	startMsOfDay = normalizeMsOfDay(nowMsOfDay + durationMs + TARGET_WINDOW_DEFAULT_SHIFT_MS);
+	endMsOfDay = normalizeMsOfDay(startMsOfDay + TARGET_WINDOW_DEFAULT_SPAN_MS);
 
 	return {
-		start: formatTargetWindowDate(new Date(startMs)),
-		end: formatTargetWindowDate(new Date(endMs)),
-		startMs: startMs,
-		endMs: endMs
+		start: formatTargetWindowTime(startMsOfDay),
+		end: formatTargetWindowTime(endMsOfDay),
+		startMsOfDay: startMsOfDay,
+		endMsOfDay: endMsOfDay
 	};
 }
 
@@ -542,7 +649,8 @@ function parseClipboardCenterTime(rawValue){
 		hours,
 		minutes,
 		seconds,
-		millis;
+		millis,
+		msOfDay;
 
 	if(!match){
 		return null;
@@ -562,26 +670,29 @@ function parseClipboardCenterTime(rawValue){
 		return null;
 	}
 
+	msOfDay = hours * 3600000 + minutes * 60000 + seconds * 1000 + millis;
+
 	return {
 		hours: hours,
 		minutes: minutes,
 		seconds: seconds,
-		millis: millis
+		millis: millis,
+		msOfDay: msOfDay
 	};
 }
 
-function buildWindowValuesFromCenterMs(centerMs){
-	var startMs = centerMs - TARGET_WINDOW_CENTER_HALF_SPAN_MS,
-		endMs = centerMs + TARGET_WINDOW_CENTER_HALF_SPAN_MS;
+function buildWindowValuesFromCenterMs(centerMsOfDay){
+	var startMsOfDay = normalizeMsOfDay(centerMsOfDay - TARGET_WINDOW_CENTER_HALF_SPAN_MS),
+		endMsOfDay = normalizeMsOfDay(centerMsOfDay + TARGET_WINDOW_CENTER_HALF_SPAN_MS);
 	return {
-		startMs: startMs,
-		endMs: endMs,
-		start: formatTargetWindowDate(new Date(startMs)),
-		end: formatTargetWindowDate(new Date(endMs))
+		startMsOfDay: startMsOfDay,
+		endMsOfDay: endMsOfDay,
+		start: formatTargetWindowTime(startMsOfDay),
+		end: formatTargetWindowTime(endMsOfDay)
 	};
 }
 
-function tryApplyClipboardCenterWindow(startInput, endInput, defaultStartMs){
+function tryApplyClipboardCenterWindow(startInput, endInput){
 	if(!startInput || !endInput){
 		return;
 	}
@@ -591,32 +702,21 @@ function tryApplyClipboardCenterWindow(startInput, endInput, defaultStartMs){
 
 	navigator.clipboard.readText().then(function(clipboardText){
 		var parsed = parseClipboardCenterTime(clipboardText),
-			nowMs,
-			baseDate,
-			centerMs,
+			nowMsOfDay,
+			deltaForwardMs,
 			windowValues;
 
 		if(!parsed){
 			return;
 		}
 
-		nowMs = getCurrentReferenceTimeMs();
-		baseDate = new Date(defaultStartMs || nowMs);
-		centerMs = new Date(
-			baseDate.getFullYear(),
-			baseDate.getMonth(),
-			baseDate.getDate(),
-			parsed.hours,
-			parsed.minutes,
-			parsed.seconds,
-			parsed.millis
-		).getTime();
-
-		if(centerMs < nowMs){
+		nowMsOfDay = getCurrentServerClockMsOfDay();
+		deltaForwardMs = normalizeMsOfDay(parsed.msOfDay - nowMsOfDay);
+		if(deltaForwardMs > TARGET_WINDOW_CLIPBOARD_MAX_AHEAD_MS){
 			return;
 		}
 
-		windowValues = buildWindowValuesFromCenterMs(centerMs);
+		windowValues = buildWindowValuesFromCenterMs(parsed.msOfDay);
 		startInput.value = windowValues.start;
 		endInput.value = windowValues.end;
 		updateWindowLamp();
@@ -635,7 +735,7 @@ function insertTargetWindowRow(tableBody){
 		if(targetWindowEndInput){
 			targetWindowEndInput.value = defaultValues.end;
 		}
-		tryApplyClipboardCenterWindow(targetWindowStartInput, targetWindowEndInput, defaultValues.startMs);
+		tryApplyClipboardCenterWindow(targetWindowStartInput, targetWindowEndInput);
 		applyResponsiveLayout();
 		return;
 	}
@@ -655,8 +755,8 @@ function insertTargetWindowRow(tableBody){
 
 	startInput.type = 'text';
 	startInput.id = 'target_window_start';
-	startInput.style.width = '190px';
-	startInput.title = 'Формат: дд.мм.гггг чч:мм:сс:мс';
+	startInput.style.width = '118px';
+	startInput.title = 'Формат: чч:мм:сс:мс';
 	startInput.value = defaultValues.start;
 
 	separator.innerHTML = ' — ';
@@ -664,8 +764,8 @@ function insertTargetWindowRow(tableBody){
 
 	endInput.type = 'text';
 	endInput.id = 'target_window_end';
-	endInput.style.width = '190px';
-	endInput.title = 'Формат: дд.мм.гггг чч:мм:сс:мс';
+	endInput.style.width = '118px';
+	endInput.title = 'Формат: чч:мм:сс:мс';
 	endInput.value = defaultValues.end;
 
 	startInput.addEventListener('change', saveTargetWindowInputs);
@@ -689,7 +789,7 @@ function insertTargetWindowRow(tableBody){
 
 	targetWindowStartInput = startInput;
 	targetWindowEndInput = endInput;
-	tryApplyClipboardCenterWindow(targetWindowStartInput, targetWindowEndInput, defaultValues.startMs);
+	tryApplyClipboardCenterWindow(targetWindowStartInput, targetWindowEndInput);
 	applyResponsiveLayout();
 }
 
@@ -698,126 +798,23 @@ function saveTargetWindowInputs(){
 }
 
 function parseTargetWindowValue(rawValue){
-	var value = String(rawValue || '').trim(),
-		parsed,
-		match,
-		now,
-		baseDate;
-
-	if(!value){
-		return NaN;
-	}
-
-	match = value.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?(?::(\d{1,3}))?$/);
-	if(match){
-		if(
-			Number(match[2]) < 1 || Number(match[2]) > 12 ||
-			Number(match[1]) < 1 || Number(match[1]) > 31 ||
-			Number(match[4]) > 23 || Number(match[5]) > 59 || Number(match[6] || 0) > 59 || Number(match[7] || 0) > 999
-		){
-			return NaN;
-		}
-		return new Date(
-			Number(match[3]),
-			Number(match[2]) - 1,
-			Number(match[1]),
-			Number(match[4]),
-			Number(match[5]),
-			Number(match[6] || 0),
-			Number(match[7] || 0)
-		).getTime();
-	}
-
-	match = value.match(/^(\d{4})\.(\d{1,2})\.(\d{1,2})\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?(?::(\d{1,3}))?$/);
-	if(match){
-		if(
-			Number(match[2]) < 1 || Number(match[2]) > 12 ||
-			Number(match[3]) < 1 || Number(match[3]) > 31 ||
-			Number(match[4]) > 23 || Number(match[5]) > 59 || Number(match[6] || 0) > 59 || Number(match[7] || 0) > 999
-		){
-			return NaN;
-		}
-		return new Date(
-			Number(match[1]),
-			Number(match[2]) - 1,
-			Number(match[3]),
-			Number(match[4]),
-			Number(match[5]),
-			Number(match[6] || 0),
-			Number(match[7] || 0)
-		).getTime();
-	}
-
-	match = value.match(/^(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?(?::(\d{1,3}))?$/);
-	if(match){
-		if(
-			Number(match[1]) > 23 || Number(match[2]) > 59 ||
-			Number(match[3] || 0) > 59 || Number(match[4] || 0) > 999
-		){
-			return NaN;
-		}
-		now = new Date(getCurrentReferenceTimeMs());
-		baseDate = new Date(
-			now.getFullYear(),
-			now.getMonth(),
-			now.getDate(),
-			Number(match[1]),
-			Number(match[2]),
-			Number(match[3] || 0),
-			Number(match[4] || 0)
-		);
-		return baseDate.getTime();
-	}
-
-	match = value.match(/^(\d{4})-(\d{1,2})-(\d{1,2})[T\s](\d{1,2}):(\d{1,2}):(\d{1,2})(?:[.:](\d{1,3}))?$/);
-	if(match){
-		if(
-			Number(match[2]) < 1 || Number(match[2]) > 12 ||
-			Number(match[3]) < 1 || Number(match[3]) > 31 ||
-			Number(match[4]) > 23 || Number(match[5]) > 59 || Number(match[6]) > 59 || Number(match[7] || 0) > 999
-		){
-			return NaN;
-		}
-		return new Date(
-			Number(match[1]),
-			Number(match[2]) - 1,
-			Number(match[3]),
-			Number(match[4]),
-			Number(match[5]),
-			Number(match[6]),
-			Number(match[7] || 0)
-		).getTime();
-	}
-
-	parsed = Date.parse(value);
-	if(!isNaN(parsed)){
-		return parsed;
-	}
-
-	return NaN;
+	return parseTimeOfDayInput(rawValue);
 }
 
 function updateWindowLamp(){
 	var lamp = $('#window_lamp')[0],
-		now = Math.floor(getCurrentReferenceTimeMs()),
-		startMs = parseTargetWindowValue(targetWindowStartInput ? targetWindowStartInput.value : ''),
-		endMs = parseTargetWindowValue(targetWindowEndInput ? targetWindowEndInput.value : ''),
+		nowMsOfDay = getCurrentServerClockMsOfDay(),
+		startMsOfDay = parseTargetWindowValue(targetWindowStartInput ? targetWindowStartInput.value : ''),
+		endMsOfDay = parseTargetWindowValue(targetWindowEndInput ? targetWindowEndInput.value : ''),
 		isActive,
-		isPreActive,
-		tmp;
+		isPreActive;
 
 	if(!lamp){
 		return;
 	}
 
-	if(!isNaN(startMs) && !isNaN(endMs) && endMs < startMs){
-		tmp = startMs;
-		startMs = endMs;
-		endMs = tmp;
-	}
-
-	isActive = !isNaN(startMs) && !isNaN(endMs) && endMs >= startMs && now >= startMs && now <= endMs;
-	isPreActive = !isActive && !isNaN(startMs) && !isNaN(endMs) && endMs >= startMs && now >= (startMs - WINDOW_LAMP_PRESTART_MS) && now < startMs;
+	isActive = isTimeInWindow(nowMsOfDay, startMsOfDay, endMsOfDay);
+	isPreActive = !isActive && !isNaN(endMsOfDay) && isTimeInPreWindow(nowMsOfDay, startMsOfDay);
 	if(isActive){
 		lamp.style.background = WINDOW_LAMP_ON;
 		lamp.style.boxShadow = '0 0 8px '+WINDOW_LAMP_ON+', 0 0 2px rgba(0,0,0,0.8)';
