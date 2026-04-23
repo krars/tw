@@ -615,6 +615,24 @@ function parseTimeOfDayInput(rawValue){
 	return hours * 3600000 + minutes * 60000 + seconds * 1000 + millis;
 }
 
+function getCurrentArrivalClockMsOfDay(){
+	var rel = $('.relative_time')[0],
+		text = rel ? String(rel.textContent || rel.innerText || '').trim() : '',
+		parsed = parseTimeOfDayInput(text),
+		hasMs = /[:.]\d{1,3}\s*$/.test(text),
+		serverMs;
+
+	if(!isNaN(parsed)){
+		if(hasMs){
+			return normalizeMsOfDay(parsed);
+		}
+		serverMs = getCurrentServerClockMsOfDay() % 1000;
+		return normalizeMsOfDay(Math.floor(parsed / 1000) * 1000 + serverMs);
+	}
+
+	return getCurrentServerClockMsOfDay();
+}
+
 function isTimeInWindow(nowMsOfDay, startMsOfDay, endMsOfDay){
 	if(isNaN(nowMsOfDay) || isNaN(startMsOfDay) || isNaN(endMsOfDay)){
 		return false;
@@ -820,7 +838,7 @@ function parseTargetWindowValue(rawValue){
 function updateWindowLamp(){
 	var lamp = $('#window_lamp')[0],
 		floatingLamp = $('#window_lamp_floating')[0],
-		nowMsOfDay = getCurrentServerClockMsOfDay(),
+		nowMsOfDay = getCurrentArrivalClockMsOfDay(),
 		startMsOfDay = parseTargetWindowValue(targetWindowStartInput ? targetWindowStartInput.value : ''),
 		endMsOfDay = parseTargetWindowValue(targetWindowEndInput ? targetWindowEndInput.value : ''),
 		isActive,
