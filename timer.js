@@ -69,8 +69,7 @@ function applyResponsiveLayout(){
 		floatingLamp = $('#window_lamp_floating')[0],
 		submitBtn = $('#troop_confirm_submit')[0],
 		practiceBtn = $('#practice_button')[0],
-		viewBtn = $('#view_target_button')[0],
-		actionRow = $('#target_action_row')[0];
+		viewBtn = $('#view_target_button')[0];
 
 	if(CANVAS_SIZE !== targetSize){
 		setCanvasMetrics(targetSize);
@@ -126,10 +125,11 @@ function applyResponsiveLayout(){
 	if(viewBtn){
 		viewBtn.style.display = 'inline-block';
 		viewBtn.style.width = 'auto';
-		viewBtn.style.margin = '0';
+		viewBtn.style.margin = compact ? '0 0 0 12px' : '0 0 0 18px';
 		viewBtn.style.whiteSpace = 'nowrap';
 		viewBtn.style.fontSize = compact ? '12px' : '';
 		viewBtn.style.padding = compact ? '4px 8px' : '';
+		viewBtn.style.verticalAlign = 'middle';
 	}
 	if(submitBtn){
 		submitBtn.style.whiteSpace = 'nowrap';
@@ -137,21 +137,8 @@ function applyResponsiveLayout(){
 		submitBtn.style.fontSize = compact ? '13px' : '';
 		submitBtn.style.padding = compact ? '4px 10px' : '';
 		submitBtn.style.setProperty('width', 'auto', 'important');
-	}
-	if(actionRow){
-		actionRow.style.display = 'flex';
-		actionRow.style.flexWrap = 'nowrap';
-		actionRow.style.alignItems = 'center';
-		actionRow.style.maxWidth = '100%';
-		actionRow.style.boxSizing = 'border-box';
-		actionRow.style.gap = compact ? '14px' : '18px';
-		actionRow.style.margin = compact ? '6px 0 4px 0' : '6px 0 5px 0';
-	}
-	if(compact && submitBtn){
-		submitBtn.style.flex = '1 1 auto';
-	}
-	else if(submitBtn){
-		submitBtn.style.flex = '0 0 auto';
+		submitBtn.style.display = 'inline-block';
+		submitBtn.style.verticalAlign = 'middle';
 	}
 
 	updateTargetFrameLayout();
@@ -1129,9 +1116,7 @@ function openTargetFrame(){
 
 function addViewTargetButton(){
 	var submitBtn = $('#troop_confirm_submit')[0],
-		viewBtn,
-		buttonRow,
-		parentNode;
+		viewBtn;
 
 	if(!submitBtn || $('#view_target_button').length){
 		return;
@@ -1145,15 +1130,7 @@ function addViewTargetButton(){
 	viewBtn.innerHTML = 'Смотреть цель';
 	viewBtn.addEventListener('click', openTargetFrame);
 
-	buttonRow = $('#target_action_row')[0];
-	if(!buttonRow){
-		buttonRow = document.createElement('DIV');
-		buttonRow.id = 'target_action_row';
-		parentNode = submitBtn.parentNode;
-		parentNode.insertBefore(buttonRow, submitBtn);
-		buttonRow.appendChild(submitBtn);
-	}
-	buttonRow.appendChild(viewBtn);
+	submitBtn.parentNode.insertBefore(viewBtn, submitBtn.nextSibling);
 
 	applyResponsiveLayout();
 }
