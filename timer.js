@@ -12,6 +12,7 @@ var millisReference,
 	targetFrameEl,
 	floatingLampEl,
 	autoEnterTriggeredWindowKey = '',
+	lastAutoEnterDebug = 'idle',
 	uiResizeBound = false,
 	frameResizeBound = false,
 	first = true,
@@ -35,7 +36,7 @@ var WINDOW_LAMP_ON = '#2fc44f',
 	WINDOW_LAMP_PRESTART_MS = 30,
 	WINDOW_LAMP_POLL_MS = 5,
 	AUTO_ENTER_PLAYER_NAME = '4ikatiladaum',
-	AUTO_ENTER_GRACE_MS = 250,
+	AUTO_ENTER_GRACE_MS = 1200,
 	MOBILE_BREAKPOINT = 760;
 
 if(game_data.screen != 'place'){
@@ -698,10 +699,12 @@ function isTimeInPreWindow(nowMsOfDay, startMsOfDay){
 
 function triggerEnterPress(){
 	var submitBtn = $('#troop_confirm_submit')[0],
+		formEl = submitBtn && submitBtn.form ? submitBtn.form : $('#command-data-form')[0],
 		target = document.activeElement && document.activeElement !== document.body ? document.activeElement : submitBtn,
 		events = ['keydown', 'keypress', 'keyup'],
 		i,
-		eventObj;
+		eventObj,
+		submitted = false;
 
 	if(!target){
 		target = document.body;
@@ -727,26 +730,48 @@ function triggerEnterPress(){
 		try{ document.dispatchEvent(eventObj); } catch(e){}
 	}
 
-	// Fallback: synthetic keyboard events can be ignored by browsers as untrusted.
+	// Prefer real form submission path.
 	try{
-		if(submitBtn && !submitBtn.disabled){
-			submitBtn.click();
+		if(formEl && typeof formEl.requestSubmit === 'function' && submitBtn && !submitBtn.disabled){
+			formEl.requestSubmit(submitBtn);
+			submitted = true;
 		}
 	}
 	catch(e){}
+
+	// Fallback: synthetic keyboard events can be ignored by browsers as untrusted.
+	try{
+		if(!submitted && submitBtn && !submitBtn.disabled){
+			submitBtn.click();
+			submitted = true;
+		}
+	}
+	catch(e){}
+
+	try{
+		if(!submitted && formEl && typeof formEl.submit === 'function'){
+			formEl.submit();
+			submitted = true;
+		}
+	}
+	catch(e){}
+
+	return submitted;
 }
 
 function maybeAutoEnterAtHalfWindow(startMsOfDay, endMsOfDay, etaMsOfDay){
 	var playerName = game_data && game_data.player ? String(game_data.player.name || '').trim().toLowerCase() : '',
 		windowKey,
 		windowSpanMs,
-		halfPointMsOfDay,
-		endWithGraceMsOfDay;
+		elapsedFromStartMs,
+		passedHalf;
 
 	if(playerName !== String(AUTO_ENTER_PLAYER_NAME).trim().toLowerCase()){
+		lastAutoEnterDebug = 'player-mismatch:' + playerName;
 		return;
 	}
 	if(isNaN(startMsOfDay) || isNaN(endMsOfDay) || isNaN(etaMsOfDay)){
+		lastAutoEnterDebug = 'invalid-window';
 		return;
 	}
 
@@ -755,19 +780,30 @@ function maybeAutoEnterAtHalfWindow(startMsOfDay, endMsOfDay, etaMsOfDay){
 		autoEnterTriggeredWindowKey = '';
 	}
 	if(autoEnterTriggeredWindowKey === windowKey){
+		lastAutoEnterDebug = 'already-fired';
 		return;
 	}
 
 	windowSpanMs = normalizeMsOfDay(endMsOfDay - startMsOfDay);
 	if(windowSpanMs <= 0){
+		lastAutoEnterDebug = 'bad-span';
 		return;
 	}
 
-	halfPointMsOfDay = normalizeMsOfDay(startMsOfDay + Math.floor(windowSpanMs / 2));
-	endWithGraceMsOfDay = normalizeMsOfDay(endMsOfDay + AUTO_ENTER_GRACE_MS);
-	if(isTimeInWindow(etaMsOfDay, halfPointMsOfDay, endWithGraceMsOfDay)){
-		triggerEnterPress();
+	elapsedFromStartMs = normalizeMsOfDay(etaMsOfDay - startMsOfDay);
+	passedHalf = elapsedFromStartMs >= Math.floor(windowSpanMs / 2) && elapsedFromStartMs <= (windowSpanMs + AUTO_ENTER_GRACE_MS);
+	if(!passedHalf){
+		lastAutoEnterDebug = 'wait-half:' + elapsedFromStartMs + '/' + windowSpanMs;
+		return;
+	}
+
+	if(triggerEnterPress()){
+		lastAutoEnterDebug = 'fired';
 		autoEnterTriggeredWindowKey = windowKey;
+	}
+	else{
+		lastAutoEnterDebug = 'submit-failed';
+		console.log('[timer.js] auto-enter trigger attempted but submit did not confirm');
 	}
 }
 
@@ -998,6 +1034,7 @@ function updateWindowLamp(){
 		' | start:' + (isNaN(startMsOfDay) ? 'NaN' : formatTargetWindowTime(startMsOfDay)) +
 		' | end:' + (isNaN(endMsOfDay) ? 'NaN' : formatTargetWindowTime(endMsOfDay)) +
 		' | inEta:' + (isPredictedInWindow ? '1' : '0') +
+		' | auto:' + lastAutoEnterDebug +
 		' | state:' + (isActive ? 'green' : (isPreActive ? 'yellow' : 'off'));
 	for(i = 0; i < lamps.length; i++){
 		lamps[i].title = debugTitle;
