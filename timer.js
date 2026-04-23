@@ -3,7 +3,13 @@ var millisReference,
 	lastChange,
 	timerInterval,
 	startupInterval,
+	windowLampInterval,
 	lastArrival,
+	targetWindowStartInput,
+	targetWindowEndInput,
+	targetVillageHref,
+	targetFrameWrapper,
+	targetFrameEl,
 	first = true,
 	changed = false,
 	worldNr = game_data.world;
@@ -13,6 +19,11 @@ var CANVAS_SIZE = 150,
 	CANVAS_RADIUS = 58,
 	ARC_RADIUS = 50,
 	CIRCLE_OFFSET = -Math.PI / 2;
+
+var WINDOW_LAMP_ON = '#2fc44f',
+	WINDOW_LAMP_OFF = '#8a8a8a',
+	TARGET_WINDOW_START_KEY = worldNr + '_targetWindowStart',
+	TARGET_WINDOW_END_KEY = worldNr + '_targetWindowEnd';
 
 if(game_data.screen != 'place'){
 	alert("This script must be run from the rally point.\nRunning during command execution will add millisecond assist.\nRunning after command excecution will show you by how many milliseconds you missed the target.");
@@ -31,6 +42,8 @@ function timer(){
 	var arrival = $(".relative_time")[0].innerHTML,
 		d = new Date(),
 		now = d.getTime();
+
+	updateWindowLamp();
 
 	if(lastArrival != arrival && changed == false){
 		$("#second_display")[0].innerHTML = arrival.split(":")[2];
@@ -74,6 +87,9 @@ function startupTimer(){
 	var arrival = $(".relative_time")[0].innerHTML,
 		d = new Date(),
 		now = d.getTime();
+
+	updateWindowLamp();
+
 	if(lastArrival != arrival && changed == false){
 		changed = true;
 		$("#second_display")[0].innerHTML = arrival.split(":")[2];
@@ -92,9 +108,13 @@ function addTimer(){
 			lastRow = tableBody.children[tableBody.children.length-1],
 			cname = [worldNr+'_hitMs', worldNr+'_offsetMs'];
 		tableBody.children[0].children[0].setAttribute('colspan', Number($('[colspan]', tableBody).attr('colspan')[0])+4);
+		insertTargetWindowRow(tableBody);
+		targetVillageHref = getTargetVillageHref(tableBody);
+		addViewTargetButton();
 
 		// Create canvas:
 		var canvasTd = document.createElement('TD'),
+			canvasTdStyle = document.createAttribute('style'),
 			canvasCanvas = document.createElement('CANVAS'),
 			canvasRowspan = document.createAttribute('rowspan'),
 			canvasColspan = document.createAttribute('colspan'),
@@ -104,25 +124,38 @@ function addTimer(){
 			canvasStyle = document.createAttribute('style'),
 			secondDisplay = document.createElement('H2'),
 			secondStyle = document.createAttribute('style'),
-			secondId = document.createAttribute('id');
+			secondId = document.createAttribute('id'),
+			windowLamp = document.createElement('DIV'),
+			windowLampId = document.createAttribute('id'),
+			windowLampStyle = document.createAttribute('style'),
+			windowLampTitle = document.createAttribute('title');
 		canvasRowspan.value = tableBody.children.length-2;
 		canvasColspan.value = 4;
 		canvasId.value = 'millis_canvas';
 		canvasWidth.value = String(CANVAS_SIZE);
 		canvasHeight.value = String(CANVAS_SIZE);
-		canvasStyle.value = 'height:150px;width:150px';
+		canvasStyle.value = 'height:150px;width:150px;display:block';
+		canvasTdStyle.value = 'position:relative;';
 		canvasTd.setAttributeNode(canvasRowspan);
 		canvasTd.setAttributeNode(canvasColspan);
+		canvasTd.setAttributeNode(canvasTdStyle);
 		canvasCanvas.setAttributeNode(canvasId);
 		canvasCanvas.setAttributeNode(canvasWidth);
 		canvasCanvas.setAttributeNode(canvasHeight);
 		canvasCanvas.setAttributeNode(canvasStyle);
-		secondStyle.value = 'position:relative;bottom:105px;left:62px';
+		secondStyle.value = 'position:absolute;top:48px;left:62px;margin:0;';
 		secondId.value = 'second_display';
 		secondDisplay.setAttributeNode(secondId);
 		secondDisplay.setAttributeNode(secondStyle);
+		windowLampId.value = 'window_lamp';
+		windowLampStyle.value = 'position:absolute;top:12px;right:12px;width:14px;height:14px;border-radius:50%;background:'+WINDOW_LAMP_OFF+';box-shadow:0 0 2px rgba(0,0,0,0.8);';
+		windowLampTitle.value = 'Индикатор целевого окна';
+		windowLamp.setAttributeNode(windowLampId);
+		windowLamp.setAttributeNode(windowLampStyle);
+		windowLamp.setAttributeNode(windowLampTitle);
 		canvasTd.appendChild(canvasCanvas);
         canvasTd.appendChild(secondDisplay);
+		canvasTd.appendChild(windowLamp);
 
 		// Create practice button:
 		var pbTd = document.createElement('TD'),
@@ -231,6 +264,11 @@ function addTimer(){
 		lastRow.appendChild(offsetTd);
 		lastRow.appendChild(missTd);
 		$('#ds_body')[0].setAttribute('onsubmit', 'practiceFunction()');
+		if(windowLampInterval){
+			clearInterval(windowLampInterval);
+		}
+		windowLampInterval = setInterval(updateWindowLamp, 200);
+		updateWindowLamp();
 		resetTimer($(".relative_time")[0].innerHTML, true);
 	}
 	catch(err){
@@ -311,6 +349,271 @@ function drawDial(ctx){
 	}
 
 	ctx.restore();
+}
+
+function findInfoRow(tableBody, labelRegex){
+	var i,
+		row,
+		labelCell,
+		label;
+
+	for(i = 0; i < tableBody.children.length; i++){
+		row = tableBody.children[i];
+		if(!row || !row.children || row.children.length < 2){
+			continue;
+		}
+		labelCell = row.children[0];
+		label = labelCell.textContent.replace(/\s+/g, ' ').trim();
+		if(labelRegex.test(label)){
+			return row;
+		}
+	}
+	return null;
+}
+
+function insertTargetWindowRow(tableBody){
+	if($('#target_window_row').length){
+		targetWindowStartInput = $('#target_window_start')[0];
+		targetWindowEndInput = $('#target_window_end')[0];
+		return;
+	}
+
+	var arrivalRow = $('#date_arrival').closest('tr')[0],
+		durationRow = findInfoRow(tableBody, /длительн|duration/i),
+		windowRow = document.createElement('TR'),
+		labelTd = document.createElement('TD'),
+		valueTd = document.createElement('TD'),
+		startInput = document.createElement('INPUT'),
+		endInput = document.createElement('INPUT'),
+		separator = document.createElement('SPAN'),
+		storedStart = localStorage.getItem(TARGET_WINDOW_START_KEY) || '',
+		storedEnd = localStorage.getItem(TARGET_WINDOW_END_KEY) || '';
+
+	windowRow.id = 'target_window_row';
+	labelTd.innerHTML = 'Целевое время:';
+
+	startInput.type = 'datetime-local';
+	startInput.id = 'target_window_start';
+	startInput.step = '1';
+	startInput.style.width = '170px';
+	startInput.value = storedStart;
+
+	separator.innerHTML = ' — ';
+	separator.style.margin = '0 4px';
+
+	endInput.type = 'datetime-local';
+	endInput.id = 'target_window_end';
+	endInput.step = '1';
+	endInput.style.width = '170px';
+	endInput.value = storedEnd;
+
+	startInput.addEventListener('change', saveTargetWindowInputs);
+	endInput.addEventListener('change', saveTargetWindowInputs);
+
+	valueTd.appendChild(startInput);
+	valueTd.appendChild(separator);
+	valueTd.appendChild(endInput);
+	windowRow.appendChild(labelTd);
+	windowRow.appendChild(valueTd);
+
+	if(arrivalRow && arrivalRow.parentNode === tableBody){
+		tableBody.insertBefore(windowRow, arrivalRow);
+	}
+	else if(durationRow && durationRow.nextSibling){
+		tableBody.insertBefore(windowRow, durationRow.nextSibling);
+	}
+	else{
+		tableBody.appendChild(windowRow);
+	}
+
+	targetWindowStartInput = startInput;
+	targetWindowEndInput = endInput;
+}
+
+function saveTargetWindowInputs(){
+	if(targetWindowStartInput){
+		if(targetWindowStartInput.value){
+			localStorage.setItem(TARGET_WINDOW_START_KEY, targetWindowStartInput.value);
+		}
+		else{
+			localStorage.removeItem(TARGET_WINDOW_START_KEY);
+		}
+	}
+	if(targetWindowEndInput){
+		if(targetWindowEndInput.value){
+			localStorage.setItem(TARGET_WINDOW_END_KEY, targetWindowEndInput.value);
+		}
+		else{
+			localStorage.removeItem(TARGET_WINDOW_END_KEY);
+		}
+	}
+	updateWindowLamp();
+}
+
+function parseTargetWindowValue(rawValue){
+	var value = String(rawValue || '').trim(),
+		parsed,
+		match;
+
+	if(!value){
+		return NaN;
+	}
+
+	parsed = Date.parse(value);
+	if(!isNaN(parsed)){
+		return parsed;
+	}
+
+	match = value.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})\s+(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?$/);
+	if(match){
+		parsed = new Date(
+			Number(match[3]),
+			Number(match[2]) - 1,
+			Number(match[1]),
+			Number(match[4]),
+			Number(match[5]),
+			Number(match[6] || 0)
+		).getTime();
+		return parsed;
+	}
+
+	return NaN;
+}
+
+function updateWindowLamp(){
+	var lamp = $('#window_lamp')[0],
+		now = Date.now(),
+		startMs = parseTargetWindowValue(targetWindowStartInput ? targetWindowStartInput.value : ''),
+		endMs = parseTargetWindowValue(targetWindowEndInput ? targetWindowEndInput.value : ''),
+		isActive;
+
+	if(!lamp){
+		return;
+	}
+
+	isActive = !isNaN(startMs) && !isNaN(endMs) && endMs >= startMs && now >= startMs && now <= endMs;
+	lamp.style.background = isActive ? WINDOW_LAMP_ON : WINDOW_LAMP_OFF;
+	lamp.style.boxShadow = isActive ? '0 0 8px '+WINDOW_LAMP_ON+', 0 0 2px rgba(0,0,0,0.8)' : '0 0 2px rgba(0,0,0,0.8)';
+}
+
+function toAbsoluteUrl(href){
+	if(!href){
+		return '';
+	}
+	if(/^https?:\/\//i.test(href)){
+		return href;
+	}
+	if(href.charAt(0) === '/'){
+		return window.location.origin + href;
+	}
+	return window.location.origin + '/' + href;
+}
+
+function getTargetVillageHref(tableBody){
+	if(!tableBody || !tableBody.children){
+		return '';
+	}
+	var destinationRow = findInfoRow(tableBody, /пункт назначения|target/i),
+		link = destinationRow ? destinationRow.querySelector('a[href]') : null;
+
+	if(!link){
+		link = $('#command-data-form .village_anchor a[href]').first()[0];
+	}
+	if(!link){
+		return '';
+	}
+	return toAbsoluteUrl(link.getAttribute('href'));
+}
+
+function createTargetFrame(){
+	var frameHead,
+		frameTitle,
+		closeBtn;
+
+	targetFrameWrapper = document.createElement('DIV');
+	targetFrameWrapper.id = 'target_view_frame';
+	targetFrameWrapper.style.position = 'fixed';
+	targetFrameWrapper.style.top = '70px';
+	targetFrameWrapper.style.right = '20px';
+	targetFrameWrapper.style.width = '520px';
+	targetFrameWrapper.style.height = '420px';
+	targetFrameWrapper.style.background = '#f8efd9';
+	targetFrameWrapper.style.border = '2px solid #9b7b4b';
+	targetFrameWrapper.style.zIndex = '9999';
+	targetFrameWrapper.style.boxShadow = '0 2px 10px rgba(0,0,0,0.35)';
+	targetFrameWrapper.style.display = 'none';
+
+	frameHead = document.createElement('DIV');
+	frameHead.style.display = 'flex';
+	frameHead.style.justifyContent = 'space-between';
+	frameHead.style.alignItems = 'center';
+	frameHead.style.padding = '6px 8px';
+	frameHead.style.background = '#dcc69a';
+	frameHead.style.borderBottom = '1px solid #9b7b4b';
+
+	frameTitle = document.createElement('SPAN');
+	frameTitle.innerHTML = 'Целевая деревня';
+	frameTitle.style.fontWeight = 'bold';
+
+	closeBtn = document.createElement('BUTTON');
+	closeBtn.type = 'button';
+	closeBtn.className = 'btn';
+	closeBtn.style.padding = '2px 8px';
+	closeBtn.innerHTML = 'Закрыть';
+	closeBtn.addEventListener('click', function(){
+		targetFrameWrapper.style.display = 'none';
+	});
+
+	frameHead.appendChild(frameTitle);
+	frameHead.appendChild(closeBtn);
+
+	targetFrameEl = document.createElement('IFRAME');
+	targetFrameEl.style.width = '100%';
+	targetFrameEl.style.height = 'calc(100% - 38px)';
+	targetFrameEl.style.border = '0';
+	targetFrameEl.src = 'about:blank';
+
+	targetFrameWrapper.appendChild(frameHead);
+	targetFrameWrapper.appendChild(targetFrameEl);
+	document.body.appendChild(targetFrameWrapper);
+}
+
+function openTargetFrame(){
+	var href = targetVillageHref,
+		infoTable = $('#date_arrival').closest('table')[0],
+		fallbackBody = infoTable && infoTable.tBodies && infoTable.tBodies.length ? infoTable.tBodies[0] : null;
+	if(!href){
+		href = getTargetVillageHref(fallbackBody);
+		targetVillageHref = href;
+	}
+	if(!href){
+		alert('Не удалось определить ссылку на целевую деревню.');
+		return;
+	}
+	if(!targetFrameWrapper){
+		createTargetFrame();
+	}
+	targetFrameEl.src = href;
+	targetFrameWrapper.style.display = 'block';
+}
+
+function addViewTargetButton(){
+	var submitBtn = $('#troop_confirm_submit')[0],
+		viewBtn;
+
+	if(!submitBtn || $('#view_target_button').length){
+		return;
+	}
+
+	viewBtn = document.createElement('BUTTON');
+	viewBtn.type = 'button';
+	viewBtn.id = 'view_target_button';
+	viewBtn.className = 'btn';
+	viewBtn.style.marginLeft = '6px';
+	viewBtn.innerHTML = 'Смотреть цель';
+	viewBtn.addEventListener('click', openTargetFrame);
+
+	submitBtn.parentNode.insertBefore(viewBtn, submitBtn.nextSibling);
 }
 
 function startCanvas(lastMillis, currentMillis){

@@ -201,6 +201,69 @@
     return { x, y, key: `${x}|${y}` };
   };
 
+  const normalizeCoordDraft = (value) => {
+    const raw = String(value == null ? "" : value).replace(/\u00a0/g, " ");
+    if (!raw.trim()) return "";
+
+    const explicitMatch = raw.match(/(\d{1,3})\s*\|\s*(\d{0,3})/);
+    if (explicitMatch) {
+      const left = String(explicitMatch[1] || "").slice(0, 3);
+      const right = String(explicitMatch[2] || "").slice(0, 3);
+      return right.length ? `${left}|${right}` : `${left}|`;
+    }
+
+    const digits = raw.replace(/\D/g, "").slice(0, 6);
+    if (!digits) return "";
+    if (digits.length <= 3) return digits;
+    return `${digits.slice(0, 3)}|${digits.slice(3)}`;
+  };
+
+  const extractCoordFromText = (value) => {
+    const raw = String(value == null ? "" : value);
+    const explicitMatch = raw.match(/(\d{1,3})\s*\|\s*(\d{1,3})/);
+    if (explicitMatch) {
+      return parseCoordInput(`${explicitMatch[1]}|${explicitMatch[2]}`);
+    }
+    const compactMatch = raw.match(/\b(\d{3})(\d{3})\b/);
+    if (compactMatch) {
+      return parseCoordInput(`${compactMatch[1]}|${compactMatch[2]}`);
+    }
+    return null;
+  };
+
+  const syncInputValue = (rawValue, { force = false } = {}) => {
+    if (!state.inputEl) return "";
+    const currentValue = String(state.inputEl.value == null ? "" : state.inputEl.value);
+    if (!force && !currentValue && rawValue == null) return "";
+    const nextValue = normalizeCoordDraft(rawValue == null ? currentValue : rawValue);
+    if (nextValue !== currentValue) {
+      state.inputEl.value = nextValue;
+    }
+    return nextValue;
+  };
+
+  const autofillCoordFromClipboard = async () => {
+    if (!state.inputEl || state.inputEl.disabled) return false;
+    if (cleanText(state.inputEl.value)) return false;
+    const clipboardApi =
+      navigator && navigator.clipboard && typeof navigator.clipboard.readText === "function"
+        ? navigator.clipboard
+        : null;
+    if (!clipboardApi) return false;
+
+    try {
+      const clipboardText = await clipboardApi.readText();
+      if (cleanText(state.inputEl.value)) return false;
+      const coord = extractCoordFromText(clipboardText);
+      if (!coord) return false;
+      state.inputEl.value = coord.key;
+      handleInputChange();
+      return true;
+    } catch (error) {
+      return false;
+    }
+  };
+
   const parseVillageLine = (lineRaw) => {
     const line = String(lineRaw || "");
     if (!cleanText(line)) return null;
@@ -1839,6 +1902,7 @@
 
   const handleInputChange = () => {
     if (!state.inputEl) return;
+    syncInputValue();
     cancelPendingSearch();
     state.searchToken += 1;
     const token = state.searchToken;
@@ -2004,6 +2068,7 @@
         state.inputEl.focus();
         state.inputEl.select();
       });
+      void autofillCoordFromClipboard();
     }
     refreshCountdowns();
   };
