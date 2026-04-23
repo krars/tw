@@ -24,7 +24,8 @@ var WINDOW_LAMP_ON = '#2fc44f',
 	WINDOW_LAMP_OFF = '#8a8a8a',
 	TARGET_WINDOW_START_KEY = worldNr + '_targetWindowStart',
 	TARGET_WINDOW_END_KEY = worldNr + '_targetWindowEnd',
-	TARGET_WINDOW_DEFAULT_SPAN_MS = 15000;
+	TARGET_WINDOW_DEFAULT_SHIFT_MS = 15000,
+	TARGET_WINDOW_DEFAULT_SPAN_MS = 100;
 
 if(game_data.screen != 'place'){
 	alert("This script must be run from the rally point.\nRunning during command execution will add millisecond assist.\nRunning after command excecution will show you by how many milliseconds you missed the target.");
@@ -435,7 +436,7 @@ function buildDefaultWindowValues(tableBody){
 		durationMs = 0;
 	}
 
-	startMs = nowMs + durationMs;
+	startMs = nowMs + durationMs + TARGET_WINDOW_DEFAULT_SHIFT_MS;
 	endMs = startMs + TARGET_WINDOW_DEFAULT_SPAN_MS;
 
 	return {
