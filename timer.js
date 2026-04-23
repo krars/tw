@@ -63,6 +63,7 @@ function applyResponsiveLayout(){
 	var compact = isCompactLayout(),
 		targetSize = compact ? 118 : 150,
 		canvas = $('#millis_canvas')[0],
+		dialWrap = $('#millis_dial_wrap')[0],
 		canvasWrap = $('#millis_canvas_wrap')[0],
 		second = $('#second_display')[0],
 		lamp = $('#window_lamp')[0],
@@ -81,6 +82,10 @@ function applyResponsiveLayout(){
 		canvas.style.width = CANVAS_SIZE + 'px';
 		canvas.style.height = CANVAS_SIZE + 'px';
 		drawDial(canvas.getContext('2d'));
+	}
+	if(dialWrap){
+		dialWrap.style.width = CANVAS_SIZE + 'px';
+		dialWrap.style.height = CANVAS_SIZE + 'px';
 	}
 	if(canvasWrap){
 		canvasWrap.style.minWidth = CANVAS_SIZE + 'px';
@@ -122,8 +127,8 @@ function applyResponsiveLayout(){
 		targetWindowEndInput.style.fontSize = compact ? '12px' : '';
 	}
 
-	if(viewBtn){
-		viewBtn.style.display = 'inline-block';
+		if(viewBtn){
+			viewBtn.style.display = 'inline-block';
 		viewBtn.style.width = 'auto';
 		viewBtn.style.margin = compact ? '0 0 0 12px' : '0 0 0 18px';
 		viewBtn.style.whiteSpace = 'nowrap';
@@ -221,6 +226,9 @@ function addTimer(){
 		// Create canvas:
 		var canvasTd = document.createElement('TD'),
 			canvasTdStyle = document.createAttribute('style'),
+			dialWrap = document.createElement('DIV'),
+			dialWrapId = document.createAttribute('id'),
+			dialWrapStyle = document.createAttribute('style'),
 			canvasCanvas = document.createElement('CANVAS'),
 			canvasRowspan = document.createAttribute('rowspan'),
 			canvasColspan = document.createAttribute('colspan'),
@@ -238,6 +246,8 @@ function addTimer(){
 		canvasRowspan.value = tableBody.children.length-2;
 		canvasColspan.value = 4;
 		canvasTd.id = 'millis_canvas_wrap';
+		dialWrapId.value = 'millis_dial_wrap';
+		dialWrapStyle.value = 'position:relative;width:'+CANVAS_SIZE+'px;height:'+CANVAS_SIZE+'px;margin:0 auto;';
 		canvasId.value = 'millis_canvas';
 		canvasWidth.value = String(CANVAS_SIZE);
 		canvasHeight.value = String(CANVAS_SIZE);
@@ -246,6 +256,8 @@ function addTimer(){
 		canvasTd.setAttributeNode(canvasRowspan);
 		canvasTd.setAttributeNode(canvasColspan);
 		canvasTd.setAttributeNode(canvasTdStyle);
+		dialWrap.setAttributeNode(dialWrapId);
+		dialWrap.setAttributeNode(dialWrapStyle);
 		canvasCanvas.setAttributeNode(canvasId);
 		canvasCanvas.setAttributeNode(canvasWidth);
 		canvasCanvas.setAttributeNode(canvasHeight);
@@ -260,9 +272,10 @@ function addTimer(){
 		windowLamp.setAttributeNode(windowLampId);
 		windowLamp.setAttributeNode(windowLampStyle);
 		windowLamp.setAttributeNode(windowLampTitle);
-		canvasTd.appendChild(canvasCanvas);
-        canvasTd.appendChild(secondDisplay);
-		canvasTd.appendChild(windowLamp);
+		dialWrap.appendChild(canvasCanvas);
+		dialWrap.appendChild(secondDisplay);
+		dialWrap.appendChild(windowLamp);
+		canvasTd.appendChild(dialWrap);
 
 		// Create practice button:
 		var pbTd = document.createElement('TD'),
