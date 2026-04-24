@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.19";
+  const VERSION = "0.10.20";
   const LOG_PREFIX = "[ScriptMM]";
   const MULTI_TAB_PRESENCE_KEY = "scriptmm.active_instances.v1";
   const MULTI_TAB_HEARTBEAT_INTERVAL_MS = 3000;
@@ -1648,6 +1648,14 @@
     return Math.min(100, Math.max(0, Number(numeric.toFixed(2))));
   };
 
+  const selectPreferredSigilPercent = (...candidates) => {
+    for (let index = 0; index < candidates.length; index += 1) {
+      const normalized = normalizeSigilPercent(candidates[index]);
+      if (normalized > 0) return normalized;
+    }
+    return 0;
+  };
+
   const extractSigilPercentsFromText = (text) => {
     const source = String(text || "");
     if (!source) return [];
@@ -1689,11 +1697,143 @@
     return values[0];
   };
 
+  const parseTribeLevelInitPayload = (scriptText) => {
+    const source = String(scriptText || "");
+    const marker = "TribeLevelScreen.init(";
+    const markerIndex = source.indexOf(marker);
+    if (markerIndex < 0) return null;
+
+    let start = markerIndex + marker.length;
+    while (start < source.length && /\s/.test(source[start])) start += 1;
+    if (source[start] !== "{") return null;
+
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    let end = -1;
+
+    for (let i = start; i < source.length; i += 1) {
+      const ch = source[i];
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+        if (ch === "\\") {
+          escaped = true;
+          continue;
+        }
+        if (ch === '"') {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (ch === '"') {
+        inString = true;
+        continue;
+      }
+      if (ch === "{") {
+        depth += 1;
+        continue;
+      }
+      if (ch === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          end = i;
+          break;
+        }
+      }
+    }
+
+    if (end < 0) return null;
+    const jsonText = source.slice(start, end + 1);
+    return safe(() => JSON.parse(jsonText), null);
+  };
+
+  const getFriendshipValueFromTribeLevelPayload = (payload) => {
+    if (!payload || typeof payload !== "object") return null;
+
+    const skills =
+      payload.skills && typeof payload.skills === "object"
+        ? payload.skills
+        : {};
+    const activeSkills =
+      payload.player &&
+      payload.player.active_skills &&
+      typeof payload.player.active_skills === "object"
+        ? payload.player.active_skills
+        : {};
+
+    const friendshipEntry = Object.entries(skills).find(([, skill]) =>
+      /дружб\w*|friendship/i.test(cleanText(skill && skill.name) || ""),
+    );
+    if (!friendshipEntry) return null;
+
+    const [friendshipSkillKey, friendshipSkill] = friendshipEntry;
+    const friendshipSkillId =
+      toInt(friendshipSkill && friendshipSkill.id) ||
+      toInt(friendshipSkillKey);
+    if (!Number.isFinite(friendshipSkillId)) return null;
+
+    const activeEntry = Object.values(activeSkills).find(
+      (entry) => toInt(entry && entry.skill_id) === friendshipSkillId,
+    );
+    if (!activeEntry) return null;
+
+    const activeLevel = toInt(activeEntry.level);
+    if (!Number.isFinite(activeLevel) || activeLevel <= 0) return null;
+
+    const magnitudes =
+      friendshipSkill &&
+      friendshipSkill.effect_magnitudes &&
+      friendshipSkill.effect_magnitudes[String(activeLevel)];
+    if (Array.isArray(magnitudes) && magnitudes.length) {
+      const nums = magnitudes
+        .map((value) => toNumber(value))
+        .filter((value) => Number.isFinite(value));
+      if (nums.length) return normalizeSigilPercent(nums[0]);
+    }
+    if (Number.isFinite(toNumber(magnitudes))) {
+      return normalizeSigilPercent(magnitudes);
+    }
+
+    const levelDescription =
+      friendshipSkill &&
+      friendshipSkill.level_descriptions &&
+      friendshipSkill.level_descriptions[String(activeLevel)];
+    if (Array.isArray(levelDescription)) {
+      const fromDesc = extractSigilPercentsFromText(levelDescription.join(" "));
+      if (fromDesc.length) return normalizeSigilPercent(fromDesc[0]);
+    } else if (levelDescription) {
+      const fromDesc = extractSigilPercentsFromText(String(levelDescription));
+      if (fromDesc.length) return normalizeSigilPercent(fromDesc[0]);
+    }
+
+    return normalizeSigilPercent(activeLevel);
+  };
+
+  const getActiveFriendshipPercentFromLevelPage = (doc) => {
+    if (!doc) return null;
+    const scriptText = Array.from(doc.querySelectorAll("script"))
+      .map((node) => node.textContent || "")
+      .join("\n");
+    const payload = parseTribeLevelInitPayload(scriptText);
+    return getFriendshipValueFromTribeLevelPayload(payload);
+  };
+
   const detectActiveSigilPercent = () => {
+    const structuredLevelValue = getActiveFriendshipPercentFromLevelPage(
+      document,
+    );
+    if (Number.isFinite(structuredLevelValue) && structuredLevelValue > 0) {
+      return normalizeSigilPercent(structuredLevelValue);
+    }
+
     const candidates = [];
     const pushCandidate = (value) => {
       const parsed = normalizeSigilPercent(value);
-      if (Number.isFinite(parsed)) candidates.push(parsed);
+      if (Number.isFinite(parsed) && parsed > 0) candidates.push(parsed);
     };
 
     const direct = [
@@ -1728,11 +1868,6 @@
       );
       if (Number.isFinite(extracted)) pushCandidate(extracted);
     });
-
-    const bodyText = `${safe(() => document.body.innerText, "") || ""}\n${
-      safe(() => document.body.textContent, "") || ""
-    }`;
-    extractSigilPercentsFromText(bodyText).forEach(pushCandidate);
 
     if (!candidates.length) return 0;
     return normalizeSigilPercent(Math.max(...candidates));
@@ -1829,141 +1964,17 @@
 
   const collectFriendshipFromLevelPage = (doc) => {
     if (!doc) return [];
+    const structuredValue = getActiveFriendshipPercentFromLevelPage(doc);
+    if (Number.isFinite(structuredValue) && structuredValue > 0) {
+      return [normalizeSigilPercent(structuredValue)];
+    }
+
     const values = [];
     const pushValue = (raw) => {
       const value = normalizeSigilPercent(raw);
       if (!Number.isFinite(value)) return;
       if (!values.includes(value)) values.push(value);
     };
-
-    const parseTribeLevelInitPayload = (scriptText) => {
-      const source = String(scriptText || "");
-      const marker = "TribeLevelScreen.init(";
-      const markerIndex = source.indexOf(marker);
-      if (markerIndex < 0) return null;
-
-      let start = markerIndex + marker.length;
-      while (start < source.length && /\s/.test(source[start])) start += 1;
-      if (source[start] !== "{") return null;
-
-      let depth = 0;
-      let inString = false;
-      let escaped = false;
-      let end = -1;
-
-      for (let i = start; i < source.length; i += 1) {
-        const ch = source[i];
-        if (inString) {
-          if (escaped) {
-            escaped = false;
-            continue;
-          }
-          if (ch === "\\") {
-            escaped = true;
-            continue;
-          }
-          if (ch === '"') {
-            inString = false;
-          }
-          continue;
-        }
-
-        if (ch === '"') {
-          inString = true;
-          continue;
-        }
-        if (ch === "{") {
-          depth += 1;
-          continue;
-        }
-        if (ch === "}") {
-          depth -= 1;
-          if (depth === 0) {
-            end = i;
-            break;
-          }
-        }
-      }
-
-      if (end < 0) return null;
-      const jsonText = source.slice(start, end + 1);
-      return safe(() => JSON.parse(jsonText), null);
-    };
-
-    const getFriendshipValueFromPayload = (payload) => {
-      if (!payload || typeof payload !== "object") return null;
-
-      const skills =
-        payload.skills && typeof payload.skills === "object"
-          ? payload.skills
-          : {};
-      const activeSkills =
-        payload.player &&
-        payload.player.active_skills &&
-        typeof payload.player.active_skills === "object"
-          ? payload.player.active_skills
-          : {};
-
-      const friendshipEntry = Object.entries(skills).find(([, skill]) =>
-        /дружб\w*|friendship/i.test(cleanText(skill && skill.name) || ""),
-      );
-      if (!friendshipEntry) return null;
-
-      const [friendshipSkillKey, friendshipSkill] = friendshipEntry;
-      const friendshipSkillId =
-        toInt(friendshipSkill && friendshipSkill.id) ||
-        toInt(friendshipSkillKey);
-      if (!Number.isFinite(friendshipSkillId)) return null;
-
-      const activeEntry = Object.values(activeSkills).find(
-        (entry) => toInt(entry && entry.skill_id) === friendshipSkillId,
-      );
-      if (!activeEntry) return null;
-
-      const activeLevel = toInt(activeEntry.level);
-      if (!Number.isFinite(activeLevel)) return null;
-
-      const magnitudes =
-        friendshipSkill &&
-        friendshipSkill.effect_magnitudes &&
-        friendshipSkill.effect_magnitudes[String(activeLevel)];
-      if (Array.isArray(magnitudes) && magnitudes.length) {
-        const nums = magnitudes
-          .map((value) => toNumber(value))
-          .filter((value) => Number.isFinite(value));
-        if (nums.length) return normalizeSigilPercent(Math.max(...nums));
-      }
-      if (Number.isFinite(toNumber(magnitudes))) {
-        return normalizeSigilPercent(magnitudes);
-      }
-
-      const levelDescription =
-        friendshipSkill &&
-        friendshipSkill.level_descriptions &&
-        friendshipSkill.level_descriptions[String(activeLevel)];
-      if (Array.isArray(levelDescription)) {
-        const fromDesc = extractSigilPercentsFromText(
-          levelDescription.join(" "),
-        );
-        if (fromDesc.length)
-          return normalizeSigilPercent(Math.max(...fromDesc));
-      } else if (levelDescription) {
-        const fromDesc = extractSigilPercentsFromText(String(levelDescription));
-        if (fromDesc.length)
-          return normalizeSigilPercent(Math.max(...fromDesc));
-      }
-
-      return normalizeSigilPercent(activeLevel);
-    };
-
-    const scriptText = Array.from(doc.querySelectorAll("script"))
-      .map((node) => node.textContent || "")
-      .join("\n");
-    const payload = parseTribeLevelInitPayload(scriptText);
-    const structuredValue = getFriendshipValueFromPayload(payload);
-    if (Number.isFinite(structuredValue)) {
-      pushValue(structuredValue);
-    }
 
     const rowLikeNodes = Array.from(doc.querySelectorAll("tr, li, div, td"));
     rowLikeNodes.forEach((node) => {
@@ -1977,12 +1988,6 @@
       );
       if (directNearName && directNearName[1] != null)
         pushValue(directNearName[1]);
-
-      const levelNearName = text.match(
-        /(?:дружб\w*|friendship)[\s\S]{0,80}(?:уров|level)[^\d]{0,20}(\d{1,3})/i,
-      );
-      if (levelNearName && levelNearName[1] != null)
-        pushValue(levelNearName[1]);
     });
 
     return values;
@@ -2007,8 +2012,9 @@
     const results = await Promise.allSettled(
       pages.map((item) => fetchDocument(item.url)),
     );
-    let bestValue = null;
-    let bestSource = null;
+    let bestFallbackValue = null;
+    let bestFallbackSource = null;
+    let authoritativeLevelValue = null;
     const probes = {};
 
     results.forEach((result, index) => {
@@ -2034,20 +2040,29 @@
           : Array.from(new Set([...genericValues, ...levelValues]));
       probes[page.key] = values;
 
-      if (values.length) {
-        const candidate = Math.max(...values);
-        if (!Number.isFinite(bestValue) || candidate > bestValue) {
-          bestValue = candidate;
-          bestSource = page.key;
+      if (page.key === "ally_level" && levelValues.length) {
+        authoritativeLevelValue = normalizeSigilPercent(levelValues[0]);
+        return;
+      }
+
+      if (!Number.isFinite(bestFallbackValue) && values.length) {
+        const candidate = selectPreferredSigilPercent(...values);
+        if (candidate > 0) {
+          bestFallbackValue = candidate;
+          bestFallbackSource = page.key;
         }
       }
     });
 
     return {
-      value: Number.isFinite(bestValue)
-        ? normalizeSigilPercent(bestValue)
+      value: Number.isFinite(authoritativeLevelValue)
+        ? normalizeSigilPercent(authoritativeLevelValue)
+        : Number.isFinite(bestFallbackValue)
+          ? normalizeSigilPercent(bestFallbackValue)
         : null,
-      source: bestSource,
+      source: Number.isFinite(authoritativeLevelValue)
+        ? "ally_level.active_friendship"
+        : bestFallbackSource,
       probes,
     };
   };
@@ -12756,14 +12771,11 @@
       }
     });
     const detectedSigilNow = toNumber(detectActiveSigilPercent());
-    const sigilCandidates = [
+    const sigilPercent = selectPreferredSigilPercent(
       toNumber(state.detectedSigilPercent),
       toNumber(state.snapshot && state.snapshot.sigilPercent),
       detectedSigilNow,
-    ].filter((value) => Number.isFinite(value));
-    const sigilPercent = sigilCandidates.length
-      ? normalizeSigilPercent(Math.max(...sigilCandidates))
-      : 0;
+    );
     if (Number.isFinite(sigilPercent)) {
       state.detectedSigilPercent = sigilPercent;
     }
@@ -21148,17 +21160,24 @@ ${panelHtml}`;
         tribeSigilResult.status === "fulfilled"
           ? toNumber(tribeSigilResult.value.value)
           : null;
-      const sigilCandidates = [localSigilPercent, tribeSigilPercent].filter(
-        (value) => Number.isFinite(value),
+      const snapshotSigil = toNumber(state.snapshot && state.snapshot.sigilPercent);
+      state.detectedSigilPercent = selectPreferredSigilPercent(
+        tribeSigilPercent,
+        localSigilPercent,
+        toNumber(state.detectedSigilPercent),
+        snapshotSigil,
       );
-      state.detectedSigilPercent = sigilCandidates.length
-        ? normalizeSigilPercent(Math.max(...sigilCandidates))
-        : 0;
       const sigilSource =
         Number.isFinite(tribeSigilPercent) &&
-        tribeSigilPercent === state.detectedSigilPercent
+        normalizeSigilPercent(tribeSigilPercent) === state.detectedSigilPercent
           ? `tribe:${cleanText(tribeSigilResult.value.source) || "unknown"}`
-          : "page";
+          : Number.isFinite(localSigilPercent) &&
+              normalizeSigilPercent(localSigilPercent) ===
+                state.detectedSigilPercent
+            ? "page"
+            : snapshotSigil > 0
+              ? "snapshot"
+              : "page";
 
       state.snapshot = buildSnapshot({
         speedModel: state.speedModel,
