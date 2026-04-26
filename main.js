@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.21";
+  const VERSION = "0.10.23";
   const LOG_PREFIX = "[ScriptMM]";
   const MULTI_TAB_PRESENCE_KEY = "scriptmm.active_instances.v1";
   const MULTI_TAB_HEARTBEAT_INTERVAL_MS = 3000;
@@ -7086,10 +7086,11 @@
     }
     return candidates;
   };
-  const isForumSliceKeywordLine = (lineRaw) => {
-    const line = String(lineRaw || "");
-    return /(?:^|[^а-яёa-z0-9_])[сc]рез[а-яёa-z0-9_-]*/iu.test(line);
-  };
+  const FORUM_SLICE_KEYWORD_RE =
+    /(?:^|[^\p{L}\p{N}_])(?:с|c)рез[\p{L}\p{N}_-]*(?=$|[^\p{L}\p{N}_-])/iu;
+  const FORUM_SLICE_ARRIVAL_LOOKAROUND_LINES = 18;
+  const isForumSliceKeywordLine = (lineRaw) =>
+    FORUM_SLICE_KEYWORD_RE.test(String(lineRaw || ""));
   const normalizeForumSliceComment = (lineRaw) =>
     cleanText(
       String(lineRaw || "")
@@ -7097,11 +7098,14 @@
         .replace(/[^\p{L}\p{N}\s%.,:+\-]/gu, " ")
         .replace(/\s+/g, " "),
     );
-  const isForumInlineUiNoiseLine = (lineRaw) => {
+  const isForumInlineUiNoiseLine = (
+    lineRaw,
+    { allowSliceKeyword = false } = {},
+  ) => {
     const line = cleanText(lineRaw).toLowerCase();
     if (!line) return true;
+    if (line === "срез" && !allowSliceKeyword) return true;
     if (
-      line === "срез" ||
       line === "перехват/атака" ||
       line === "в хаб" ||
       line === "в избранное"
@@ -7142,18 +7146,40 @@
         );
         const triggerLine = normalizeForumSliceComment(triggerLineRaw);
         if (!triggerLine || !isForumSliceKeywordLine(triggerLine)) continue;
-        if (isForumInlineUiNoiseLine(triggerLine)) continue;
-        if (/^срез$/i.test(triggerLine)) continue;
+        if (isForumInlineUiNoiseLine(triggerLine, { allowSliceKeyword: true }))
+          continue;
         if (mode === "host") parseDebug.triggerHost += 1;
         if (mode === "plain") parseDebug.triggerPlain += 1;
 
         let arrivalIndex = -1;
-        for (let i = index + 1; i < sourceLines.length; i += 1) {
+        const forwardLimit = Math.min(
+          sourceLines.length - 1,
+          index + FORUM_SLICE_ARRIVAL_LOOKAROUND_LINES,
+        );
+        for (let i = index + 1; i <= forwardLimit; i += 1) {
           const candidateLine = cleanText(sourceLines[i] && sourceLines[i].line);
           if (!candidateLine) continue;
+          if (isForumSliceKeywordLine(candidateLine)) break;
           if (/время\s*прибытия/i.test(candidateLine)) {
             arrivalIndex = i;
             break;
+          }
+        }
+        if (arrivalIndex < 0) {
+          const backwardLimit = Math.max(
+            0,
+            index - FORUM_SLICE_ARRIVAL_LOOKAROUND_LINES,
+          );
+          for (let i = index - 1; i >= backwardLimit; i -= 1) {
+            const candidateLine = cleanText(
+              sourceLines[i] && sourceLines[i].line,
+            );
+            if (!candidateLine) continue;
+            if (isForumSliceKeywordLine(candidateLine)) break;
+            if (/время\s*прибытия/i.test(candidateLine)) {
+              arrivalIndex = i;
+              break;
+            }
           }
         }
         if (arrivalIndex < 0) continue;
@@ -7209,7 +7235,10 @@
       let postHints = parseHintsFromLines(hostLines, "host");
       if (!postHints.length) {
         const plainLines = extractMessagePlainLines(postBody).filter(
-          (entry) => !isForumInlineUiNoiseLine(entry && entry.line),
+          (entry) =>
+            !isForumInlineUiNoiseLine(entry && entry.line, {
+              allowSliceKeyword: true,
+            }),
         );
         postHints = parseHintsFromLines(plainLines, "plain");
       }
