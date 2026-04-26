@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.20";
+  const VERSION = "0.10.21";
   const LOG_PREFIX = "[ScriptMM]";
   const MULTI_TAB_PRESENCE_KEY = "scriptmm.active_instances.v1";
   const MULTI_TAB_HEARTBEAT_INTERVAL_MS = 3000;
@@ -13,6 +13,7 @@
     .slice(2, 10)}`;
   const SPEED_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
   const TROOPS_CACHE_TTL_MS = 30 * 1000;
+  const SIGIL_SNAPSHOT_CACHE_TTL_MS = 30 * 1000;
   const TIMING_COPY_HISTORY_MAX_ITEMS = 200;
   const MAX_FETCHES_PER_SECOND = 4;
   const FETCH_REQUEST_TIMEOUT_MS = 12000;
@@ -1779,10 +1780,18 @@
     const activeEntry = Object.values(activeSkills).find(
       (entry) => toInt(entry && entry.skill_id) === friendshipSkillId,
     );
-    if (!activeEntry) return null;
+    if (!activeEntry) return 0;
 
     const activeLevel = toInt(activeEntry.level);
-    if (!Number.isFinite(activeLevel) || activeLevel <= 0) return null;
+    if (!Number.isFinite(activeLevel) || activeLevel <= 0) return 0;
+
+    const expiresSeconds = toInt(activeEntry.expires);
+    if (Number.isFinite(expiresSeconds) && expiresSeconds > 0) {
+      const nowSeconds = Math.floor(getServerNowMs() / 1000);
+      if (Number.isFinite(nowSeconds) && expiresSeconds <= nowSeconds) {
+        return 0;
+      }
+    }
 
     const magnitudes =
       friendshipSkill &&
@@ -1822,12 +1831,15 @@
     return getFriendshipValueFromTribeLevelPayload(payload);
   };
 
+  const getCurrentPageAuthoritativeSigilPercent = () => {
+    const value = getActiveFriendshipPercentFromLevelPage(document);
+    return Number.isFinite(value) ? normalizeSigilPercent(value) : null;
+  };
+
   const detectActiveSigilPercent = () => {
-    const structuredLevelValue = getActiveFriendshipPercentFromLevelPage(
-      document,
-    );
-    if (Number.isFinite(structuredLevelValue) && structuredLevelValue > 0) {
-      return normalizeSigilPercent(structuredLevelValue);
+    const authoritativePageValue = getCurrentPageAuthoritativeSigilPercent();
+    if (Number.isFinite(authoritativePageValue)) {
+      return authoritativePageValue;
     }
 
     const candidates = [];
@@ -1965,7 +1977,7 @@
   const collectFriendshipFromLevelPage = (doc) => {
     if (!doc) return [];
     const structuredValue = getActiveFriendshipPercentFromLevelPage(doc);
-    if (Number.isFinite(structuredValue) && structuredValue > 0) {
+    if (Number.isFinite(structuredValue)) {
       return [normalizeSigilPercent(structuredValue)];
     }
 
@@ -2069,6 +2081,7 @@
 
   let detectedPageSigilCacheValue = null;
   let detectedPageSigilCacheAtMs = 0;
+  let detectedPageSigilCacheAuthoritative = false;
   const getDetectedPageSigilPercentCached = () => {
     const nowMs = Date.now();
     if (
@@ -2077,7 +2090,12 @@
     ) {
       return normalizeSigilPercent(detectedPageSigilCacheValue);
     }
-    const liveSigil = normalizeSigilPercent(detectActiveSigilPercent());
+    const structuredLevelValue = getCurrentPageAuthoritativeSigilPercent();
+    detectedPageSigilCacheAuthoritative =
+      Number.isFinite(structuredLevelValue);
+    const liveSigil = detectedPageSigilCacheAuthoritative
+      ? structuredLevelValue
+      : normalizeSigilPercent(detectActiveSigilPercent());
     detectedPageSigilCacheValue = liveSigil;
     detectedPageSigilCacheAtMs = nowMs;
     return liveSigil;
@@ -2086,6 +2104,10 @@
   const getDefaultSigilForAction = (action) => {
     if (!actionUsesSigil(action)) return 0;
     const liveSigil = getDetectedPageSigilPercentCached();
+    if (detectedPageSigilCacheAuthoritative) {
+      state.detectedSigilPercent = liveSigil;
+      return liveSigil;
+    }
     if (liveSigil > 0) {
       state.detectedSigilPercent = liveSigil;
       return liveSigil;
@@ -2094,15 +2116,37 @@
     const stateSigil = normalizeSigilPercent(state.detectedSigilPercent);
     if (stateSigil > 0) return stateSigil;
 
-    const snapshotSigil = normalizeSigilPercent(
-      toNumber(state.snapshot && state.snapshot.sigilPercent),
-    );
+    const snapshotSigil = getTrustedSnapshotSigilPercent(state.snapshot);
     if (snapshotSigil > 0) {
       state.detectedSigilPercent = snapshotSigil;
       return snapshotSigil;
     }
 
     return stateSigil;
+  };
+
+  const getSnapshotGeneratedAtMs = (snapshot) => {
+    const generatedAt = cleanText(snapshot && snapshot.generatedAt);
+    if (!generatedAt) return NaN;
+    return Number(safe(() => new Date(generatedAt).getTime(), NaN));
+  };
+
+  const getTrustedSnapshotSigilPercent = (snapshot) => {
+    const value = normalizeSigilPercent(
+      toNumber(snapshot && snapshot.sigilPercent),
+    );
+    if (value <= 0) return 0;
+    const generatedAtMs = getSnapshotGeneratedAtMs(snapshot);
+    const ageMs = getServerNowMs() - generatedAtMs;
+    if (
+      !Number.isFinite(generatedAtMs) ||
+      !Number.isFinite(ageMs) ||
+      ageMs < 0 ||
+      ageMs > SIGIL_SNAPSHOT_CACHE_TTL_MS
+    ) {
+      return 0;
+    }
+    return value;
   };
 
   const getIncomingSigilPercent = (incoming) => {
@@ -2148,12 +2192,23 @@
   };
 
   const restoreDetectedSigilPercentFromSnapshot = () => {
+    const structuredLevelValue = getCurrentPageAuthoritativeSigilPercent();
+    if (Number.isFinite(structuredLevelValue)) {
+      state.detectedSigilPercent = structuredLevelValue;
+      return state.detectedSigilPercent > 0;
+    }
+
     const snapshot = readJson(STORAGE_KEYS.snapshot);
     if (!snapshot || typeof snapshot !== "object") return false;
-    state.snapshot = snapshot;
-    const snapshotSigil = normalizeSigilPercent(
-      toNumber(snapshot && snapshot.sigilPercent),
-    );
+    const snapshotSigil = getTrustedSnapshotSigilPercent(snapshot);
+    state.snapshot = {
+      ...snapshot,
+      sigilPercent: snapshotSigil,
+      sigilSource:
+        snapshotSigil > 0
+          ? cleanText(snapshot.sigilSource) || "snapshot"
+          : "cache_stale",
+    };
     if (snapshotSigil > 0) {
       state.detectedSigilPercent = snapshotSigil;
       return true;
@@ -12770,12 +12825,15 @@
         });
       }
     });
+    const authoritativePageSigil = getCurrentPageAuthoritativeSigilPercent();
     const detectedSigilNow = toNumber(detectActiveSigilPercent());
-    const sigilPercent = selectPreferredSigilPercent(
-      toNumber(state.detectedSigilPercent),
-      toNumber(state.snapshot && state.snapshot.sigilPercent),
-      detectedSigilNow,
-    );
+    const sigilPercent = Number.isFinite(authoritativePageSigil)
+      ? authoritativePageSigil
+      : selectPreferredSigilPercent(
+          toNumber(state.detectedSigilPercent),
+          toNumber(state.snapshot && state.snapshot.sigilPercent),
+          detectedSigilNow,
+        );
     if (Number.isFinite(sigilPercent)) {
       state.detectedSigilPercent = sigilPercent;
     }
@@ -18726,8 +18784,17 @@ ${panelHtml}`;
     } else {
       state.infoVillageTargetCoord = null;
     }
-    const messageSigilPercent = normalizeSigilPercent(detectActiveSigilPercent());
-    if (messageSigilPercent > 0) {
+    const authoritativeMessageSigilPercent =
+      getCurrentPageAuthoritativeSigilPercent();
+    const messageSigilPercent = Number.isFinite(
+      authoritativeMessageSigilPercent,
+    )
+      ? authoritativeMessageSigilPercent
+      : normalizeSigilPercent(detectActiveSigilPercent());
+    if (
+      Number.isFinite(authoritativeMessageSigilPercent) ||
+      messageSigilPercent > 0
+    ) {
       state.detectedSigilPercent = messageSigilPercent;
     }
     renderMessageInlineActionButtons(
@@ -20542,10 +20609,16 @@ ${panelHtml}`;
 
     const cachedSnapshot = readJson(STORAGE_KEYS.snapshot);
     if (cachedSnapshot && typeof cachedSnapshot === "object") {
-      state.snapshot = cachedSnapshot;
-      state.detectedSigilPercent = normalizeSigilPercent(
-        cachedSnapshot.sigilPercent,
-      );
+      const cachedSigilPercent = getTrustedSnapshotSigilPercent(cachedSnapshot);
+      state.snapshot = {
+        ...cachedSnapshot,
+        sigilPercent: cachedSigilPercent,
+        sigilSource:
+          cachedSigilPercent > 0
+            ? cleanText(cachedSnapshot.sigilSource) || "cache"
+            : "cache_stale",
+      };
+      state.detectedSigilPercent = cachedSigilPercent;
     } else {
       state.snapshot = buildSnapshot({
         speedModel: state.speedModel,
@@ -20692,8 +20765,17 @@ ${panelHtml}`;
                 items: [],
               };
       if (!messageInlineMode && state.ui) {
-        const liveSigilPreview = normalizeSigilPercent(detectActiveSigilPercent());
-        if (liveSigilPreview > 0) {
+        const authoritativeLiveSigilPreview =
+          getCurrentPageAuthoritativeSigilPercent();
+        const liveSigilPreview = Number.isFinite(
+          authoritativeLiveSigilPreview,
+        )
+          ? authoritativeLiveSigilPreview
+          : normalizeSigilPercent(detectActiveSigilPercent());
+        if (
+          Number.isFinite(authoritativeLiveSigilPreview) ||
+          liveSigilPreview > 0
+        ) {
           state.detectedSigilPercent = liveSigilPreview;
         }
         state.snapshot = buildSnapshot({
@@ -21160,24 +21242,45 @@ ${panelHtml}`;
         tribeSigilResult.status === "fulfilled"
           ? toNumber(tribeSigilResult.value.value)
           : null;
-      const snapshotSigil = toNumber(state.snapshot && state.snapshot.sigilPercent);
-      state.detectedSigilPercent = selectPreferredSigilPercent(
-        tribeSigilPercent,
-        localSigilPercent,
-        toNumber(state.detectedSigilPercent),
-        snapshotSigil,
+      const tribeSigilSource =
+        tribeSigilResult.status === "fulfilled"
+          ? cleanText(tribeSigilResult.value.source)
+          : "";
+      const tribeSigilAuthoritative =
+        tribeSigilSource === "ally_level.active_friendship" &&
+        Number.isFinite(tribeSigilPercent);
+      const localSigilAuthoritative = Number.isFinite(
+        getCurrentPageAuthoritativeSigilPercent(),
       );
-      const sigilSource =
+      const snapshotSigil = getTrustedSnapshotSigilPercent(state.snapshot);
+      state.detectedSigilPercent = tribeSigilAuthoritative
+        ? normalizeSigilPercent(tribeSigilPercent)
+        : localSigilAuthoritative
+          ? normalizeSigilPercent(localSigilPercent)
+          : selectPreferredSigilPercent(
+              tribeSigilPercent,
+              localSigilPercent,
+              toNumber(state.detectedSigilPercent),
+              snapshotSigil,
+            );
+      let sigilSource = "page";
+      if (tribeSigilAuthoritative) {
+        sigilSource = `tribe:${tribeSigilSource || "unknown"}`;
+      } else if (localSigilAuthoritative) {
+        sigilSource = "page:ally_level.active_friendship";
+      } else if (
         Number.isFinite(tribeSigilPercent) &&
         normalizeSigilPercent(tribeSigilPercent) === state.detectedSigilPercent
-          ? `tribe:${cleanText(tribeSigilResult.value.source) || "unknown"}`
-          : Number.isFinite(localSigilPercent) &&
-              normalizeSigilPercent(localSigilPercent) ===
-                state.detectedSigilPercent
-            ? "page"
-            : snapshotSigil > 0
-              ? "snapshot"
-              : "page";
+      ) {
+        sigilSource = `tribe:${tribeSigilSource || "unknown"}`;
+      } else if (
+        Number.isFinite(localSigilPercent) &&
+        normalizeSigilPercent(localSigilPercent) === state.detectedSigilPercent
+      ) {
+        sigilSource = "page";
+      } else if (snapshotSigil > 0) {
+        sigilSource = "snapshot";
+      }
 
       state.snapshot = buildSnapshot({
         speedModel: state.speedModel,
