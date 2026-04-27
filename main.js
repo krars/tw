@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.24";
+  const VERSION = "0.10.25";
   const LOG_PREFIX = "[ScriptMM]";
   const MULTI_TAB_PRESENCE_KEY = "scriptmm.active_instances.v1";
   const MULTI_TAB_HEARTBEAT_INTERVAL_MS = 3000;
@@ -7003,7 +7003,16 @@
   };
   const extractMessagePlainLines = (root) => {
     if (!root) return [];
-    const rawText = String(root.innerText || root.textContent || "").replace(
+    const clone = safe(() => root.cloneNode(true), null);
+    const textRoot = clone || root;
+    if (clone && clone.querySelectorAll) {
+      Array.from(
+        clone.querySelectorAll(
+          "#scriptmm-overlay-root, .smm-msg-inline-actions, .smm-msg-inline-panel, #smm-msg-inline-fallback, .smm-msg-manual-inline",
+        ),
+      ).forEach((node) => safe(() => node.remove(), null));
+    }
+    const rawText = String(textRoot.innerText || textRoot.textContent || "").replace(
       /\u00a0/g,
       " ",
     );
@@ -7163,23 +7172,6 @@
           if (/время\s*прибытия/i.test(candidateLine)) {
             arrivalIndex = i;
             break;
-          }
-        }
-        if (arrivalIndex < 0) {
-          const backwardLimit = Math.max(
-            0,
-            index - FORUM_SLICE_ARRIVAL_LOOKAROUND_LINES,
-          );
-          for (let i = index - 1; i >= backwardLimit; i -= 1) {
-            const candidateLine = cleanText(
-              sourceLines[i] && sourceLines[i].line,
-            );
-            if (!candidateLine) continue;
-            if (isForumSliceKeywordLine(candidateLine)) break;
-            if (/время\s*прибытия/i.test(candidateLine)) {
-              arrivalIndex = i;
-              break;
-            }
           }
         }
         if (arrivalIndex < 0) continue;
@@ -13639,13 +13631,23 @@
       state.scheduledCommands,
     );
     state.scheduledCommands = persistedCommands;
-    return (
-      persistedCommands.find(
-        (command) =>
-          String(cleanText(command && command.id) || "") ===
-          String(normalizedId),
-      ) || normalized
+    let persistedCommand = persistedCommands.find(
+      (command) =>
+        String(cleanText(command && command.id) || "") === String(normalizedId),
     );
+    if (!persistedCommand) {
+      state.scheduledCommands = mergeScheduledCommandsById(persistedCommands, [
+        normalized,
+      ]);
+      saveScheduledCommands();
+      persistedCommand = (
+        Array.isArray(state.scheduledCommands) ? state.scheduledCommands : []
+      ).find(
+        (command) =>
+          String(cleanText(command && command.id) || "") === String(normalizedId),
+      );
+    }
+    return persistedCommand || null;
   };
   const updateScheduledCommandCommentById = (commandId, comment) => {
     const safeId = cleanText(commandId);
@@ -22868,6 +22870,7 @@ ${panelHtml}`;
                   state.nearestDialogState && state.nearestDialogState.source,
                 ) ||
                 "incomings";
+              renderActiveTab(state.ui);
               await openNearestSlicesDialog({ source: nearestSource });
             } else {
               renderActiveTab(state.ui);
