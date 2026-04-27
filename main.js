@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.26";
+  const VERSION = "0.10.27";
   const LOG_PREFIX = "[ScriptMM]";
   const MULTI_TAB_PRESENCE_KEY = "scriptmm.active_instances.v1";
   const MULTI_TAB_HEARTBEAT_INTERVAL_MS = 3000;
@@ -12546,6 +12546,20 @@
       }
     );
   };
+  const safeResolveTimingForScheduledCommand = (command) =>
+    safe(
+      () => resolveTimingForScheduledCommand(command),
+      {
+        timingType: cleanText(command && command.timingType) || "none",
+        timingLabel: cleanText(command && command.timingLabel) || "—",
+        timingGapMs: toFiniteMs(command && command.timingGapMs),
+        timingStartMs: toFiniteMs(command && command.timingStartMs),
+        timingEndMs: toFiniteMs(command && command.timingEndMs),
+        timingPointMs: toFiniteMs(command && command.timingPointMs),
+      },
+    ) || { timingType: "none", timingLabel: "—" };
+  const safeComputeTimingCenterCopyValue = (timing) =>
+    safe(() => computeTimingCenterCopyValue(timing), null);
 
   const renderTopTabs = (ui) => {
     if (!ui || !ui.tabs) return;
@@ -12574,11 +12588,19 @@
     saveScheduledCommands();
     const nowMs = getServerNowMs();
     const overdueHideThresholdMs = 60 * 1000;
+    const recentlyCreatedVisibleMs = 10 * 60 * 1000;
     const scheduled = state.scheduledCommands
       .slice()
       .filter((command) => {
         const departureMs = Number(command && command.departureMs);
         if (!Number.isFinite(departureMs)) return true;
+        const createdAtMs = Number(command && command.createdAtMs);
+        if (
+          Number.isFinite(createdAtMs) &&
+          createdAtMs >= nowMs - recentlyCreatedVisibleMs
+        ) {
+          return true;
+        }
         return departureMs >= nowMs - overdueHideThresholdMs;
       })
       .sort((a, b) => Number(a.departureMs || 0) - Number(b.departureMs || 0));
@@ -12595,40 +12617,42 @@
       return;
     }
 
+    const failedPlanRows = [];
     const rowsHtml = scheduled
       .map((command) => {
-        const unitsHtml = formatPlanUnitsIconsHtml(command.units);
-        const resolvedGoUrl =
-          cleanText(command.goUrl) || resolveScheduledCommandGoUrl(command) || "";
-        const departureMs = Number(command.departureMs);
-        const timing = resolveTimingForScheduledCommand(command);
-        const timingCenter = computeTimingCenterCopyValue(timing);
-        const timingCopyValue = timingCenter;
-        const timingText = cleanText(timing.timingLabel) || "—";
-        const timingTextAttrs = timingCopyValue
-          ? ` class="smm-plan-timing-text smm-plan-timing-copy" data-copy-time="${escapeHtml(
-              timingCopyValue,
-            )}" title="Клик: скопировать центр тайминга ${escapeHtml(timingCopyValue)}"`
-          : ` class="smm-plan-timing-text"`;
-        const timingButtonTitle = "Изменить тайминг";
-        const typeLabel = getManeuverTypeLabel(command.action);
-        const statusLabel = getManeuverStatusLabel(command.status);
-        const commentText = cleanText(command.comment);
-        const commentButtonTitle = commentText
-          ? "Изменить комментарий"
-          : "Добавить комментарий";
-        const departureText = Number.isFinite(departureMs)
-          ? formatDateTimeShort(departureMs)
-          : "—";
-        const countdownDataAttr = Number.isFinite(departureMs)
-          ? String(departureMs)
-          : "";
-        const departureCountdown = Number.isFinite(departureMs)
-          ? formatCountdown((departureMs - getServerNowMs()) / 1000)
-          : "—";
-        return `<tr class="smm-plan-cmd-row" data-cmd-id="${escapeHtml(
-          command.id || "",
-        )}">
+        const rowHtml = safe(() => {
+          const unitsHtml = formatPlanUnitsIconsHtml(command.units);
+          const resolvedGoUrl =
+            cleanText(command.goUrl) || resolveScheduledCommandGoUrl(command) || "";
+          const departureMs = Number(command.departureMs);
+          const timing = safeResolveTimingForScheduledCommand(command);
+          const timingCenter = safeComputeTimingCenterCopyValue(timing);
+          const timingCopyValue = timingCenter;
+          const timingText = cleanText(timing && timing.timingLabel) || "—";
+          const timingTextAttrs = timingCopyValue
+            ? ` class="smm-plan-timing-text smm-plan-timing-copy" data-copy-time="${escapeHtml(
+                timingCopyValue,
+              )}" title="Клик: скопировать центр тайминга ${escapeHtml(timingCopyValue)}"`
+            : ` class="smm-plan-timing-text"`;
+          const timingButtonTitle = "Изменить тайминг";
+          const typeLabel = getManeuverTypeLabel(command.action);
+          const statusLabel = getManeuverStatusLabel(command.status);
+          const commentText = cleanText(command.comment);
+          const commentButtonTitle = commentText
+            ? "Изменить комментарий"
+            : "Добавить комментарий";
+          const departureText = Number.isFinite(departureMs)
+            ? formatDateTimeShort(departureMs)
+            : "—";
+          const countdownDataAttr = Number.isFinite(departureMs)
+            ? String(departureMs)
+            : "";
+          const departureCountdown = Number.isFinite(departureMs)
+            ? formatCountdown((departureMs - getServerNowMs()) / 1000)
+            : "—";
+          return `<tr class="smm-plan-cmd-row" data-cmd-id="${escapeHtml(
+            command.id || "",
+          )}">
   <td>${escapeHtml(typeLabel)}</td>
   <td>${unitsHtml}</td>
   <td>${escapeHtml(command.fromVillageCoord || command.fromVillageId || "?")}</td>
@@ -12669,6 +12693,13 @@
     </div>
   </td>
 </tr>`;
+        }, null);
+        if (rowHtml) return rowHtml;
+        failedPlanRows.push(cleanText(command && command.id) || "?");
+        const commandId = cleanText(command && command.id) || "";
+        return `<tr class="smm-plan-cmd-row" data-cmd-id="${escapeHtml(commandId)}">
+  <td colspan="${hasCommentColumn ? "10" : "9"}">Запись плана повреждена, но сохранена: ${escapeHtml(commandId || "?")}</td>
+</tr>`;
       })
       .join("");
 
@@ -12697,7 +12728,14 @@
       <tbody>${rowsHtml}</tbody>
     </table>
   </div>
-</section>`;
+	</section>`;
+    if (failedPlanRows.length) {
+      console.warn(`${LOG_PREFIX} plan render row fallback`, failedPlanRows);
+      setStatus(
+        ui,
+        `План показан, но ${failedPlanRows.length} строк(и) отрисованы fallback.`,
+      );
+    }
     startCountdownTicker();
   };
 
@@ -12783,7 +12821,7 @@
     });
     return Array.from(byId.values()).map((command) => {
       const arrivalAtMs = getPlanArrivalEpochMs(command);
-      const timing = resolveTimingForScheduledCommand(command);
+      const timing = safeResolveTimingForScheduledCommand(command);
       return {
         id: cleanText(command.id) || null,
         type: getManeuverTypeLabel(command.action),
@@ -20159,12 +20197,16 @@ ${panelHtml}`;
       const scheduleStatusText = `Запланировано: ${savedCommand.fromVillageCoord || savedCommand.fromVillageId || "?"} → ${
         savedCommand.targetCoord || "?"
       }, юнитов ${unitKeys.length}.${plannerComment ? " Комментарий сохранён." : ""}`;
-      const rerendered = rerenderMessageInlinePanel(panelNode, {
-        incomingId,
-        action,
-        fallbackIncoming,
-        statusMessage: scheduleStatusText,
-      });
+      const rerendered = safe(
+        () =>
+          rerenderMessageInlinePanel(panelNode, {
+            incomingId,
+            action,
+            fallbackIncoming,
+            statusMessage: scheduleStatusText,
+          }),
+        false,
+      );
       if (!rerendered) {
         setMessageInlinePanelStatus(panelNode, scheduleStatusText);
       }
@@ -22419,7 +22461,7 @@ ${panelHtml}`;
           setStatus(state.ui, "Запись плана не найдена.");
           return;
         }
-        const timing = resolveTimingForScheduledCommand(command);
+        const timing = safeResolveTimingForScheduledCommand(command);
         const timingResult = await askFavoriteCommentDialog({
           title: "Тайминг приказа:",
           inputLabel: "Тайминг (пусто = авторасчёт)",
