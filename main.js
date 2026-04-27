@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.28";
+  const VERSION = "0.10.31";
   const LOG_PREFIX = "[ScriptMM]";
   const MULTI_TAB_PRESENCE_KEY = "scriptmm.active_instances.v1";
   const MULTI_TAB_HEARTBEAT_INTERVAL_MS = 3000;
@@ -29,6 +29,7 @@
     snapshot: "scriptmm.snapshot.v2",
     planActions: "scriptmm.plan_actions.v1",
     scheduledCommands: "scriptmm.scheduled_commands.v1",
+    scheduledCommandsBackup: "scriptmm.scheduled_commands.backup.v1",
     overviewCommands: "scriptmm.overview_villages.commands.v1",
     overviewUnits: "scriptmm.overview_villages.units.v2",
     overviewUnitsDefense: "scriptmm.overview_villages.units.defense.v2",
@@ -3926,6 +3927,75 @@
       matchedUnits,
     };
   };
+  const diagnoseScheduledCommandForPlan = (raw, index = 0) => {
+    const rawType = raw === null ? "null" : Array.isArray(raw) ? "array" : typeof raw;
+    const departureMs = toFiniteMs(raw && raw.departureMs);
+    const units = normalizeUnitsMap(raw && raw.units);
+    const status = normalizeManeuverStatus(raw && raw.status);
+    const normalized = normalizeScheduledCommand(raw);
+    const normalizedStatus = normalized
+      ? normalizeManeuverStatus(normalized.status)
+      : null;
+    const normalizedDepartureMs = normalized
+      ? toFiniteMs(normalized.departureMs)
+      : null;
+    const nowMs = getServerNowMs();
+    let reason = "ok";
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      reason = "not_object";
+    } else if (!Number.isFinite(departureMs)) {
+      reason = "bad_departureMs";
+    } else if (!Object.keys(units).length) {
+      reason = "empty_units";
+    } else if (!normalized) {
+      reason = "normalize_failed";
+    } else if (isFinalManeuverStatus(normalized.status)) {
+      reason = `final_status:${normalized.status}`;
+    }
+    return {
+      index,
+      reason,
+      rawType,
+      normalizedOk: Boolean(normalized),
+      id: cleanText(raw && raw.id) || null,
+      action: cleanText(raw && raw.action) || null,
+      status,
+      normalizedStatus,
+      isFinal: isFinalManeuverStatus(status),
+      normalizedIsFinal: isFinalManeuverStatus(normalizedStatus),
+      fromVillageId: cleanText(raw && raw.fromVillageId) || null,
+      fromVillageCoord: cleanText(raw && raw.fromVillageCoord) || null,
+      targetCoord: cleanText(raw && raw.targetCoord) || null,
+      incomingId: cleanText(raw && raw.incomingId) || null,
+      departureMs: Number.isFinite(departureMs) ? Math.round(departureMs) : null,
+      normalizedDepartureMs: Number.isFinite(normalizedDepartureMs)
+        ? Math.round(normalizedDepartureMs)
+        : null,
+      departureText: Number.isFinite(departureMs)
+        ? safe(() => formatDateTimeShort(departureMs), String(Math.round(departureMs)))
+        : null,
+      nowMs: Math.round(nowMs),
+      nowText: safe(() => formatDateTimeShort(nowMs), String(Math.round(nowMs))),
+      departureDeltaMs: Number.isFinite(departureMs)
+        ? Math.round(departureMs - nowMs)
+        : null,
+      createdAtMs: Number.isFinite(toFiniteMs(raw && raw.createdAtMs))
+        ? Math.round(toFiniteMs(raw && raw.createdAtMs))
+        : null,
+      units,
+      unitsKeys: Object.keys(units),
+      timingType: cleanText(raw && raw.timingType) || null,
+      timingLabel: cleanText(raw && raw.timingLabel) || null,
+      comment: cleanText(raw && raw.comment) || null,
+      hasGoUrl: Boolean(cleanText(raw && raw.goUrl)),
+      matchedCommandId: cleanText(raw && raw.matchedCommandId) || null,
+      matchedCommandType: cleanText(raw && raw.matchedCommandType) || null,
+      matchedArrivalMs: Number.isFinite(toFiniteMs(raw && raw.matchedArrivalMs))
+        ? Math.round(toFiniteMs(raw && raw.matchedArrivalMs))
+        : null,
+      matchedArrivalText: cleanText(raw && raw.matchedArrivalText) || null,
+    };
+  };
   const createScheduledCommandId = () => {
     const existing = new Set(
       (Array.isArray(state.scheduledCommands) ? state.scheduledCommands : [])
@@ -4521,6 +4591,18 @@
     if (archiveEntries.length) {
       appendArchivedManeuvers(archiveEntries);
     }
+    if (archiveEntries.length) {
+      console.warn(`${LOG_PREFIX} [plan-reconcile][finalized]`, {
+        version: VERSION,
+        nowMs: Math.round(nowMs),
+        nowText: safe(() => formatDateTimeShort(nowMs), String(Math.round(nowMs))),
+        finalizedCount: archiveEntries.length,
+        activeCount: active.length,
+        finalizedSample: finalized
+          .slice(0, 20)
+          .map((entry, index) => diagnoseScheduledCommandForPlan(entry, index)),
+      });
+    }
     saveScheduledCommands();
 
     return {
@@ -4543,16 +4625,134 @@
       .map((item) => normalizeScheduledCommand(item))
       .filter((item) => item && !isFinalManeuverStatus(item.status));
 
+  const mergeScheduledCommandListsForStorage = (...lists) => {
+    const map = new Map();
+    lists.forEach((list) => {
+      (Array.isArray(list) ? list : [])
+        .map((item) => normalizeScheduledCommand(item))
+        .filter((item) => item && !isFinalManeuverStatus(item.status))
+        .forEach((item) => {
+          const key = cleanText(item && item.id);
+          if (!key) return;
+          map.set(String(key), item);
+        });
+    });
+    return Array.from(map.values()).sort(
+      (a, b) =>
+        Number((a && a.departureMs) || 0) - Number((b && b.departureMs) || 0),
+    );
+  };
+
+  const readScheduledCommandsStorageSnapshot = () => {
+    const primaryRaw = readJson(STORAGE_KEYS.scheduledCommands);
+    const backupRaw = readJson(STORAGE_KEYS.scheduledCommandsBackup);
+    const primaryArray = Array.isArray(primaryRaw) ? primaryRaw : [];
+    const backupArray = Array.isArray(backupRaw) ? backupRaw : [];
+    const primaryCommands = purgeStaleScheduledCommands(primaryArray);
+    const backupCommands = purgeStaleScheduledCommands(backupArray);
+    const commands = mergeScheduledCommandListsForStorage(
+      primaryCommands,
+      backupCommands,
+    );
+    const primaryIds = new Set(
+      primaryCommands.map((item) => String(cleanText(item && item.id) || "")),
+    );
+    const backupUsed = backupCommands.some(
+      (item) => !primaryIds.has(String(cleanText(item && item.id) || "")),
+    );
+    return {
+      primaryRaw,
+      backupRaw,
+      primaryArray,
+      backupArray,
+      primaryCommands,
+      backupCommands,
+      commands,
+      backupUsed,
+      primaryRawType:
+        primaryRaw === null
+          ? "null"
+          : Array.isArray(primaryRaw)
+            ? "array"
+            : typeof primaryRaw,
+      backupRawType:
+        backupRaw === null
+          ? "null"
+          : Array.isArray(backupRaw)
+            ? "array"
+            : typeof backupRaw,
+    };
+  };
+
+  const writeScheduledCommandsStorage = (commands, context = "save") => {
+    const normalized = purgeStaleScheduledCommands(commands);
+    const payload = JSON.stringify(normalized);
+    const expectedIds = new Set(
+      normalized.map((item) => String(cleanText(item && item.id) || "")),
+    );
+    const writeOne = (key) =>
+      safe(() => {
+        localStorage.setItem(key, payload);
+        return true;
+      }, false);
+    const primaryWriteOk = writeOne(STORAGE_KEYS.scheduledCommands);
+    const backupWriteOk = writeOne(STORAGE_KEYS.scheduledCommandsBackup);
+    const primaryStored = purgeStaleScheduledCommands(
+      readJson(STORAGE_KEYS.scheduledCommands),
+    );
+    const backupStored = purgeStaleScheduledCommands(
+      readJson(STORAGE_KEYS.scheduledCommandsBackup),
+    );
+    const containsExpected = (stored) => {
+      if (stored.length !== expectedIds.size) return false;
+      return stored.every((item) =>
+        expectedIds.has(String(cleanText(item && item.id) || "")),
+      );
+    };
+    const primaryVerified = containsExpected(primaryStored);
+    const backupVerified = containsExpected(backupStored);
+    const ok = primaryVerified || backupVerified;
+    const logPayload = {
+      version: VERSION,
+      context,
+      expectedCount: normalized.length,
+      primaryWriteOk,
+      backupWriteOk,
+      primaryVerified,
+      backupVerified,
+      primaryStoredCount: primaryStored.length,
+      backupStoredCount: backupStored.length,
+      expectedIds: Array.from(expectedIds).slice(0, 50),
+      primaryIds: primaryStored
+        .slice(0, 50)
+        .map((item) => cleanText(item && item.id) || "?"),
+      backupIds: backupStored
+        .slice(0, 50)
+        .map((item) => cleanText(item && item.id) || "?"),
+    };
+    if (ok) {
+      console.info(`${LOG_PREFIX} [plan-save]`, logPayload);
+    } else {
+      console.error(`${LOG_PREFIX} [plan-save][failed]`, logPayload);
+    }
+    return ok;
+  };
+
   const saveScheduledCommands = () => {
     state.scheduledCommands = purgeStaleScheduledCommands(
       state.scheduledCommands,
     );
-    return saveJson(STORAGE_KEYS.scheduledCommands, state.scheduledCommands);
+    return writeScheduledCommandsStorage(state.scheduledCommands, "save");
   };
 
   const loadScheduledCommands = () => {
-    const raw = readJson(STORAGE_KEYS.scheduledCommands);
-    const normalized = (Array.isArray(raw) ? raw : [])
+    const snapshot = readScheduledCommandsStorageSnapshot();
+    const rawArray = snapshot.primaryArray;
+    const backupArray = snapshot.backupArray;
+    const normalized = mergeScheduledCommandListsForStorage(
+      snapshot.primaryCommands,
+      snapshot.backupCommands,
+    )
       .map((item) => normalizeScheduledCommand(item))
       .filter(Boolean);
     const active = [];
@@ -4571,7 +4771,33 @@
         appendArchivedManeuvers(migratedArchiveEntries);
       }
     }
-    saveJson(STORAGE_KEYS.scheduledCommands, state.scheduledCommands);
+    if (snapshot.backupUsed || finalized.length) {
+      writeScheduledCommandsStorage(state.scheduledCommands, "load_restore");
+    }
+    console.info(`${LOG_PREFIX} [plan-load]`, {
+      version: VERSION,
+      storageKey: STORAGE_KEYS.scheduledCommands,
+      backupStorageKey: STORAGE_KEYS.scheduledCommandsBackup,
+      rawType: snapshot.primaryRawType,
+      backupRawType: snapshot.backupRawType,
+      rawCount: rawArray.length,
+      backupRawCount: backupArray.length,
+      normalizedCount: normalized.length,
+      activeCount: active.length,
+      finalizedCount: finalized.length,
+      droppedCount: Math.max(
+        0,
+        rawArray.length + backupArray.length - normalized.length,
+      ),
+      backupUsed: snapshot.backupUsed,
+      storagePreserved: !snapshot.backupUsed && !finalized.length,
+      diagnostics: rawArray
+        .slice(0, 30)
+        .map((item, index) => diagnoseScheduledCommandForPlan(item, index)),
+      backupDiagnostics: backupArray
+        .slice(0, 30)
+        .map((item, index) => diagnoseScheduledCommandForPlan(item, index)),
+    });
     return state.scheduledCommands;
   };
   const syncScheduledCommandsFromStorage = () => loadScheduledCommands();
@@ -4671,7 +4897,6 @@
       return;
     }
     const nowMs = getServerNow().getTime();
-    let planRowsRemoved = false;
     roots.forEach((root) => {
       root
         .querySelectorAll(".smm-plan-countdown[data-departure-ms]")
@@ -4689,32 +4914,8 @@
             node.textContent = `-${formatCountdown(Math.abs(diffSeconds))}`;
             node.classList.add("late");
           }
-          const planRow = node.closest("tr.smm-plan-cmd-row");
-          if (planRow && diffSeconds <= -60) {
-            planRow.remove();
-            planRowsRemoved = true;
-          }
         });
     });
-    if (
-      planRowsRemoved &&
-      state.ui &&
-      state.activeTab === "plan" &&
-      state.ui.list
-    ) {
-      const remainingRows = state.ui.list.querySelectorAll(
-        "tr.smm-plan-cmd-row",
-      ).length;
-      const planCountNode = state.ui.list.querySelector(
-        ".smm-plan-panel .smm-plan-head span:last-child",
-      );
-      if (planCountNode) {
-        planCountNode.textContent = `${remainingRows} записей`;
-      }
-      if (!remainingRows) {
-        renderPlanTab(state.ui);
-      }
-    }
   };
 
   const applySliceScrollLimits = (rootNode = null) => {
@@ -12581,19 +12782,59 @@
     stopCountdownTicker();
     ui.list.innerHTML = "";
     maybeShowMultiTabWarning({ force: false, statusTarget: ui });
+    const storageSnapshotBeforeSync = readScheduledCommandsStorageSnapshot();
+    const rawScheduledArray = storageSnapshotBeforeSync.primaryArray;
+    const rawBackupScheduledArray = storageSnapshotBeforeSync.backupArray;
+    const rawStorageType = storageSnapshotBeforeSync.primaryRawType;
+    const rawBackupStorageType = storageSnapshotBeforeSync.backupRawType;
+    const rawDiagnosticsBeforeSync = rawScheduledArray
+      .slice(0, 30)
+      .map((item, index) => diagnoseScheduledCommandForPlan(item, index));
+    const rawBackupDiagnosticsBeforeSync = rawBackupScheduledArray
+      .slice(0, 30)
+      .map((item, index) => diagnoseScheduledCommandForPlan(item, index));
     syncScheduledCommandsFromStorage();
     state.scheduledCommands = purgeStaleScheduledCommands(
       state.scheduledCommands,
     );
-    saveScheduledCommands();
     const scheduled = state.scheduledCommands
       .slice()
       .sort((a, b) => Number(a.departureMs || 0) - Number(b.departureMs || 0));
+    const stateDiagnosticsAfterSync = scheduled
+      .slice(0, 30)
+      .map((item, index) => diagnoseScheduledCommandForPlan(item, index));
+    console.info(`${LOG_PREFIX} [plan-render][input]`, {
+      version: VERSION,
+      activeTab: state.activeTab,
+      storageKey: STORAGE_KEYS.scheduledCommands,
+      backupStorageKey: STORAGE_KEYS.scheduledCommandsBackup,
+      rawStorageType,
+      rawBackupStorageType,
+      rawStorageCount: rawScheduledArray.length,
+      rawBackupStorageCount: rawBackupScheduledArray.length,
+      rawStorageSample: rawDiagnosticsBeforeSync,
+      rawBackupStorageSample: rawBackupDiagnosticsBeforeSync,
+      backupUsedBeforeSync: storageSnapshotBeforeSync.backupUsed,
+      scheduledCount: scheduled.length,
+      scheduledSample: stateDiagnosticsAfterSync,
+    });
     const hasCommentColumn =
       Boolean(getUiSetting("plannerCommentEnabled")) ||
       scheduled.some((command) => cleanText(command && command.comment));
 
     if (!scheduled.length) {
+      console.warn(`${LOG_PREFIX} [plan-render][empty]`, {
+        version: VERSION,
+        rawStorageType,
+        rawBackupStorageType,
+        rawStorageCount: rawScheduledArray.length,
+        rawBackupStorageCount: rawBackupScheduledArray.length,
+        rawStorageSample: rawDiagnosticsBeforeSync,
+        rawBackupStorageSample: rawBackupDiagnosticsBeforeSync,
+        backupUsedBeforeSync: storageSnapshotBeforeSync.backupUsed,
+        stateCountAfterSync: state.scheduledCommands.length,
+        stateSampleAfterSync: stateDiagnosticsAfterSync,
+      });
       const empty = document.createElement("div");
       empty.className = "smm-empty";
       empty.textContent =
@@ -12687,6 +12928,16 @@
 </tr>`;
       })
       .join("");
+    console.info(`${LOG_PREFIX} [plan-render][output]`, {
+      version: VERSION,
+      scheduledCount: scheduled.length,
+      rowsHtmlLength: rowsHtml.length,
+      tableWillRender: Boolean(rowsHtml),
+      failedPlanRows: failedPlanRows.slice(),
+      renderedCommandIds: scheduled
+        .slice(0, 50)
+        .map((command) => cleanText(command && command.id) || "?"),
+    });
 
     ui.list.innerHTML = `
 <section class="smm-plan-panel smm-slice-panel">
@@ -13643,15 +13894,20 @@
     if (!normalized) return null;
     const normalizedId = cleanText(normalized.id);
     if (!normalizedId) return null;
+    console.info(`${LOG_PREFIX} [plan-upsert][input]`, {
+      version: VERSION,
+      command: diagnoseScheduledCommandForPlan(normalized, 0),
+    });
     const latestCommands = syncScheduledCommandsFromStorage();
     const mergedCommands = mergeScheduledCommandsById(latestCommands, [
       normalized,
     ]);
     state.scheduledCommands = mergedCommands;
-    saveScheduledCommands();
+    const writeOk = saveScheduledCommands();
+    const storageAfterWrite = readScheduledCommandsStorageSnapshot();
     const persistedCommands = mergeScheduledCommandsById(
-      purgeStaleScheduledCommands(readJson(STORAGE_KEYS.scheduledCommands)),
-      state.scheduledCommands,
+      storageAfterWrite.commands,
+      writeOk ? state.scheduledCommands : [],
     );
     state.scheduledCommands = persistedCommands;
     let persistedCommand = persistedCommands.find(
@@ -13663,6 +13919,11 @@
         normalized,
       ]);
       saveScheduledCommands();
+      const storageAfterRetry = readScheduledCommandsStorageSnapshot();
+      state.scheduledCommands = mergeScheduledCommandsById(
+        storageAfterRetry.commands,
+        [],
+      );
       persistedCommand = (
         Array.isArray(state.scheduledCommands) ? state.scheduledCommands : []
       ).find(
@@ -13670,6 +13931,23 @@
           String(cleanText(command && command.id) || "") === String(normalizedId),
       );
     }
+    console.info(`${LOG_PREFIX} [plan-upsert][result]`, {
+      version: VERSION,
+      id: normalizedId,
+      saved: Boolean(persistedCommand),
+      writeOk,
+      latestCount: Array.isArray(latestCommands) ? latestCommands.length : 0,
+      mergedCount: Array.isArray(mergedCommands) ? mergedCommands.length : 0,
+      persistedCount: Array.isArray(persistedCommands)
+        ? persistedCommands.length
+        : 0,
+      primaryStoredCount: storageAfterWrite.primaryCommands.length,
+      backupStoredCount: storageAfterWrite.backupCommands.length,
+      backupUsed: storageAfterWrite.backupUsed,
+      persistedCommand: persistedCommand
+        ? diagnoseScheduledCommandForPlan(persistedCommand, 0)
+        : null,
+    });
     return persistedCommand || null;
   };
   const updateScheduledCommandCommentById = (commandId, comment) => {
@@ -20120,6 +20398,22 @@ ${panelHtml}`;
       const fallbackIncoming = getIncomingById(incomingId);
       const incomingEtaMs = Number(row.getAttribute("data-eta-ms"));
       const action = cleanText(row.getAttribute("data-action")) || "slice";
+      console.info(`${LOG_PREFIX} [plan-schedule][click]`, {
+        version: VERSION,
+        source: "message_inline",
+        fromVillageId,
+        fromVillageCoord,
+        targetCoord,
+        incomingId,
+        incomingEtaMs: Number.isFinite(incomingEtaMs)
+          ? Math.round(incomingEtaMs)
+          : null,
+        action,
+        departureMs: Number.isFinite(departureMs)
+          ? Math.round(departureMs)
+          : null,
+        units,
+      });
       let plannerComment = null;
       if (getUiSetting("plannerCommentEnabled")) {
         const commentResult = await askFavoriteCommentDialog({
@@ -20162,6 +20456,17 @@ ${panelHtml}`;
         goUrl,
       });
       if (!normalized) {
+        console.warn(`${LOG_PREFIX} [plan-schedule][normalize_failed]`, {
+          version: VERSION,
+          source: "message_inline",
+          fromVillageId,
+          fromVillageCoord,
+          targetCoord,
+          incomingId,
+          action,
+          departureMs,
+          units,
+        });
         setMessageInlinePanelStatus(
           panelNode,
           "Не удалось сохранить приказ в план.",
@@ -21022,7 +21327,9 @@ ${panelHtml}`;
     )
       ? cachedOverviewUnitsDefenseRaw
       : null;
-    saveScheduledCommands();
+    // Не перезаписываем storage из возможного пустого state перед refresh:
+    // сначала подтягиваем актуальный план из localStorage, иначе резерв может пропасть.
+    syncScheduledCommandsFromStorage();
     const progressTracker = createProgressTracker(state.ui, 7);
     try {
       const speedResultPromise = toSettledResult(
@@ -21526,7 +21833,7 @@ ${panelHtml}`;
           getServerNowMs(),
         );
       } else {
-        saveScheduledCommands();
+        syncScheduledCommandsFromStorage();
       }
 
       const ownIncomingIds =
@@ -22098,6 +22405,7 @@ ${panelHtml}`;
         if (
           key &&
           key !== STORAGE_KEYS.scheduledCommands &&
+          key !== STORAGE_KEYS.scheduledCommandsBackup &&
           key !== STORAGE_KEYS.planActions &&
           key !== STORAGE_KEYS.maneuversArchive &&
           key !== STORAGE_KEYS.uiSettings &&
@@ -22831,6 +23139,22 @@ ${panelHtml}`;
           const incomingId = cleanText(row.getAttribute("data-incoming-id"));
           const incomingEtaMs = Number(row.getAttribute("data-eta-ms"));
           const action = cleanText(row.getAttribute("data-action")) || "slice";
+          console.info(`${LOG_PREFIX} [plan-schedule][click]`, {
+            version: VERSION,
+            source: "overlay",
+            fromVillageId,
+            fromVillageCoord,
+            targetCoord,
+            incomingId,
+            incomingEtaMs: Number.isFinite(incomingEtaMs)
+              ? Math.round(incomingEtaMs)
+              : null,
+            action,
+            departureMs: Number.isFinite(departureMs)
+              ? Math.round(departureMs)
+              : null,
+            units,
+          });
           let plannerComment = null;
           if (getUiSetting("plannerCommentEnabled")) {
             const commentResult = await askFavoriteCommentDialog({
@@ -22873,6 +23197,17 @@ ${panelHtml}`;
             goUrl,
           });
           if (!normalized) {
+            console.warn(`${LOG_PREFIX} [plan-schedule][normalize_failed]`, {
+              version: VERSION,
+              source: "overlay",
+              fromVillageId,
+              fromVillageCoord,
+              targetCoord,
+              incomingId,
+              action,
+              departureMs,
+              units,
+            });
             setStatus(state.ui, "Не удалось сохранить приказ в план.");
             return;
           }
