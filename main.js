@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.23";
+  const VERSION = "0.10.24";
   const LOG_PREFIX = "[ScriptMM]";
   const MULTI_TAB_PRESENCE_KEY = "scriptmm.active_instances.v1";
   const MULTI_TAB_HEARTBEAT_INTERVAL_MS = 3000;
@@ -9581,6 +9581,8 @@
 #scriptmm-overlay-root .smm-plan-comment-cell{text-align:left;white-space:normal;line-height:1.25;min-width:110px;max-width:260px}
 #scriptmm-overlay-root .smm-plan-comment-wrap{display:flex;align-items:flex-start;gap:6px}
 #scriptmm-overlay-root .smm-plan-comment-text{flex:1 1 auto;min-width:0;word-break:break-word}
+#scriptmm-overlay-root .smm-plan-timing-cell{text-align:left;white-space:normal;line-height:1.25;min-width:128px}
+#scriptmm-overlay-root .smm-plan-timing-text{flex:1 1 auto;min-width:0;word-break:break-word}
 #scriptmm-overlay-root .smm-plan-comment-edit{width:18px;height:18px;min-width:18px;padding:0;border:1px solid #b99656;border-radius:5px;cursor:pointer;background:linear-gradient(180deg,#fff6de 0%,#ecd7ab 100%);background-repeat:no-repeat;background-position:center;background-size:12px 12px;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%235a3a10' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 20h9'/%3E%3Cpath d='M16.5 3.5a2.12 2.12 0 1 1 3 3L7 19l-4 1 1-4z'/%3E%3C/svg%3E")}
 #scriptmm-overlay-root .smm-plan-comment-edit:hover{filter:brightness(1.06)}
 #scriptmm-overlay-root .smm-unit-toggle,.smm-msg-inline-panel .smm-unit-toggle{position:relative;display:inline-flex;align-items:center;justify-content:center;width:20px;height:16px;padding:0;margin:0;border:0;background:transparent;cursor:pointer}
@@ -10204,6 +10206,105 @@
     return Number.isFinite(pointDayMs)
       ? formatDayMsToTimeWithMs(pointDayMs)
       : null;
+  };
+
+  const buildEpochMsFromDayMsNearAnchor = (dayMsRaw, anchorMsRaw) => {
+    const dayMs = Number(dayMsRaw);
+    if (!Number.isFinite(dayMs)) return null;
+    const anchorMs = toFiniteEpochMs(anchorMsRaw) || getServerNowMs();
+    const anchorParts = getServerWallClockParts(anchorMs);
+    if (!anchorParts) return null;
+    const normalized = ((Math.round(dayMs) % DAY_MS) + DAY_MS) % DAY_MS;
+    const hh = Math.floor(normalized / 3600000);
+    const mm = Math.floor((normalized % 3600000) / 60000);
+    const ss = Math.floor((normalized % 60000) / 1000);
+    const ms = normalized % 1000;
+    let epochMs = buildServerEpochMs(
+      anchorParts.year,
+      anchorParts.month,
+      anchorParts.day,
+      hh,
+      mm,
+      ss,
+      ms,
+    );
+    while (epochMs - anchorMs > DAY_MS / 2) epochMs -= DAY_MS;
+    while (anchorMs - epochMs > DAY_MS / 2) epochMs += DAY_MS;
+    return epochMs;
+  };
+
+  const normalizeManualTimingInput = (inputRaw, commandRaw = null) => {
+    const input = cleanText(inputRaw);
+    if (!input || input === "—") {
+      return {
+        timingType: null,
+        timingLabel: null,
+        timingGapMs: null,
+        timingStartMs: null,
+        timingEndMs: null,
+        timingPointMs: null,
+      };
+    }
+    const command =
+      commandRaw && typeof commandRaw === "object" ? commandRaw : {};
+    const anchorMs =
+      toFiniteEpochMs(command.incomingEtaMs) ||
+      toFiniteEpochMs(command.departureMs) ||
+      getServerNowMs();
+    const rangeMatch = input.match(
+      /(\d{1,2}:\d{2}:\d{2}(?::\d{1,3})?)\s*[-–—]\s*(\d{1,2}:\d{2}:\d{2}(?::\d{1,3})?)/,
+    );
+    if (rangeMatch) {
+      const startDayMs = parseClockWithOptionalMsToDayMs(rangeMatch[1]);
+      const endDayMs = parseClockWithOptionalMsToDayMs(rangeMatch[2]);
+      let startMs = buildEpochMsFromDayMsNearAnchor(startDayMs, anchorMs);
+      let endMs = buildEpochMsFromDayMsNearAnchor(endDayMs, anchorMs);
+      if (Number.isFinite(startMs) && Number.isFinite(endMs)) {
+        if (endMs < startMs) endMs += DAY_MS;
+        let centerMs = Math.round((startMs + endMs) / 2);
+        while (centerMs - anchorMs > DAY_MS / 2) {
+          startMs -= DAY_MS;
+          endMs -= DAY_MS;
+          centerMs -= DAY_MS;
+        }
+        while (anchorMs - centerMs > DAY_MS / 2) {
+          startMs += DAY_MS;
+          endMs += DAY_MS;
+          centerMs += DAY_MS;
+        }
+        return {
+          timingType: "manual",
+          timingLabel: `${formatTimeWithMs(startMs)}-${formatTimeWithMs(endMs)}`,
+          timingGapMs: null,
+          timingStartMs: startMs,
+          timingEndMs: endMs,
+          timingPointMs: Math.round((startMs + endMs) / 2),
+        };
+      }
+    }
+    const pointMatch = input.match(/(\d{1,2}:\d{2}:\d{2}(?::\d{1,3})?)/);
+    if (pointMatch) {
+      const pointDayMs = parseClockWithOptionalMsToDayMs(pointMatch[1]);
+      const pointMs = buildEpochMsFromDayMsNearAnchor(pointDayMs, anchorMs);
+      if (Number.isFinite(pointMs)) {
+        return {
+          timingType: "manual",
+          timingLabel: formatTimeWithMs(pointMs),
+          timingGapMs: null,
+          timingStartMs: pointMs,
+          timingEndMs: pointMs,
+          timingPointMs: pointMs,
+        };
+      }
+    }
+    return {
+      timingType: "manual",
+      timingLabel: input,
+      timingGapMs: null,
+      timingStartMs: null,
+      timingEndMs: null,
+      timingPointMs: null,
+    };
   };
 
   const formatDurationWithMs = (durationMs) => {
@@ -12412,6 +12513,17 @@
     if (!command || typeof command !== "object") {
       return { timingType: "none", timingLabel: "—" };
     }
+    const existingLabel = cleanText(command.timingLabel);
+    if (cleanText(command.timingType) === "manual" && existingLabel) {
+      return {
+        timingType: "manual",
+        timingLabel: existingLabel,
+        timingGapMs: Number(command.timingGapMs),
+        timingStartMs: Number(command.timingStartMs),
+        timingEndMs: Number(command.timingEndMs),
+        timingPointMs: Number(command.timingPointMs),
+      };
+    }
     const recalculated = buildTimingPayload({
       action: command.action,
       incomingId: command.incomingId,
@@ -12425,7 +12537,6 @@
     ) {
       return recalculated;
     }
-    const existingLabel = cleanText(command.timingLabel);
     if (existingLabel) {
       return {
         timingType: cleanText(command.timingType) || "manual",
@@ -12501,11 +12612,13 @@
         const timing = resolveTimingForScheduledCommand(command);
         const timingCenter = computeTimingCenterCopyValue(timing);
         const timingCopyValue = timingCenter;
-        const timingCellAttrs = timingCopyValue
-          ? ` class="smm-plan-timing-copy" data-copy-time="${escapeHtml(
+        const timingText = cleanText(timing.timingLabel) || "—";
+        const timingTextAttrs = timingCopyValue
+          ? ` class="smm-plan-timing-text smm-plan-timing-copy" data-copy-time="${escapeHtml(
               timingCopyValue,
             )}" title="Клик: скопировать центр тайминга ${escapeHtml(timingCopyValue)}"`
-          : "";
+          : ` class="smm-plan-timing-text"`;
+        const timingButtonTitle = "Изменить тайминг";
         const typeLabel = getManeuverTypeLabel(command.action);
         const statusLabel = getManeuverStatusLabel(command.status);
         const commentText = cleanText(command.comment);
@@ -12529,7 +12642,13 @@
   <td>${escapeHtml(command.fromVillageCoord || command.fromVillageId || "?")}</td>
   <td>${escapeHtml(command.targetCoord || "?")}</td>
   <td>${escapeHtml(departureText)}</td>
-  <td${timingCellAttrs}>${escapeHtml(timing.timingLabel || "—")}</td>
+  <td class="smm-plan-timing-cell"><div class="smm-plan-comment-wrap"><span${timingTextAttrs}>${escapeHtml(
+    timingText,
+  )}</span><button type="button" class="smm-plan-comment-edit smm-plan-timing-edit" data-cmd-id="${escapeHtml(
+    command.id || "",
+  )}" title="${escapeHtml(timingButtonTitle)}" aria-label="${escapeHtml(
+    timingButtonTitle,
+  )}"></button></div></td>
   <td>${escapeHtml(statusLabel)}</td>
   ${
     hasCommentColumn
@@ -12672,6 +12791,7 @@
     });
     return Array.from(byId.values()).map((command) => {
       const arrivalAtMs = getPlanArrivalEpochMs(command);
+      const timing = resolveTimingForScheduledCommand(command);
       return {
         id: cleanText(command.id) || null,
         type: getManeuverTypeLabel(command.action),
@@ -12693,6 +12813,20 @@
           ? Math.round(Number(command.departureMs))
           : null,
         goUrl: cleanText(command.goUrl) || null,
+        timingType: cleanText(timing && timing.timingType) || null,
+        timingLabel: cleanText(timing && timing.timingLabel) || null,
+        timingGapMs: Number.isFinite(Number(timing && timing.timingGapMs))
+          ? Math.round(Number(timing.timingGapMs))
+          : null,
+        timingStartMs: Number.isFinite(Number(timing && timing.timingStartMs))
+          ? Math.round(Number(timing.timingStartMs))
+          : null,
+        timingEndMs: Number.isFinite(Number(timing && timing.timingEndMs))
+          ? Math.round(Number(timing.timingEndMs))
+          : null,
+        timingPointMs: Number.isFinite(Number(timing && timing.timingPointMs))
+          ? Math.round(Number(timing.timingPointMs))
+          : null,
         sourceVersion: VERSION,
       };
     });
@@ -13367,6 +13501,20 @@
           incomingEtaMs: Number.isFinite(Number(row.arrivalAtMs))
             ? Math.round(Number(row.arrivalAtMs))
             : null,
+          timingType: cleanText(row.timingType) || null,
+          timingLabel: cleanText(row.timingLabel) || null,
+          timingGapMs: Number.isFinite(Number(row.timingGapMs))
+            ? Math.round(Number(row.timingGapMs))
+            : null,
+          timingStartMs: Number.isFinite(Number(row.timingStartMs))
+            ? Math.round(Number(row.timingStartMs))
+            : null,
+          timingEndMs: Number.isFinite(Number(row.timingEndMs))
+            ? Math.round(Number(row.timingEndMs))
+            : null,
+          timingPointMs: Number.isFinite(Number(row.timingPointMs))
+            ? Math.round(Number(row.timingPointMs))
+            : null,
           units,
           goUrl: cleanText(row.goUrl) || null,
         });
@@ -13398,6 +13546,11 @@
           ) || "",
           normalizeCoordIdentity(command && command.targetCoord) || "",
           unitsText,
+          cleanText(command && command.timingType) || "",
+          cleanText(command && command.timingLabel) || "",
+          Number(command && command.timingStartMs) || 0,
+          Number(command && command.timingEndMs) || 0,
+          Number(command && command.timingPointMs) || 0,
           cleanText(command && command.comment) || "",
         ].join("|");
       })
@@ -13422,11 +13575,44 @@
         const existing = map.get(key);
         const existingComment = cleanText(existing && existing.comment);
         const localComment = cleanText(item && item.comment);
+        const existingTimingType = cleanText(existing && existing.timingType);
+        const localTimingType = cleanText(item && item.timingType);
+        const existingTimingLabel = cleanText(existing && existing.timingLabel);
+        const localTimingLabel = cleanText(item && item.timingLabel);
+        let merged = existing;
         if (!existingComment && localComment) {
-          map.set(key, {
-            ...existing,
+          merged = {
+            ...merged,
             comment: localComment,
-          });
+          };
+        }
+        if (
+          localTimingType === "manual" &&
+          localTimingLabel &&
+          existingTimingType !== "manual"
+        ) {
+          merged = {
+            ...merged,
+            timingType: item.timingType,
+            timingLabel: item.timingLabel,
+            timingGapMs: item.timingGapMs,
+            timingStartMs: item.timingStartMs,
+            timingEndMs: item.timingEndMs,
+            timingPointMs: item.timingPointMs,
+          };
+        } else if (!existingTimingLabel && localTimingLabel) {
+          merged = {
+            ...merged,
+            timingType: item.timingType,
+            timingLabel: item.timingLabel,
+            timingGapMs: item.timingGapMs,
+            timingStartMs: item.timingStartMs,
+            timingEndMs: item.timingEndMs,
+            timingPointMs: item.timingPointMs,
+          };
+        }
+        if (merged !== existing) {
+          map.set(key, normalizeScheduledCommand(merged) || merged);
         }
       });
     return Array.from(map.values()).sort((a, b) => {
@@ -13482,6 +13668,36 @@
     const updatedCommand = updatedCommands.find(
       (command) => String(cleanText(command && command.id) || "") === String(safeId),
     );
+    if (!updatedCommand) return null;
+    state.scheduledCommands = updatedCommands;
+    saveScheduledCommands();
+    return updatedCommand;
+  };
+  const updateScheduledCommandTimingById = (commandId, timingInput) => {
+    const safeId = cleanText(commandId);
+    if (!safeId) return null;
+    const latestCommands = syncScheduledCommandsFromStorage();
+    let updatedCommand = null;
+    const updatedCommands = (Array.isArray(latestCommands) ? latestCommands : [])
+      .map((command) => normalizeScheduledCommand(command))
+      .filter(Boolean)
+      .map((command) => {
+        if (String(cleanText(command.id) || "") !== String(safeId)) {
+          return command;
+        }
+        const timing = normalizeManualTimingInput(timingInput, command);
+        updatedCommand = normalizeScheduledCommand({
+          ...command,
+          timingType: timing.timingType,
+          timingLabel: timing.timingLabel,
+          timingGapMs: timing.timingGapMs,
+          timingStartMs: timing.timingStartMs,
+          timingEndMs: timing.timingEndMs,
+          timingPointMs: timing.timingPointMs,
+        });
+        return updatedCommand;
+      })
+      .filter(Boolean);
     if (!updatedCommand) return null;
     state.scheduledCommands = updatedCommands;
     saveScheduledCommands();
@@ -13730,6 +13946,49 @@
     if (!command || cleanText(command.action) !== "slice") return null;
     const targetCoord = cleanText(command.targetCoord);
     const targetKey = normalizeCoordKey(targetCoord);
+    if (cleanText(command.timingType) === "manual") {
+      const manualTiming =
+        normalizeManualTimingInput(command.timingLabel, command) || {};
+      const manualStartMs = toFiniteEpochMs(
+        command.timingStartMs || manualTiming.timingStartMs,
+      );
+      const manualEndMs = toFiniteEpochMs(
+        command.timingEndMs || manualTiming.timingEndMs,
+      );
+      const manualPointMs = toFiniteEpochMs(
+        command.timingPointMs || manualTiming.timingPointMs,
+      );
+      let startMs = manualStartMs;
+      let endMs = manualEndMs;
+      if (!Number.isFinite(startMs) && Number.isFinite(manualPointMs))
+        startMs = manualPointMs;
+      if (!Number.isFinite(endMs) && Number.isFinite(manualPointMs))
+        endMs = manualPointMs;
+      if (targetKey && Number.isFinite(startMs) && Number.isFinite(endMs)) {
+        if (startMs > endMs) {
+          const temp = startMs;
+          startMs = endMs;
+          endMs = temp;
+        }
+        return {
+          action: "slice",
+          incomingId: cleanText(command.incomingId) || cleanText(command.id) || null,
+          targetCoord,
+          targetKey,
+          startMs,
+          endMs,
+          timingPointMs: Number.isFinite(manualPointMs) ? manualPointMs : null,
+          source: "plan_manual_timing",
+          timingLabel: buildNormalizedTimingLabel({
+            timingType: "manual",
+            timingLabel: command.timingLabel,
+            timingStartMs: startMs,
+            timingEndMs: endMs,
+            timingPointMs: manualPointMs,
+          }),
+        };
+      }
+    }
     const resolvedWindow = resolveSliceConflictWindowByIncomings({
       incomingId: cleanText(command.incomingId) || cleanText(command.id),
       targetCoord,
@@ -16354,6 +16613,8 @@
   const askFavoriteCommentDialog = ({
     title = "Добавить в избранное",
     initialValue = "",
+    inputLabel = "Комментарий (необязательно)",
+    placeholder = "можно оставить пустым",
   } = {}) =>
     new Promise((resolve) => {
       const finish = (payload) => {
@@ -16386,8 +16647,8 @@
       backdrop.innerHTML = `
 <div class="smm-confirm-dialog-card" role="dialog" aria-modal="true">
   <div class="smm-confirm-dialog-title">${escapeHtml(cleanText(title) || "Добавить в избранное")}</div>
-  <label class="smm-hub-dialog-label" for="smm-favorite-comment-input">Комментарий (необязательно)</label>
-  <input id="smm-favorite-comment-input" class="smm-hub-dialog-input" type="text" value="${escapeHtml(cleanText(initialValue) || "")}" placeholder="можно оставить пустым">
+  <label class="smm-hub-dialog-label" for="smm-favorite-comment-input">${escapeHtml(cleanText(inputLabel) || "Комментарий (необязательно)")}</label>
+  <input id="smm-favorite-comment-input" class="smm-hub-dialog-input" type="text" value="${escapeHtml(cleanText(initialValue) || "")}" placeholder="${escapeHtml(cleanText(placeholder) || "можно оставить пустым")}">
   <div class="smm-confirm-dialog-actions">
     <button type="button" class="smm-btn smm-confirm-cancel-btn">Отмена</button>
     <button type="button" class="smm-btn smm-confirm-save-btn">Сохранить</button>
@@ -22130,6 +22391,64 @@ ${panelHtml}`;
         return;
       }
 
+      const planTimingEditButton = event.target.closest(".smm-plan-timing-edit");
+      if (planTimingEditButton) {
+        maybeShowMultiTabWarning({ force: true, statusTarget: state.ui });
+        const commandId = cleanText(
+          planTimingEditButton.getAttribute("data-cmd-id") ||
+            planTimingEditButton
+              .closest(".smm-plan-cmd-row")
+              ?.getAttribute("data-cmd-id"),
+        );
+        if (!commandId) {
+          setStatus(state.ui, "Не удалось определить запись плана.");
+          return;
+        }
+        syncScheduledCommandsFromStorage();
+        const command = (
+          Array.isArray(state.scheduledCommands) ? state.scheduledCommands : []
+        )
+          .map((item) => normalizeScheduledCommand(item))
+          .find(
+            (item) =>
+              String(cleanText(item && item.id) || "") === String(commandId),
+          );
+        if (!command) {
+          setStatus(state.ui, "Запись плана не найдена.");
+          return;
+        }
+        const timing = resolveTimingForScheduledCommand(command);
+        const timingResult = await askFavoriteCommentDialog({
+          title: "Тайминг приказа:",
+          inputLabel: "Тайминг (пусто = авторасчёт)",
+          placeholder: "11:53:50:722-11:53:50:822",
+          initialValue: cleanText(timing && timing.timingLabel) || "",
+        });
+        if (!timingResult || timingResult.canceled) {
+          return;
+        }
+        const updatedCommand = updateScheduledCommandTimingById(
+          commandId,
+          timingResult.comment,
+        );
+        if (!updatedCommand) {
+          setStatus(state.ui, "Не удалось обновить тайминг.");
+          return;
+        }
+        state.hubPlanLastFingerprint = buildScheduledCommandsFingerprint(
+          state.scheduledCommands,
+        );
+        renderActiveTab(state.ui);
+        setStatus(
+          state.ui,
+          cleanText(updatedCommand.timingType) === "manual" &&
+            cleanText(updatedCommand.timingLabel)
+            ? "Тайминг обновлён."
+            : "Тайминг возвращён к авторасчёту.",
+        );
+        return;
+      }
+
       const timingCopyNode = event.target.closest(
         ".smm-plan-timing-copy[data-copy-time]",
       );
@@ -22537,14 +22856,19 @@ ${panelHtml}`;
           state.hubPlanLastFingerprint = buildScheduledCommandsFingerprint(
             state.scheduledCommands,
           );
-          const nearestDialogOpen = Boolean(
+          const nearestDialog =
             state.ui &&
-              state.ui.root &&
-              state.ui.root.querySelector(".smm-nearest-dialog-backdrop"),
-          );
+            state.ui.root &&
+            state.ui.root.querySelector(".smm-nearest-dialog-backdrop");
           if (state.ui) {
-            if (nearestDialogOpen) {
-              state.pendingActiveTabRerender = true;
+            if (nearestDialog) {
+              const nearestSource =
+                cleanText(nearestDialog.getAttribute("data-nearest-source")) ||
+                cleanText(
+                  state.nearestDialogState && state.nearestDialogState.source,
+                ) ||
+                "incomings";
+              await openNearestSlicesDialog({ source: nearestSource });
             } else {
               renderActiveTab(state.ui);
             }
