@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.27";
+  const VERSION = "0.10.28";
   const LOG_PREFIX = "[ScriptMM]";
   const MULTI_TAB_PRESENCE_KEY = "scriptmm.active_instances.v1";
   const MULTI_TAB_HEARTBEAT_INTERVAL_MS = 3000;
@@ -12586,23 +12586,8 @@
       state.scheduledCommands,
     );
     saveScheduledCommands();
-    const nowMs = getServerNowMs();
-    const overdueHideThresholdMs = 60 * 1000;
-    const recentlyCreatedVisibleMs = 10 * 60 * 1000;
     const scheduled = state.scheduledCommands
       .slice()
-      .filter((command) => {
-        const departureMs = Number(command && command.departureMs);
-        if (!Number.isFinite(departureMs)) return true;
-        const createdAtMs = Number(command && command.createdAtMs);
-        if (
-          Number.isFinite(createdAtMs) &&
-          createdAtMs >= nowMs - recentlyCreatedVisibleMs
-        ) {
-          return true;
-        }
-        return departureMs >= nowMs - overdueHideThresholdMs;
-      })
       .sort((a, b) => Number(a.departureMs || 0) - Number(b.departureMs || 0));
     const hasCommentColumn =
       Boolean(getUiSetting("plannerCommentEnabled")) ||
