@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.31";
+  const VERSION = "0.10.32";
   const LOG_PREFIX = "[ScriptMM]";
   const MULTI_TAB_PRESENCE_KEY = "scriptmm.active_instances.v1";
   const MULTI_TAB_HEARTBEAT_INTERVAL_MS = 3000;
@@ -30,6 +30,7 @@
     planActions: "scriptmm.plan_actions.v1",
     scheduledCommands: "scriptmm.scheduled_commands.v1",
     scheduledCommandsBackup: "scriptmm.scheduled_commands.backup.v1",
+    scheduledCommandsSession: "scriptmm.scheduled_commands.session.v1",
     overviewCommands: "scriptmm.overview_villages.commands.v1",
     overviewUnits: "scriptmm.overview_villages.units.v2",
     overviewUnitsDefense: "scriptmm.overview_villages.units.defense.v2",
@@ -2540,6 +2541,13 @@
       if (!raw) return null;
       return JSON.parse(raw);
     }, null);
+  const readSessionJson = (key) =>
+    safe(() => {
+      if (typeof sessionStorage === "undefined" || !sessionStorage) return null;
+      const raw = sessionStorage.getItem(key);
+      if (!raw) return null;
+      return JSON.parse(raw);
+    }, null);
   const normalizeTimingCopyHistoryEntry = (raw) => {
     if (!raw || typeof raw !== "object") return null;
     const timingCenter = cleanText(raw.timingCenter);
@@ -4646,29 +4654,36 @@
   const readScheduledCommandsStorageSnapshot = () => {
     const primaryRaw = readJson(STORAGE_KEYS.scheduledCommands);
     const backupRaw = readJson(STORAGE_KEYS.scheduledCommandsBackup);
+    const sessionRaw = readSessionJson(STORAGE_KEYS.scheduledCommandsSession);
     const primaryArray = Array.isArray(primaryRaw) ? primaryRaw : [];
     const backupArray = Array.isArray(backupRaw) ? backupRaw : [];
+    const sessionArray = Array.isArray(sessionRaw) ? sessionRaw : [];
     const primaryCommands = purgeStaleScheduledCommands(primaryArray);
     const backupCommands = purgeStaleScheduledCommands(backupArray);
+    const sessionCommands = purgeStaleScheduledCommands(sessionArray);
     const commands = mergeScheduledCommandListsForStorage(
       primaryCommands,
       backupCommands,
+      sessionCommands,
     );
     const primaryIds = new Set(
       primaryCommands.map((item) => String(cleanText(item && item.id) || "")),
     );
-    const backupUsed = backupCommands.some(
+    const fallbackUsed = backupCommands.concat(sessionCommands).some(
       (item) => !primaryIds.has(String(cleanText(item && item.id) || "")),
     );
     return {
       primaryRaw,
       backupRaw,
+      sessionRaw,
       primaryArray,
       backupArray,
+      sessionArray,
       primaryCommands,
       backupCommands,
+      sessionCommands,
       commands,
-      backupUsed,
+      backupUsed: fallbackUsed,
       primaryRawType:
         primaryRaw === null
           ? "null"
@@ -4681,6 +4696,12 @@
           : Array.isArray(backupRaw)
             ? "array"
             : typeof backupRaw,
+      sessionRawType:
+        sessionRaw === null
+          ? "null"
+          : Array.isArray(sessionRaw)
+            ? "array"
+            : typeof sessionRaw,
     };
   };
 
@@ -4695,13 +4716,24 @@
         localStorage.setItem(key, payload);
         return true;
       }, false);
+    const writeSessionOne = (key) =>
+      safe(() => {
+        if (typeof sessionStorage === "undefined" || !sessionStorage)
+          return false;
+        sessionStorage.setItem(key, payload);
+        return true;
+      }, false);
     const primaryWriteOk = writeOne(STORAGE_KEYS.scheduledCommands);
     const backupWriteOk = writeOne(STORAGE_KEYS.scheduledCommandsBackup);
+    const sessionWriteOk = writeSessionOne(STORAGE_KEYS.scheduledCommandsSession);
     const primaryStored = purgeStaleScheduledCommands(
       readJson(STORAGE_KEYS.scheduledCommands),
     );
     const backupStored = purgeStaleScheduledCommands(
       readJson(STORAGE_KEYS.scheduledCommandsBackup),
+    );
+    const sessionStored = purgeStaleScheduledCommands(
+      readSessionJson(STORAGE_KEYS.scheduledCommandsSession),
     );
     const containsExpected = (stored) => {
       if (stored.length !== expectedIds.size) return false;
@@ -4711,17 +4743,21 @@
     };
     const primaryVerified = containsExpected(primaryStored);
     const backupVerified = containsExpected(backupStored);
-    const ok = primaryVerified || backupVerified;
+    const sessionVerified = containsExpected(sessionStored);
+    const ok = primaryVerified || backupVerified || sessionVerified;
     const logPayload = {
       version: VERSION,
       context,
       expectedCount: normalized.length,
       primaryWriteOk,
       backupWriteOk,
+      sessionWriteOk,
       primaryVerified,
       backupVerified,
+      sessionVerified,
       primaryStoredCount: primaryStored.length,
       backupStoredCount: backupStored.length,
+      sessionStoredCount: sessionStored.length,
       expectedIds: Array.from(expectedIds).slice(0, 50),
       primaryIds: primaryStored
         .slice(0, 50)
@@ -4729,6 +4765,12 @@
       backupIds: backupStored
         .slice(0, 50)
         .map((item) => cleanText(item && item.id) || "?"),
+      sessionIds: sessionStored
+        .slice(0, 50)
+        .map((item) => cleanText(item && item.id) || "?"),
+      normalizedSample: normalized
+        .slice(0, 10)
+        .map((item, index) => diagnoseScheduledCommandForPlan(item, index)),
     };
     if (ok) {
       console.info(`${LOG_PREFIX} [plan-save]`, logPayload);
@@ -4749,9 +4791,11 @@
     const snapshot = readScheduledCommandsStorageSnapshot();
     const rawArray = snapshot.primaryArray;
     const backupArray = snapshot.backupArray;
+    const sessionArray = snapshot.sessionArray;
     const normalized = mergeScheduledCommandListsForStorage(
       snapshot.primaryCommands,
       snapshot.backupCommands,
+      snapshot.sessionCommands,
     )
       .map((item) => normalizeScheduledCommand(item))
       .filter(Boolean);
@@ -4778,16 +4822,19 @@
       version: VERSION,
       storageKey: STORAGE_KEYS.scheduledCommands,
       backupStorageKey: STORAGE_KEYS.scheduledCommandsBackup,
+      sessionStorageKey: STORAGE_KEYS.scheduledCommandsSession,
       rawType: snapshot.primaryRawType,
       backupRawType: snapshot.backupRawType,
+      sessionRawType: snapshot.sessionRawType,
       rawCount: rawArray.length,
       backupRawCount: backupArray.length,
+      sessionRawCount: sessionArray.length,
       normalizedCount: normalized.length,
       activeCount: active.length,
       finalizedCount: finalized.length,
       droppedCount: Math.max(
         0,
-        rawArray.length + backupArray.length - normalized.length,
+        rawArray.length + backupArray.length + sessionArray.length - normalized.length,
       ),
       backupUsed: snapshot.backupUsed,
       storagePreserved: !snapshot.backupUsed && !finalized.length,
@@ -4795,6 +4842,9 @@
         .slice(0, 30)
         .map((item, index) => diagnoseScheduledCommandForPlan(item, index)),
       backupDiagnostics: backupArray
+        .slice(0, 30)
+        .map((item, index) => diagnoseScheduledCommandForPlan(item, index)),
+      sessionDiagnostics: sessionArray
         .slice(0, 30)
         .map((item, index) => diagnoseScheduledCommandForPlan(item, index)),
     });
@@ -12785,12 +12835,17 @@
     const storageSnapshotBeforeSync = readScheduledCommandsStorageSnapshot();
     const rawScheduledArray = storageSnapshotBeforeSync.primaryArray;
     const rawBackupScheduledArray = storageSnapshotBeforeSync.backupArray;
+    const rawSessionScheduledArray = storageSnapshotBeforeSync.sessionArray;
     const rawStorageType = storageSnapshotBeforeSync.primaryRawType;
     const rawBackupStorageType = storageSnapshotBeforeSync.backupRawType;
+    const rawSessionStorageType = storageSnapshotBeforeSync.sessionRawType;
     const rawDiagnosticsBeforeSync = rawScheduledArray
       .slice(0, 30)
       .map((item, index) => diagnoseScheduledCommandForPlan(item, index));
     const rawBackupDiagnosticsBeforeSync = rawBackupScheduledArray
+      .slice(0, 30)
+      .map((item, index) => diagnoseScheduledCommandForPlan(item, index));
+    const rawSessionDiagnosticsBeforeSync = rawSessionScheduledArray
       .slice(0, 30)
       .map((item, index) => diagnoseScheduledCommandForPlan(item, index));
     syncScheduledCommandsFromStorage();
@@ -12808,12 +12863,16 @@
       activeTab: state.activeTab,
       storageKey: STORAGE_KEYS.scheduledCommands,
       backupStorageKey: STORAGE_KEYS.scheduledCommandsBackup,
+      sessionStorageKey: STORAGE_KEYS.scheduledCommandsSession,
       rawStorageType,
       rawBackupStorageType,
+      rawSessionStorageType,
       rawStorageCount: rawScheduledArray.length,
       rawBackupStorageCount: rawBackupScheduledArray.length,
+      rawSessionStorageCount: rawSessionScheduledArray.length,
       rawStorageSample: rawDiagnosticsBeforeSync,
       rawBackupStorageSample: rawBackupDiagnosticsBeforeSync,
+      rawSessionStorageSample: rawSessionDiagnosticsBeforeSync,
       backupUsedBeforeSync: storageSnapshotBeforeSync.backupUsed,
       scheduledCount: scheduled.length,
       scheduledSample: stateDiagnosticsAfterSync,
@@ -12827,10 +12886,13 @@
         version: VERSION,
         rawStorageType,
         rawBackupStorageType,
+        rawSessionStorageType,
         rawStorageCount: rawScheduledArray.length,
         rawBackupStorageCount: rawBackupScheduledArray.length,
+        rawSessionStorageCount: rawSessionScheduledArray.length,
         rawStorageSample: rawDiagnosticsBeforeSync,
         rawBackupStorageSample: rawBackupDiagnosticsBeforeSync,
+        rawSessionStorageSample: rawSessionDiagnosticsBeforeSync,
         backupUsedBeforeSync: storageSnapshotBeforeSync.backupUsed,
         stateCountAfterSync: state.scheduledCommands.length,
         stateSampleAfterSync: stateDiagnosticsAfterSync,
@@ -13907,7 +13969,7 @@
     const storageAfterWrite = readScheduledCommandsStorageSnapshot();
     const persistedCommands = mergeScheduledCommandsById(
       storageAfterWrite.commands,
-      writeOk ? state.scheduledCommands : [],
+      state.scheduledCommands,
     );
     state.scheduledCommands = persistedCommands;
     let persistedCommand = persistedCommands.find(
@@ -13922,7 +13984,7 @@
       const storageAfterRetry = readScheduledCommandsStorageSnapshot();
       state.scheduledCommands = mergeScheduledCommandsById(
         storageAfterRetry.commands,
-        [],
+        [normalized],
       );
       persistedCommand = (
         Array.isArray(state.scheduledCommands) ? state.scheduledCommands : []
@@ -13943,6 +14005,7 @@
         : 0,
       primaryStoredCount: storageAfterWrite.primaryCommands.length,
       backupStoredCount: storageAfterWrite.backupCommands.length,
+      sessionStoredCount: storageAfterWrite.sessionCommands.length,
       backupUsed: storageAfterWrite.backupUsed,
       persistedCommand: persistedCommand
         ? diagnoseScheduledCommandForPlan(persistedCommand, 0)
@@ -22406,6 +22469,7 @@ ${panelHtml}`;
           key &&
           key !== STORAGE_KEYS.scheduledCommands &&
           key !== STORAGE_KEYS.scheduledCommandsBackup &&
+          key !== STORAGE_KEYS.scheduledCommandsSession &&
           key !== STORAGE_KEYS.planActions &&
           key !== STORAGE_KEYS.maneuversArchive &&
           key !== STORAGE_KEYS.uiSettings &&
