@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.25";
+  const VERSION = "0.10.26";
   const LOG_PREFIX = "[ScriptMM]";
   const MULTI_TAB_PRESENCE_KEY = "scriptmm.active_instances.v1";
   const MULTI_TAB_HEARTBEAT_INTERVAL_MS = 3000;
@@ -19864,14 +19864,14 @@ ${panelHtml}`;
     const anchorId = cleanText(anchorIdRaw);
     if (!anchorId) return null;
     return (
-      document
-        .querySelectorAll(
+      Array.from(
+        document.querySelectorAll(
           ".smm-msg-inline-actions[data-smm-anchor-id], .smm-msg-inline-row[data-smm-anchor-id], .smm-msg-manual-inline[data-smm-anchor-id]",
-        )
-        .find(
-          (node) =>
-            cleanText(node.getAttribute("data-smm-anchor-id")) === anchorId,
-        ) || null
+        ),
+      ).find(
+        (node) =>
+          cleanText(node.getAttribute("data-smm-anchor-id")) === anchorId,
+      ) || null
     );
   };
   const rerenderMessageInlinePanel = (panelNode, options = {}) => {
