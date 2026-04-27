@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.32";
+  const VERSION = "0.10.34";
   const LOG_PREFIX = "[ScriptMM]";
   const MULTI_TAB_PRESENCE_KEY = "scriptmm.active_instances.v1";
   const MULTI_TAB_HEARTBEAT_INTERVAL_MS = 3000;
@@ -31,6 +31,8 @@
     scheduledCommands: "scriptmm.scheduled_commands.v1",
     scheduledCommandsBackup: "scriptmm.scheduled_commands.backup.v1",
     scheduledCommandsSession: "scriptmm.scheduled_commands.session.v1",
+    autoDispatchBridge: "scriptmm.auto_dispatch.bridge.v1",
+    autoDispatchActive: "scriptmm.auto_dispatch.active.v1",
     overviewCommands: "scriptmm.overview_villages.commands.v1",
     overviewUnits: "scriptmm.overview_villages.units.v2",
     overviewUnitsDefense: "scriptmm.overview_villages.units.defense.v2",
@@ -3829,6 +3831,99 @@
     return coord ? coord.key : cleanText(value);
   };
 
+  const normalizeAutoDispatchRouteSignature = (urlRaw) =>
+    safe(() => {
+      const url = new URL(cleanText(urlRaw), location.origin);
+      if (url.pathname !== "/game.php") return null;
+      const pieces = [
+        `village=${cleanText(url.searchParams.get("village"))}`,
+        `screen=${cleanText(url.searchParams.get("screen"))}`,
+        `from=${cleanText(url.searchParams.get("from"))}`,
+        `x=${cleanText(url.searchParams.get("x"))}`,
+        `y=${cleanText(url.searchParams.get("y"))}`,
+      ];
+      const attackParts = [];
+      url.searchParams.forEach((value, key) => {
+        if (!/^att_/i.test(key)) return;
+        attackParts.push(`${key.toLowerCase()}=${cleanText(value)}`);
+      });
+      attackParts.sort();
+      pieces.push(`units=${attackParts.join("&")}`);
+      return `${url.origin}${url.pathname}?${pieces.join("&")}`;
+    }, null);
+
+  const appendAutoDispatchParamsToUrl = (urlRaw, bridgePayload) =>
+    safe(() => {
+      const url = new URL(cleanText(urlRaw), location.origin);
+      const payload = bridgePayload || {};
+      const set = (key, value) => {
+        const text = cleanText(value);
+        if (text) url.searchParams.set(key, text);
+      };
+      set("smm_cmd_id", payload.commandId);
+      set("smm_departure_ms", Number.isFinite(Number(payload.departureMs)) ? Math.round(Number(payload.departureMs)) : "");
+      set("smm_action", payload.action);
+      set("smm_timing_center", payload.timingCenter);
+      set("smm_timing_label", payload.timingLabel);
+      set("smm_timing_type", payload.timingType);
+      set("smm_timing_start_ms", Number.isFinite(Number(payload.timingStartMs)) ? Math.round(Number(payload.timingStartMs)) : "");
+      set("smm_timing_end_ms", Number.isFinite(Number(payload.timingEndMs)) ? Math.round(Number(payload.timingEndMs)) : "");
+      set("smm_timing_point_ms", Number.isFinite(Number(payload.timingPointMs)) ? Math.round(Number(payload.timingPointMs)) : "");
+      set("smm_from_village_id", payload.fromVillageId);
+      set("smm_from_village_coord", payload.fromVillageCoord);
+      set("smm_target_coord", payload.targetCoord);
+      return url.toString();
+    }, cleanText(urlRaw));
+
+  const writeAutoDispatchBridgeForCommand = ({
+    command,
+    url,
+    timingCenter = null,
+  } = {}) => {
+    const normalized = normalizeScheduledCommand(command);
+    const goUrl = cleanText(url) || cleanText(normalized && normalized.goUrl);
+    if (!normalized || !goUrl) return { ok: false, reason: "invalid_command" };
+    const route = normalizeAutoDispatchRouteSignature(goUrl);
+    if (!route) return { ok: false, reason: "invalid_route" };
+    const payload = {
+      version: 1,
+      commandId: cleanText(normalized.id),
+      route,
+      departureMs: Number.isFinite(Number(normalized.departureMs))
+        ? Math.round(Number(normalized.departureMs))
+        : null,
+      action: normalizePlanAction(normalized.action),
+      fromVillageId: cleanText(normalized.fromVillageId) || null,
+      fromVillageCoord: cleanText(normalized.fromVillageCoord) || null,
+      targetCoord: cleanText(normalized.targetCoord) || null,
+      incomingId: cleanText(normalized.incomingId) || null,
+      timingLabel: cleanText(normalized.timingLabel) || null,
+      timingStartMs: Number.isFinite(Number(normalized.timingStartMs))
+        ? Math.round(Number(normalized.timingStartMs))
+        : null,
+      timingEndMs: Number.isFinite(Number(normalized.timingEndMs))
+        ? Math.round(Number(normalized.timingEndMs))
+        : null,
+      timingPointMs: Number.isFinite(Number(normalized.timingPointMs))
+        ? Math.round(Number(normalized.timingPointMs))
+        : null,
+      timingType: cleanText(normalized.timingType) || null,
+      goUrl,
+      timingCenter: cleanText(timingCenter) || null,
+      createdAtMs: Math.round(getServerNowMs()),
+    };
+    const saved = saveJson(STORAGE_KEYS.autoDispatchBridge, payload);
+    console.info(`${LOG_PREFIX} [auto-dispatch-bridge]`, {
+      version: VERSION,
+      saved,
+      commandId: payload.commandId,
+      route: payload.route,
+      departureMs: payload.departureMs,
+      timingCenter: payload.timingCenter,
+    });
+    return { ok: Boolean(saved), payload };
+  };
+
   const normalizeScheduledCommand = (raw) => {
     if (!raw || typeof raw !== "object") return null;
     const departureMs = toFiniteMs(raw.departureMs);
@@ -4580,13 +4675,11 @@
         .map((value) => String(value)),
     );
     const mergedActiveMap = new Map();
-    purgeStaleScheduledCommands(readJson(STORAGE_KEYS.scheduledCommands)).forEach(
-      (entry) => {
-        const key = String(cleanText(entry && entry.id) || "");
-        if (!key || finalizedIds.has(key)) return;
-        mergedActiveMap.set(key, entry);
-      },
-    );
+    readScheduledCommandsStorageSnapshot().commands.forEach((entry) => {
+      const key = String(cleanText(entry && entry.id) || "");
+      if (!key || finalizedIds.has(key)) return;
+      mergedActiveMap.set(key, entry);
+    });
     active.forEach((entry) => {
       const key = String(cleanText(entry && entry.id) || "");
       if (!key || finalizedIds.has(key)) return;
@@ -4611,7 +4704,15 @@
           .map((entry, index) => diagnoseScheduledCommandForPlan(entry, index)),
       });
     }
-    saveScheduledCommands();
+    if (!scheduled.length && !archiveEntries.length) {
+      console.info(`${LOG_PREFIX} [plan-reconcile][skip-empty-save]`, {
+        version: VERSION,
+        nowMs: Math.round(nowMs),
+        reason: "no_scheduled_commands",
+      });
+    } else {
+      saveScheduledCommands("reconcile");
+    }
 
     return {
       activeCount: active.length,
@@ -4705,27 +4806,133 @@
     };
   };
 
+  const getLocalStorageUsageSummary = () =>
+    safe(() => {
+      if (typeof localStorage === "undefined" || !localStorage) return null;
+      const rows = [];
+      let totalChars = 0;
+      for (let index = 0; index < localStorage.length; index += 1) {
+        const key = localStorage.key(index);
+        const value = key ? localStorage.getItem(key) || "" : "";
+        const chars = String(key || "").length + String(value || "").length;
+        totalChars += chars;
+        rows.push({
+          key,
+          chars,
+          approxBytes: chars * 2,
+        });
+      }
+      rows.sort((left, right) => Number(right.chars) - Number(left.chars));
+      return {
+        keys: localStorage.length,
+        totalChars,
+        approxBytes: totalChars * 2,
+        topKeys: rows.slice(0, 12),
+      };
+    }, null);
+
+  const clearVolatileStorageForScheduledCommands = () =>
+    safe(() => {
+      if (typeof localStorage === "undefined" || !localStorage) return null;
+      const keys = [
+        STORAGE_KEYS.overviewUnits,
+        STORAGE_KEYS.overviewUnitsDefense,
+        STORAGE_KEYS.troops,
+        STORAGE_KEYS.troopsDefense,
+        STORAGE_KEYS.overviewCommands,
+        STORAGE_KEYS.supportCommandDetails,
+        STORAGE_KEYS.commandRouteDetails,
+        STORAGE_KEYS.snapshot,
+      ].filter(Boolean);
+      const removed = [];
+      const errors = {};
+      keys.forEach((key) => {
+        try {
+          const value = localStorage.getItem(key);
+          if (!value) return;
+          const chars = String(key).length + String(value).length;
+          localStorage.removeItem(key);
+          removed.push({
+            key,
+            chars,
+            approxBytes: chars * 2,
+          });
+        } catch (error) {
+          errors[key] = {
+            name: cleanText(error && error.name) || null,
+            message:
+              cleanText(error && error.message) ||
+              cleanText(String(error || "")) ||
+              "unknown",
+          };
+        }
+      });
+      return {
+        removedCount: removed.length,
+        removedChars: removed.reduce(
+          (sum, item) => sum + Number(item.chars || 0),
+          0,
+        ),
+        removedApproxBytes: removed.reduce(
+          (sum, item) => sum + Number(item.approxBytes || 0),
+          0,
+        ),
+        removed,
+        errors,
+      };
+    }, null);
+
   const writeScheduledCommandsStorage = (commands, context = "save") => {
     const normalized = purgeStaleScheduledCommands(commands);
     const payload = JSON.stringify(normalized);
     const expectedIds = new Set(
       normalized.map((item) => String(cleanText(item && item.id) || "")),
     );
-    const writeOne = (key) =>
-      safe(() => {
+    const writeErrors = {};
+    const sessionWriteErrors = {};
+    const captureStorageError = (error) => ({
+      name: cleanText(error && error.name) || null,
+      message:
+        cleanText(error && error.message) ||
+        cleanText(String(error || "")) ||
+        "unknown",
+    });
+    const writeOne = (key) => {
+      try {
         localStorage.setItem(key, payload);
         return true;
-      }, false);
-    const writeSessionOne = (key) =>
-      safe(() => {
+      } catch (error) {
+        writeErrors[key] = captureStorageError(error);
+        return false;
+      }
+    };
+    const writeSessionOne = (key) => {
+      try {
         if (typeof sessionStorage === "undefined" || !sessionStorage)
           return false;
         sessionStorage.setItem(key, payload);
         return true;
-      }, false);
-    const primaryWriteOk = writeOne(STORAGE_KEYS.scheduledCommands);
-    const backupWriteOk = writeOne(STORAGE_KEYS.scheduledCommandsBackup);
+      } catch (error) {
+        sessionWriteErrors[key] = captureStorageError(error);
+        return false;
+      }
+    };
+    let primaryWriteOk = writeOne(STORAGE_KEYS.scheduledCommands);
+    let backupWriteOk = writeOne(STORAGE_KEYS.scheduledCommandsBackup);
     const sessionWriteOk = writeSessionOne(STORAGE_KEYS.scheduledCommandsSession);
+    let storageCleanup = null;
+    const writeRetries = {};
+    if (normalized.length && (!primaryWriteOk || !backupWriteOk)) {
+      storageCleanup = clearVolatileStorageForScheduledCommands();
+      if (!primaryWriteOk) {
+        primaryWriteOk = writeOne(STORAGE_KEYS.scheduledCommands);
+        writeRetries[STORAGE_KEYS.scheduledCommands] = primaryWriteOk;
+      }
+      if (!backupWriteOk) {
+        backupWriteOk = writeOne(STORAGE_KEYS.scheduledCommandsBackup);
+        writeRetries[STORAGE_KEYS.scheduledCommandsBackup] = backupWriteOk;
+      }
+    }
     const primaryStored = purgeStaleScheduledCommands(
       readJson(STORAGE_KEYS.scheduledCommands),
     );
@@ -4758,6 +4965,13 @@
       primaryStoredCount: primaryStored.length,
       backupStoredCount: backupStored.length,
       sessionStoredCount: sessionStored.length,
+      payloadChars: payload.length,
+      payloadApproxBytes: payload.length * 2,
+      writeErrors,
+      sessionWriteErrors,
+      writeRetries,
+      storageCleanup,
+      localStorageUsage: ok ? null : getLocalStorageUsageSummary(),
       expectedIds: Array.from(expectedIds).slice(0, 50),
       primaryIds: primaryStored
         .slice(0, 50)
@@ -4780,11 +4994,11 @@
     return ok;
   };
 
-  const saveScheduledCommands = () => {
+  const saveScheduledCommands = (context = "save") => {
     state.scheduledCommands = purgeStaleScheduledCommands(
       state.scheduledCommands,
     );
-    return writeScheduledCommandsStorage(state.scheduledCommands, "save");
+    return writeScheduledCommandsStorage(state.scheduledCommands, context);
   };
 
   const loadScheduledCommands = () => {
@@ -13965,7 +14179,7 @@
       normalized,
     ]);
     state.scheduledCommands = mergedCommands;
-    const writeOk = saveScheduledCommands();
+    const writeOk = saveScheduledCommands("upsert");
     const storageAfterWrite = readScheduledCommandsStorageSnapshot();
     const persistedCommands = mergeScheduledCommandsById(
       storageAfterWrite.commands,
@@ -13980,7 +14194,7 @@
       state.scheduledCommands = mergeScheduledCommandsById(persistedCommands, [
         normalized,
       ]);
-      saveScheduledCommands();
+      saveScheduledCommands("upsert_retry");
       const storageAfterRetry = readScheduledCommandsStorageSnapshot();
       state.scheduledCommands = mergeScheduledCommandsById(
         storageAfterRetry.commands,
@@ -14036,7 +14250,7 @@
     );
     if (!updatedCommand) return null;
     state.scheduledCommands = updatedCommands;
-    saveScheduledCommands();
+    saveScheduledCommands("comment");
     return updatedCommand;
   };
   const updateScheduledCommandTimingById = (commandId, timingInput) => {
@@ -14066,7 +14280,7 @@
       .filter(Boolean);
     if (!updatedCommand) return null;
     state.scheduledCommands = updatedCommands;
-    saveScheduledCommands();
+    saveScheduledCommands("timing");
     return updatedCommand;
   };
 
@@ -14115,7 +14329,7 @@
       const nextFingerprint = buildScheduledCommandsFingerprint(mergedCommands);
       if (nextFingerprint !== currentFingerprint) {
         state.scheduledCommands = mergedCommands;
-        saveScheduledCommands();
+        saveScheduledCommands("hub_plan_sync");
         state.hubPlanLastFingerprint = nextFingerprint;
         if (state.ui && state.activeTab === "plan") {
           if (state.refreshInProgress) {
@@ -23049,12 +23263,23 @@ ${panelHtml}`;
         const copiedSync = timingCenter
           ? copyTextToClipboardSync(timingCenter)
           : false;
-        window.open(url, "_blank", "noopener");
+        const bridgeResult = writeAutoDispatchBridgeForCommand({
+          command: scheduledCommand,
+          url,
+          timingCenter,
+        });
+        const openUrl =
+          bridgeResult && bridgeResult.payload
+            ? appendAutoDispatchParamsToUrl(url, bridgeResult.payload)
+            : url;
+        window.open(openUrl, "_blank", "noopener");
         if (timingCenter) {
           if (copiedSync) {
             setStatus(
               state.ui,
-              `Открыта площадь. Центр тайминга скопирован: ${timingCenter}`,
+              `Открыта площадь. Центр тайминга скопирован: ${timingCenter}${
+                bridgeResult && bridgeResult.ok ? ". Автоотправка подготовлена." : ""
+              }`,
             );
             return;
           }
@@ -23062,13 +23287,22 @@ ${panelHtml}`;
             setStatus(
               state.ui,
               ok
-                ? `Открыта площадь. Центр тайминга скопирован: ${timingCenter}`
+                ? `Открыта площадь. Центр тайминга скопирован: ${timingCenter}${
+                    bridgeResult && bridgeResult.ok
+                      ? ". Автоотправка подготовлена."
+                      : ""
+                  }`
                 : `Открыта площадь. Не удалось скопировать центр тайминга: ${timingCenter}`,
             );
           });
           return;
         }
-        setStatus(state.ui, "Открыта площадь по запланированному приказу.");
+        setStatus(
+          state.ui,
+          `Открыта площадь по запланированному приказу${
+            bridgeResult && bridgeResult.ok ? ". Автоотправка подготовлена." : ""
+          }`,
+        );
         return;
       }
 
@@ -23089,7 +23323,7 @@ ${panelHtml}`;
         state.scheduledCommands = (
           Array.isArray(state.scheduledCommands) ? state.scheduledCommands : []
         ).filter((command) => String(command.id) !== String(commandId));
-        saveScheduledCommands();
+        saveScheduledCommands("delete");
         renderActiveTab(state.ui);
         const removed = before - state.scheduledCommands.length;
         if (removed <= 0) {
