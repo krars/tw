@@ -2193,7 +2193,7 @@
             return slowest_speed;
         },
 
-        pick_special_mode_composition_for_village: function ({ village_state, distance, user_input, now_ms }) {
+        pick_special_mode_composition_for_village: function ({ village_state, distance, user_input, now_ms, population_cap_override = null }) {
             const available = village_state.remaining || {};
             const mode_units = Guard.get_special_mode_units(user_input, available);
             if (!mode_units.length) {
@@ -2205,11 +2205,25 @@
                 all_counts[unit_name] = Math.max(0, Helper.to_int(available[unit_name]));
             }
 
+            const available_population = Guard.calc_units_population(all_counts);
+            const requested_population_cap = population_cap_override === null || population_cap_override === undefined
+                ? available_population
+                : Helper.to_int(population_cap_override);
+            const population_cap = Math.min(
+                available_population,
+                Math.max(0, requested_population_cap),
+            );
+            if (population_cap <= 0) {
+                return null;
+            }
+
             const force_knight_speed = Math.max(0, Helper.to_int(all_counts.knight)) > 0;
             const build_with_slowest_speed = function (slowest_speed) {
                 if (!Number.isFinite(slowest_speed)) return null;
 
-                const composition = {};
+                const candidate_available = {};
+                const candidate_weights = {};
+                const candidate_allowed = [];
                 for (const unit_name of mode_units) {
                     const count = Math.max(0, Helper.to_int(available[unit_name]));
                     if (!count) continue;
@@ -2217,7 +2231,33 @@
                         const unit_speed = Guard.get_unit_speed(unit_name);
                         if (!Number.isFinite(unit_speed) || unit_speed > slowest_speed) continue;
                     }
-                    composition[unit_name] = count;
+                    candidate_allowed.push(unit_name);
+                    candidate_available[unit_name] = count;
+                    candidate_weights[unit_name] = Math.max(1, count * Guard.get_unit_pop(unit_name));
+                }
+
+                if (!candidate_allowed.length) {
+                    return null;
+                }
+
+                let composition = Guard.build_population_limited_composition(
+                    candidate_available,
+                    candidate_weights,
+                    population_cap,
+                    candidate_allowed,
+                );
+
+                if (force_knight_speed && Math.max(0, Helper.to_int(candidate_available.knight)) > 0) {
+                    composition = Guard.ensure_required_unit_in_composition(
+                        composition,
+                        'knight',
+                        candidate_available,
+                        population_cap,
+                        candidate_weights,
+                    );
+                    if (!composition) {
+                        return null;
+                    }
                 }
 
                 const selected_population = Guard.calc_units_population(composition);
@@ -2276,13 +2316,14 @@
             return null;
         },
 
-        pick_composition_for_village: function ({ village_state, distance, user_input, template_weights, now_ms }) {
+        pick_composition_for_village: function ({ village_state, distance, user_input, template_weights, now_ms, population_cap_override = null }) {
             if (user_input && user_input.special_mode_enabled) {
                 return Guard.pick_special_mode_composition_for_village({
                     village_state,
                     distance,
                     user_input,
                     now_ms,
+                    population_cap_override,
                 });
             }
 
@@ -2292,6 +2333,9 @@
                     Math.max(POP_LIMIT_MIN, Helper.to_int(user_input.max_pop_per_village)),
                 ),
                 Math.max(0, Helper.to_int(village_state.remaining_population_budget)),
+                population_cap_override === null || population_cap_override === undefined
+                    ? Number.POSITIVE_INFINITY
+                    : Math.max(0, Helper.to_int(population_cap_override)),
             );
             if (population_cap <= 0) {
                 return null;
@@ -2843,7 +2887,9 @@
                 const template_weights = Guard.build_template_weights(user_input.template);
                 const plan = [];
 
-                for (const target of target_infos) {
+                for (let target_index = 0; target_index < target_infos.length; target_index++) {
+                    const target = target_infos[target_index];
+                    const remaining_target_count = Math.max(1, target_infos.length - target_index);
                     const candidate_villages = village_states
                         .map(village_state => {
                             const distance = Math.hypot(target.x - village_state.coords[0], target.y - village_state.coords[1]);
@@ -2859,12 +2905,18 @@
                     const commands = [];
 
                     for (const candidate of sorted_candidates) {
+                        const shared_population_cap = Math.ceil(
+                            Math.max(0, Helper.to_int(candidate.village_state.remaining_population_budget)) / remaining_target_count,
+                        );
+                        if (shared_population_cap <= 0) continue;
+
                         const picked = Guard.pick_composition_for_village({
                             village_state: candidate.village_state,
                             distance: candidate.distance,
                             user_input,
                             template_weights,
                             now_ms,
+                            population_cap_override: shared_population_cap,
                         });
 
                         if (!picked) continue;
