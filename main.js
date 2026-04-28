@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.34";
+  const VERSION = "0.10.35";
   const LOG_PREFIX = "[ScriptMM]";
   const MULTI_TAB_PRESENCE_KEY = "scriptmm.active_instances.v1";
   const MULTI_TAB_HEARTBEAT_INTERVAL_MS = 3000;
@@ -5820,6 +5820,19 @@
         ),
       });
     }
+  };
+
+  const isUntrustedSpeedModelForPlanning = (model) => {
+    if (!model || typeof model !== "object") return true;
+    if (!model.effectiveMinutesPerField) return true;
+    const source = cleanText(model.source).toLowerCase();
+    if (!Number.isFinite(toNumber(model.worldSpeed))) return true;
+    if (!Number.isFinite(toNumber(model.unitSpeed))) return true;
+    return (
+      source === "fallback" ||
+      source === "message_inline_fallback" ||
+      source === "message_runtime_fallback"
+    );
   };
 
   const extractArrivalDateTimeText = (text) => {
@@ -19821,7 +19834,8 @@ ${panelHtml}`;
   };
   const ensureMessageRuntimeDataLoaded = async ({ cacheOnly = false } = {}) => {
     ensureMessageStorageLoaded();
-    if (!state.speedModel || !state.speedModel.effectiveMinutesPerField) {
+    const speedBefore = state.speedModel;
+    if (isUntrustedSpeedModelForPlanning(speedBefore)) {
       try {
         state.speedModel = await loadSpeedModel();
       } catch (error) {
@@ -19834,6 +19848,23 @@ ${panelHtml}`;
           error: cleanText(error && error.message),
         });
       }
+      console.info(`${LOG_PREFIX} [message-runtime][speed-refresh]`, {
+        version: VERSION,
+        beforeSource: cleanText(speedBefore && speedBefore.source) || null,
+        afterSource: cleanText(state.speedModel && state.speedModel.source) || null,
+        worldSpeed: toNumber(state.speedModel && state.speedModel.worldSpeed),
+        unitSpeed: toNumber(state.speedModel && state.speedModel.unitSpeed),
+      });
+    }
+    if (
+      state.incomings &&
+      Array.isArray(state.incomings.items) &&
+      state.incomings.items.length
+    ) {
+      state.incomings = enrichIncomingsWithSpeed(
+        state.incomings,
+        state.speedModel,
+      );
     }
 
     const hasTroops =
