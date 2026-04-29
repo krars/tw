@@ -30,6 +30,7 @@ javascript:(function () {
     state: {
       inFlight: false,
       noteInFlight: false,
+      reportInFlight: false,
       withdrawInFlight: false,
       fetchedAtMs: 0,
       attacksById: new Map(),
@@ -46,7 +47,7 @@ javascript:(function () {
 
   if (!isSupportedVillagePage()) {
     alert(
-      "Скрипт нужно запускать на странице деревни: Обзор, Площадь или информация о деревне.",
+      "Скрипт нужно запускать на странице деревни: Обзор, Площадь, информация о деревне или отчёт.",
     );
     return;
   }
@@ -70,8 +71,12 @@ javascript:(function () {
     initSupportWithdrawTools();
   }
 
+  if (isReportPage()) {
+    initReportSupportWithdrawTools();
+  }
+
   function isSupportedVillagePage() {
-    return isWatchtowerPage() || isInfoVillagePage();
+    return isWatchtowerPage() || isInfoVillagePage() || isReportPage();
   }
 
   function isWatchtowerPage() {
@@ -85,6 +90,10 @@ javascript:(function () {
 
   function isInfoVillagePage() {
     return getCurrentScreen() === "info_village";
+  }
+
+  function isReportPage() {
+    return getCurrentScreen() === "report";
   }
 
   function getCurrentScreen() {
@@ -148,6 +157,10 @@ javascript:(function () {
 
   function fetchAttacksDocument() {
     var url = buildAttacksUrl();
+    return fetchDocument(url);
+  }
+
+  function fetchDocument(url) {
     return fetch(url, {
       credentials: "include",
       cache: "no-store",
@@ -187,6 +200,20 @@ javascript:(function () {
     }
     url.searchParams.set("screen", "reqdef");
     url.searchParams.set("all", "1");
+    return url.toString();
+  }
+
+  function buildInfoVillageUrl(villageId) {
+    var id = cleanText(villageId);
+    var url = new URL("/game.php", window.location.origin);
+    var currentVillageId = getCurrentVillageId();
+    if (currentVillageId) {
+      url.searchParams.set("village", currentVillageId);
+    }
+    url.searchParams.set("screen", "info_village");
+    if (id) {
+      url.searchParams.set("id", id);
+    }
     return url.toString();
   }
 
@@ -631,6 +658,119 @@ javascript:(function () {
     }
   }
 
+  function initReportSupportWithdrawTools() {
+    var target = readReportSupportTargetVillage(document);
+    if (!target) {
+      setStatus(
+        "Отчёт: не нашёл строку \"Деревня, получившая подкрепление\"",
+        "muted",
+      );
+      return;
+    }
+
+    setStatus("Отчёт: деревня для вывода " + target.label, "ok");
+
+    window.setTimeout(function () {
+      withdrawSupportOrdersFromReport(target);
+    }, 0);
+  }
+
+  function withdrawSupportOrdersFromReport(target) {
+    var state = runtime.state;
+    var reportTarget = target || readReportSupportTargetVillage(document);
+
+    if (!reportTarget) {
+      setStatus(
+        "Отчёт: не нашёл деревню, получившую подкрепление",
+        "error",
+      );
+      return;
+    }
+
+    if (state.reportInFlight || state.withdrawInFlight) {
+      setStatus("Отчёт: вывод подкреплений уже выполняется", "loading");
+      return;
+    }
+
+    state.reportInFlight = true;
+    setStatus(
+      "Отчёт: загружаю подкрепления в " + reportTarget.label + "...",
+      "loading",
+    );
+
+    fetchDocument(reportTarget.href)
+      .then(function (doc) {
+        var orders = collectSupportWithdrawOrders(doc);
+        if (!orders.length) {
+          setStatus(
+            "Отчёт: в деревне " + reportTarget.label + " подкрепления не найдены",
+            "muted",
+          );
+          return null;
+        }
+
+        var message =
+          "Вывести все подкрепления из деревни отчёта?\n\n" +
+          reportTarget.label +
+          "\nСтрок: " +
+          orders.length +
+          ". POST-запросов: " +
+          countSupportWithdrawRequests(orders) +
+          ".";
+
+        if (!window.confirm(message)) {
+          setStatus("Отчёт: вывод подкреплений отменён", "muted");
+          return null;
+        }
+
+        return runSupportWithdrawJob(orders, false);
+      })
+      .catch(function (error) {
+        console.warn(LOG_PREFIX, error);
+        setStatus("Отчёт: не удалось загрузить деревню с подкреплениями", "error");
+      })
+      .finally(function () {
+        state.reportInFlight = false;
+      });
+  }
+
+  function readReportSupportTargetVillage(root) {
+    var source = root || document;
+    var labelCell = Array.from(source.querySelectorAll("th, td")).find(
+      function (cell) {
+        return cleanText(cell.textContent).indexOf(
+          "Деревня, получившая подкрепление",
+        ) !== -1;
+      },
+    );
+    if (!labelCell) {
+      return null;
+    }
+
+    var row = labelCell.closest("tr");
+    var link = row
+      ? row.querySelector("a[href*='screen=info_village'][href*='id=']")
+      : null;
+    var anchor = row ? row.querySelector(".village_anchor[data-id]") : null;
+    var id =
+      cleanText(anchor ? anchor.getAttribute("data-id") : "") ||
+      cleanText(link ? getUrlParam(link.getAttribute("href") || link.href, "id") : "");
+
+    if (!id && !link) {
+      return null;
+    }
+
+    var href = link
+      ? buildAbsoluteUrl(link.getAttribute("href") || link.href)
+      : buildInfoVillageUrl(id);
+
+    return {
+      id: id,
+      href: href,
+      label: cleanText(link ? link.textContent : "") || "деревня " + id,
+    };
+  }
+
   function initSupportWithdrawTools() {
     var orders = collectSupportWithdrawOrders();
     renderSupportWithdrawButtons(orders);
@@ -651,8 +791,9 @@ javascript:(function () {
     );
   }
 
-  function collectSupportWithdrawOrders() {
-    var form = document.querySelector("#withdraw_selected_units_village_info");
+  function collectSupportWithdrawOrders(root) {
+    var source = root || document;
+    var form = source.querySelector("#withdraw_selected_units_village_info");
     if (!form) {
       return [];
     }
@@ -888,12 +1029,13 @@ javascript:(function () {
         }
       }
 
-      setStatus("Вывод подкреплений: готово, обновляю страницу...", "ok");
       if (reloadAfter) {
+        setStatus("Вывод подкреплений: готово, обновляю страницу...", "ok");
         window.setTimeout(function () {
           window.location.reload();
         }, 500);
       } else {
+        setStatus("Вывод подкреплений: готово", "ok");
         state.withdrawInFlight = false;
       }
     } catch (error) {
@@ -1034,6 +1176,8 @@ javascript:(function () {
     text.className = "scriptmm-wt-village-status-text";
     text.textContent = isInfoVillagePage()
       ? "Вывод подкреплений: ожидаю данные"
+      : isReportPage()
+        ? "Отчёт: ожидаю данные"
       : "Сторожевая Башня: ожидаю данные";
 
     panel.appendChild(text);
@@ -1069,6 +1213,17 @@ javascript:(function () {
         withdrawAllSupportOrders();
       });
       panel.appendChild(withdrawButton);
+    }
+
+    if (isReportPage()) {
+      var reportWithdrawButton = document.createElement("button");
+      reportWithdrawButton.type = "button";
+      reportWithdrawButton.className = WITHDRAW_ALL_BUTTON_CLASS;
+      reportWithdrawButton.textContent = "вывести подкрепления из отчёта";
+      reportWithdrawButton.addEventListener("click", function () {
+        withdrawSupportOrdersFromReport();
+      });
+      panel.appendChild(reportWithdrawButton);
     }
 
     container.parentNode.insertBefore(panel, container);
