@@ -8,8 +8,11 @@ javascript:(function () {
   var STYLE_ID = "scriptmm-wt-village-style";
   var REFRESH_BUTTON_CLASS = "scriptmm-wt-village-refresh";
   var NOTE_BUTTON_CLASS = "scriptmm-wt-village-note";
+  var WITHDRAW_ALL_BUTTON_CLASS = "scriptmm-wt-village-withdraw-all";
+  var WITHDRAW_ROW_BUTTON_CLASS = "scriptmm-wt-village-withdraw-row";
   var FETCH_COOLDOWN_MS = 12000;
   var RENDER_EVERY_MS = 1000;
+  var WITHDRAW_REQUEST_DELAY_MS = 330;
 
   var previousRuntime = window[RUNTIME_KEY];
   if (previousRuntime && Array.isArray(previousRuntime.cleanup)) {
@@ -26,6 +29,7 @@ javascript:(function () {
     state: {
       inFlight: false,
       noteInFlight: false,
+      withdrawInFlight: false,
       fetchedAtMs: 0,
       attacksById: new Map(),
     },
@@ -36,32 +40,50 @@ javascript:(function () {
     var status = document.getElementById(STATUS_ID);
     if (status) status.remove();
     clearLabels();
+    clearSupportWithdrawButtons();
   });
 
   if (!isSupportedVillagePage()) {
-    alert("Скрипт Сторожевой Башни нужно запускать на странице деревни: Обзор или Площадь.");
+    alert(
+      "Скрипт нужно запускать на странице деревни: Обзор, Площадь или информация о деревне.",
+    );
     return;
   }
 
   injectStyles();
   installStatusPanel();
-  refresh(true);
-  if (isOverviewPage()) {
-    syncReqdefToNotes();
+
+  if (isWatchtowerPage()) {
+    refresh(true);
+    if (isOverviewPage()) {
+      syncReqdefToNotes();
+    }
+
+    var renderInterval = window.setInterval(renderLabels, RENDER_EVERY_MS);
+    runtime.cleanup.push(function () {
+      window.clearInterval(renderInterval);
+    });
   }
 
-  var renderInterval = window.setInterval(renderLabels, RENDER_EVERY_MS);
-  runtime.cleanup.push(function () {
-    window.clearInterval(renderInterval);
-  });
+  if (isInfoVillagePage()) {
+    initSupportWithdrawTools();
+  }
 
   function isSupportedVillagePage() {
+    return isWatchtowerPage() || isInfoVillagePage();
+  }
+
+  function isWatchtowerPage() {
     var screen = getCurrentScreen();
     return screen === "place" || screen === "overview";
   }
 
   function isOverviewPage() {
     return getCurrentScreen() === "overview";
+  }
+
+  function isInfoVillagePage() {
+    return getCurrentScreen() === "info_village";
   }
 
   function getCurrentScreen() {
@@ -608,6 +630,338 @@ javascript:(function () {
     }
   }
 
+  function initSupportWithdrawTools() {
+    var orders = collectSupportWithdrawOrders();
+    renderSupportWithdrawButtons(orders);
+
+    if (!orders.length) {
+      setStatus("Вывод подкреплений: строки подкреплений не найдены", "muted");
+      return;
+    }
+
+    setStatus(
+      "Вывод подкреплений: найдено " +
+        orders.length +
+        " строк из " +
+        countUniqueHomeVillages(orders) +
+        " деревень",
+      "ok",
+    );
+  }
+
+  function collectSupportWithdrawOrders() {
+    var form = document.querySelector("#withdraw_selected_units_village_info");
+    if (!form) {
+      return [];
+    }
+
+    var actionUrl = buildAbsoluteUrl(
+      form.getAttribute("action") || form.action || "",
+    );
+    var targetInput = form.querySelector('input[name="village_id"]');
+    var targetVillageId =
+      cleanText(targetInput ? targetInput.value : "") ||
+      cleanText(getUrlParam(window.location.href, "id"));
+    var csrf = cleanText(getUrlParam(actionUrl, "h")) || getCsrfToken();
+
+    return Array.from(form.querySelectorAll("tr"))
+      .map(function (row) {
+        return collectSupportWithdrawOrder(row, {
+          form: form,
+          actionUrl: actionUrl,
+          csrf: csrf,
+          targetVillageId: targetVillageId,
+        });
+      })
+      .filter(Boolean);
+  }
+
+  function collectSupportWithdrawOrder(row, formData) {
+    var checkbox = row.querySelector(
+      "input.troop-request-selector[data-away-id]",
+    );
+    if (!checkbox) {
+      return null;
+    }
+
+    var awayId = cleanText(checkbox.getAttribute("data-away-id"));
+    var homeName = cleanText(checkbox.getAttribute("name"));
+    var homeVillageId =
+      cleanText(checkbox.getAttribute("data-village-id")) ||
+      parseHomeVillageIdFromWithdrawName(homeName);
+    var units = collectSupportUnits(row);
+
+    if (!awayId || !homeName || !units.length) {
+      return null;
+    }
+
+    return {
+      row: row,
+      form: formData.form,
+      actionUrl: formData.actionUrl,
+      csrf: formData.csrf,
+      targetVillageId: formData.targetVillageId,
+      awayId: awayId,
+      homeName: homeName,
+      homeVillageId: homeVillageId,
+      sourceText: readSupportSourceText(row, homeVillageId),
+      units: units,
+    };
+  }
+
+  function collectSupportUnits(row) {
+    return Array.from(row.querySelectorAll("td.unit-item[id]"))
+      .map(function (cell) {
+        return {
+          name: cleanText(cell.getAttribute("id")),
+          amount: parseUnitAmount(
+            cell.getAttribute("data-unit-count") || cell.textContent,
+          ),
+        };
+      })
+      .filter(function (unit) {
+        return unit.name && unit.amount > 0;
+      });
+  }
+
+  function renderSupportWithdrawButtons(orders) {
+    orders.forEach(function (order) {
+      var checkbox = order.row.querySelector(
+        "input.troop-request-selector[data-away-id]",
+      );
+      var cell = checkbox ? checkbox.closest("td") : order.row.lastElementChild;
+      if (!cell || cell.querySelector("." + WITHDRAW_ROW_BUTTON_CLASS)) {
+        return;
+      }
+
+      var breakNode = document.createElement("br");
+      breakNode.className = WITHDRAW_ROW_BUTTON_CLASS + "-break";
+
+      var button = document.createElement("button");
+      button.type = "button";
+      button.className = "btn " + WITHDRAW_ROW_BUTTON_CLASS;
+      button.innerHTML = "Отослать всех<br>раздельно";
+      button.title =
+        "Вывести все ненулевые войска из " +
+        order.sourceText +
+        " отдельными отправками";
+      button.addEventListener("click", function (event) {
+        event.preventDefault();
+        withdrawSingleSupportOrder(order);
+      });
+
+      cell.appendChild(breakNode);
+      cell.appendChild(button);
+    });
+  }
+
+  function clearSupportWithdrawButtons() {
+    Array.from(document.querySelectorAll("." + WITHDRAW_ROW_BUTTON_CLASS))
+      .concat(
+        Array.from(
+          document.querySelectorAll("." + WITHDRAW_ROW_BUTTON_CLASS + "-break"),
+        ),
+      )
+      .forEach(function (node) {
+        node.remove();
+      });
+  }
+
+  function withdrawSingleSupportOrder(order) {
+    var current = findCurrentSupportOrder(order) || order;
+    if (!current || !current.units || !current.units.length) {
+      setStatus("Вывод подкреплений: в строке нет войск для вывода", "muted");
+      return;
+    }
+
+    if (
+      !window.confirm(
+        "Вывести все войска из " + current.sourceText + " раздельно?",
+      )
+    ) {
+      return;
+    }
+
+    runSupportWithdrawJob([current], true);
+  }
+
+  function withdrawAllSupportOrders() {
+    var orders = collectSupportWithdrawOrders();
+    renderSupportWithdrawButtons(orders);
+
+    if (!orders.length) {
+      setStatus(
+        "Вывод подкреплений: подкрепления из других деревень не найдены",
+        "muted",
+      );
+      return;
+    }
+
+    var message =
+      "Вывести все подкрепления из " +
+      countUniqueHomeVillages(orders) +
+      " деревень?\n\n" +
+      "Строк: " +
+      orders.length +
+      ". POST-запросов: " +
+      countSupportWithdrawRequests(orders) +
+      ".";
+
+    if (!window.confirm(message)) {
+      return;
+    }
+
+    runSupportWithdrawJob(orders, true);
+  }
+
+  async function runSupportWithdrawJob(orders, reloadAfter) {
+    var state = runtime.state;
+    if (state.withdrawInFlight) {
+      setStatus("Вывод подкреплений: запросы уже отправляются", "loading");
+      return;
+    }
+
+    state.withdrawInFlight = true;
+
+    try {
+      for (var i = 0; i < orders.length; i++) {
+        setStatus(
+          "Вывод подкреплений: строка " +
+            (i + 1) +
+            " из " +
+            orders.length +
+            " (" +
+            orders[i].sourceText +
+            ")",
+          "loading",
+        );
+        await withdrawSupportOrder(orders[i]);
+        if (i < orders.length - 1) {
+          await delay(WITHDRAW_REQUEST_DELAY_MS);
+        }
+      }
+
+      setStatus("Вывод подкреплений: готово, обновляю страницу...", "ok");
+      if (reloadAfter) {
+        window.setTimeout(function () {
+          window.location.reload();
+        }, 500);
+      } else {
+        state.withdrawInFlight = false;
+      }
+    } catch (error) {
+      console.warn(LOG_PREFIX, error);
+      state.withdrawInFlight = false;
+      setStatus("Вывод подкреплений: ошибка отправки", "error");
+      return;
+    }
+  }
+
+  async function withdrawSupportOrder(order) {
+    var batches = buildSupportWithdrawBatches(order);
+    for (var i = 0; i < batches.length; i++) {
+      await postSupportWithdrawBatch(order, batches[i]);
+      if (i < batches.length - 1) {
+        await delay(WITHDRAW_REQUEST_DELAY_MS);
+      }
+    }
+  }
+
+  function buildSupportWithdrawBatches(order) {
+    var units = order.units || [];
+    var hasKnight = units.some(function (unit) {
+      return unit.name === "knight";
+    });
+
+    if (hasKnight) {
+      return [units];
+    }
+
+    return units.map(function (unit) {
+      return [unit];
+    });
+  }
+
+  function postSupportWithdrawBatch(order, units) {
+    var params = new URLSearchParams();
+    if (order.csrf) {
+      params.set("h", order.csrf);
+    }
+    if (order.targetVillageId) {
+      params.set("village_id", order.targetVillageId);
+    }
+    params.set(order.homeName, "on");
+
+    units.forEach(function (unit) {
+      params.set(
+        "withdraw_unit[" + order.awayId + "][units][" + unit.name + "]",
+        String(unit.amount),
+      );
+    });
+
+    return fetch(order.actionUrl, {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+      },
+      body: params.toString(),
+    }).then(function (response) {
+      if (!response.ok) {
+        throw new Error(
+          "HTTP " + response.status + " while withdrawing support",
+        );
+      }
+      return response.text();
+    });
+  }
+
+  function findCurrentSupportOrder(order) {
+    if (!order || !order.awayId) {
+      return null;
+    }
+
+    return (
+      collectSupportWithdrawOrders().find(function (current) {
+        return current.awayId === order.awayId;
+      }) || null
+    );
+  }
+
+  function readSupportSourceText(row, homeVillageId) {
+    var link = row.querySelector(
+      ".village-anchor a, a[href*='screen=info_village'][href*='id=']",
+    );
+    return cleanText(link ? link.textContent : "") || "деревни " + homeVillageId;
+  }
+
+  function parseHomeVillageIdFromWithdrawName(name) {
+    var match = String(name || "").match(/\[home\]\[(\d+)\]/);
+    return match ? match[1] : "";
+  }
+
+  function parseUnitAmount(value) {
+    var text = cleanText(value).replace(/[^\d]/g, "");
+    var amount = Number(text);
+    return Number.isFinite(amount) ? amount : 0;
+  }
+
+  function countUniqueHomeVillages(orders) {
+    return new Set(
+      orders
+        .map(function (order) {
+          return order.homeVillageId || order.awayId;
+        })
+        .filter(Boolean),
+    ).size;
+  }
+
+  function countSupportWithdrawRequests(orders) {
+    return orders.reduce(function (sum, order) {
+      return sum + buildSupportWithdrawBatches(order).length;
+    }, 0);
+  }
+
   function installStatusPanel() {
     var old = document.getElementById(STATUS_ID);
     if (old) {
@@ -615,6 +969,9 @@ javascript:(function () {
     }
 
     var container =
+      (isInfoVillagePage()
+        ? document.querySelector("#withdraw_selected_units_village_info")
+        : null) ||
       document.querySelector("#commands_incomings") ||
       document.querySelector("#show_notes .widget_content") ||
       document.querySelector("#content_value");
@@ -628,18 +985,22 @@ javascript:(function () {
 
     var text = document.createElement("span");
     text.className = "scriptmm-wt-village-status-text";
-    text.textContent = "Сторожевая Башня: ожидаю данные";
-
-    var button = document.createElement("button");
-    button.type = "button";
-    button.className = REFRESH_BUTTON_CLASS;
-    button.textContent = "обновить";
-    button.addEventListener("click", function () {
-      refresh(true);
-    });
+    text.textContent = isInfoVillagePage()
+      ? "Вывод подкреплений: ожидаю данные"
+      : "Сторожевая Башня: ожидаю данные";
 
     panel.appendChild(text);
-    panel.appendChild(button);
+
+    if (isWatchtowerPage()) {
+      var button = document.createElement("button");
+      button.type = "button";
+      button.className = REFRESH_BUTTON_CLASS;
+      button.textContent = "обновить";
+      button.addEventListener("click", function () {
+        refresh(true);
+      });
+      panel.appendChild(button);
+    }
 
     if (isOverviewPage()) {
       var noteButton = document.createElement("button");
@@ -650,6 +1011,17 @@ javascript:(function () {
         syncReqdefToNotes();
       });
       panel.appendChild(noteButton);
+    }
+
+    if (isInfoVillagePage()) {
+      var withdrawButton = document.createElement("button");
+      withdrawButton.type = "button";
+      withdrawButton.className = WITHDRAW_ALL_BUTTON_CLASS;
+      withdrawButton.textContent = "вывод вообще всё всех войск";
+      withdrawButton.addEventListener("click", function () {
+        withdrawAllSupportOrders();
+      });
+      panel.appendChild(withdrawButton);
     }
 
     container.parentNode.insertBefore(panel, container);
@@ -709,6 +1081,7 @@ javascript:(function () {
       "  display: flex;",
       "  align-items: center;",
       "  gap: 8px;",
+      "  flex-wrap: wrap;",
       "  margin: 0 0 6px 0;",
       "  padding: 4px 6px;",
       "  border: 1px solid #c7b58b;",
@@ -739,6 +1112,20 @@ javascript:(function () {
       "." + NOTE_BUTTON_CLASS + " {",
       "  cursor: pointer;",
       "  padding: 1px 7px;",
+      "  font-size: 11px;",
+      "}",
+      "." + WITHDRAW_ALL_BUTTON_CLASS + " {",
+      "  cursor: pointer;",
+      "  padding: 1px 7px;",
+      "  font-size: 11px;",
+      "}",
+      "." + WITHDRAW_ROW_BUTTON_CLASS + " {",
+      "  display: inline-block;",
+      "  margin-top: 4px;",
+      "  padding: 2px 6px;",
+      "  line-height: 1.15;",
+      "  white-space: normal;",
+      "  cursor: pointer;",
       "  font-size: 11px;",
       "}",
     ].join("\n");
@@ -930,6 +1317,15 @@ javascript:(function () {
     }
   }
 
+  function buildAbsoluteUrl(url) {
+    try {
+      return new URL(url || window.location.href, window.location.origin)
+        .toString();
+    } catch (e) {
+      return window.location.href;
+    }
+  }
+
   function cleanText(value) {
     return String(value == null ? "" : value)
       .replace(/\s+/g, " ")
@@ -958,5 +1354,11 @@ javascript:(function () {
     } catch (e) {
       return fallback;
     }
+  }
+
+  function delay(ms) {
+    return new Promise(function (resolve) {
+      window.setTimeout(resolve, ms);
+    });
   }
 })();
