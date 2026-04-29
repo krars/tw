@@ -7,6 +7,7 @@ javascript:(function () {
   var STATUS_ID = "scriptmm-wt-village-status";
   var STYLE_ID = "scriptmm-wt-village-style";
   var REFRESH_BUTTON_CLASS = "scriptmm-wt-village-refresh";
+  var NOTE_BUTTON_CLASS = "scriptmm-wt-village-note";
   var FETCH_COOLDOWN_MS = 12000;
   var RENDER_EVERY_MS = 1000;
 
@@ -24,6 +25,7 @@ javascript:(function () {
     scriptStartMs: Date.now(),
     state: {
       inFlight: false,
+      noteInFlight: false,
       fetchedAtMs: 0,
       attacksById: new Map(),
     },
@@ -36,35 +38,42 @@ javascript:(function () {
     clearLabels();
   });
 
-  if (!isPlaceVillagePage()) {
-    alert("Скрипт Сторожевой Башни нужно запускать на странице деревни: Площадь / Приказы (screen=place).");
-    return;
-  }
-
-  if (!getVisibleIncomingRows().length) {
-    alert("На этой странице деревни нет видимых входящих атак.");
+  if (!isSupportedVillagePage()) {
+    alert("Скрипт Сторожевой Башни нужно запускать на странице деревни: Обзор или Площадь.");
     return;
   }
 
   injectStyles();
   installStatusPanel();
   refresh(true);
+  if (isOverviewPage()) {
+    syncReqdefToNotes();
+  }
 
   var renderInterval = window.setInterval(renderLabels, RENDER_EVERY_MS);
   runtime.cleanup.push(function () {
     window.clearInterval(renderInterval);
   });
 
-  function isPlaceVillagePage() {
+  function isSupportedVillagePage() {
+    var screen = getCurrentScreen();
+    return screen === "place" || screen === "overview";
+  }
+
+  function isOverviewPage() {
+    return getCurrentScreen() === "overview";
+  }
+
+  function getCurrentScreen() {
     var screen = cleanText(getGameDataValue("screen"));
-    if (screen === "place") {
-      return true;
+    if (screen) {
+      return screen;
     }
     try {
       var url = new URL(window.location.href);
-      return url.searchParams.get("screen") === "place";
+      return cleanText(url.searchParams.get("screen"));
     } catch (e) {
-      return false;
+      return "";
     }
   }
 
@@ -132,9 +141,7 @@ javascript:(function () {
   }
 
   function buildAttacksUrl() {
-    var villageId =
-      cleanText(getGameDataValue("village.id")) ||
-      getUrlParam(window.location.href, "village");
+    var villageId = getCurrentVillageId();
     var url = new URL("/game.php", window.location.origin);
     if (villageId) {
       url.searchParams.set("village", villageId);
@@ -145,6 +152,18 @@ javascript:(function () {
     url.searchParams.set("subtype", "attacks");
     url.searchParams.set("group", "0");
     url.searchParams.set("page", "-1");
+    return url.toString();
+  }
+
+  function buildReqdefUrl(villageId) {
+    var id = cleanText(villageId) || getCurrentVillageId();
+    var url = new URL("/game.php", window.location.origin);
+    if (id) {
+      url.searchParams.set("village", id);
+      url.searchParams.set("village_id", id);
+    }
+    url.searchParams.set("screen", "reqdef");
+    url.searchParams.set("all", "1");
     return url.toString();
   }
 
@@ -433,13 +452,172 @@ javascript:(function () {
     }, 0);
   }
 
+  function syncReqdefToNotes() {
+    var state = runtime.state;
+    if (state.noteInFlight) {
+      return;
+    }
+
+    var villageId = getCurrentVillageId();
+    if (!villageId) {
+      setStatus("Запрос в заметки: не найден id деревни", "error");
+      return;
+    }
+
+    state.noteInFlight = true;
+    setStatus("Загружаю запрос подкрепления для заметок...", "loading");
+
+    fetchReqdefMessage(villageId)
+      .then(function (message) {
+        if (!message) {
+          throw new Error("simple_message is empty");
+        }
+        return saveVillageNote(villageId, message).then(function (response) {
+          updateVillageNoteWidget(message, response);
+          setStatus("Запрос подкрепления сохранён в заметки деревни", "ok");
+        });
+      })
+      .catch(function (error) {
+        console.warn(LOG_PREFIX, error);
+        setStatus("Запрос в заметки: не удалось сохранить", "error");
+      })
+      .finally(function () {
+        state.noteInFlight = false;
+      });
+  }
+
+  function fetchReqdefMessage(villageId) {
+    return fetch(buildReqdefUrl(villageId), {
+      credentials: "include",
+      cache: "no-store",
+    })
+      .then(function (response) {
+        if (!response.ok) {
+          throw new Error("HTTP " + response.status + " while loading reqdef");
+        }
+        return response.text();
+      })
+      .then(function (html) {
+        var doc = new DOMParser().parseFromString(html, "text/html");
+        var textarea = doc.querySelector("#simple_message");
+        return cleanMultiline(textarea ? textarea.value : "");
+      });
+  }
+
+  function saveVillageNote(villageId, noteText) {
+    if (
+      window.TribalWars &&
+      typeof window.TribalWars.post === "function"
+    ) {
+      return new Promise(function (resolve, reject) {
+        var settled = false;
+        try {
+          window.TribalWars.post(
+            "api",
+            { ajaxaction: "village_note_edit" },
+            {
+              village_id: villageId,
+              note: noteText,
+            },
+            function (response) {
+              settled = true;
+              resolve(response);
+            },
+            function (error) {
+              settled = true;
+              reject(error || new Error("village_note_edit failed"));
+            }
+          );
+        } catch (error) {
+          reject(error);
+          return;
+        }
+
+        window.setTimeout(function () {
+          if (!settled) {
+            reject(new Error("village_note_edit timeout"));
+          }
+        }, 15000);
+      });
+    }
+
+    return fetch(buildVillageNoteApiUrl(), {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "X-Requested-With": "XMLHttpRequest",
+      },
+      body: new URLSearchParams({
+        village_id: villageId,
+        note: noteText,
+      }).toString(),
+    }).then(function (response) {
+      if (!response.ok) {
+        throw new Error("HTTP " + response.status + " while saving note");
+      }
+      return response.text().then(function (text) {
+        try {
+          return JSON.parse(text);
+        } catch (e) {
+          return { raw: text };
+        }
+      });
+    });
+  }
+
+  function buildVillageNoteApiUrl() {
+    var url = new URL("/game.php", window.location.origin);
+    var villageId = getCurrentVillageId();
+    var csrf = getCsrfToken();
+    if (villageId) {
+      url.searchParams.set("village", villageId);
+    }
+    url.searchParams.set("screen", "api");
+    url.searchParams.set("ajaxaction", "village_note_edit");
+    if (csrf) {
+      url.searchParams.set("h", csrf);
+    }
+    return url.toString();
+  }
+
+  function updateVillageNoteWidget(noteText, response) {
+    var note = response && response.note ? response.note : response;
+    var contentHtml =
+      (note && typeof note.content === "string" && note.content) ||
+      escapeHtml(noteText).replace(/\n/g, "<br>");
+    var rawText =
+      note && typeof note.text_raw === "string" ? note.text_raw : noteText;
+
+    var textarea = document.querySelector('textarea[name="note"], #message');
+    if (textarea) {
+      textarea.value = rawText;
+    }
+
+    var row = document.querySelector("#village_note");
+    var noteBox = row ? row.querySelector(".village-note") : null;
+    var body = row ? row.querySelector(".village-note-body") : null;
+    if (row) {
+      row.style.display = "";
+    }
+    if (noteBox) {
+      noteBox.style.display = "";
+    }
+    if (body) {
+      body.innerHTML = contentHtml;
+    }
+  }
+
   function installStatusPanel() {
     var old = document.getElementById(STATUS_ID);
     if (old) {
       old.remove();
     }
 
-    var container = document.querySelector("#commands_incomings");
+    var container =
+      document.querySelector("#commands_incomings") ||
+      document.querySelector("#show_notes .widget_content") ||
+      document.querySelector("#content_value");
     if (!container) {
       return;
     }
@@ -462,6 +640,18 @@ javascript:(function () {
 
     panel.appendChild(text);
     panel.appendChild(button);
+
+    if (isOverviewPage()) {
+      var noteButton = document.createElement("button");
+      noteButton.type = "button";
+      noteButton.className = NOTE_BUTTON_CLASS;
+      noteButton.textContent = "запрос в заметки";
+      noteButton.addEventListener("click", function () {
+        syncReqdefToNotes();
+      });
+      panel.appendChild(noteButton);
+    }
+
     container.parentNode.insertBefore(panel, container);
   }
 
@@ -536,7 +726,17 @@ javascript:(function () {
       "  background: #e4f1d7;",
       "  color: #2b4a17;",
       "}",
+      ".scriptmm-wt-village-status.is-loading {",
+      "  border-color: #c7b58b;",
+      "  background: #fff3cd;",
+      "  color: #4a3410;",
+      "}",
       "." + REFRESH_BUTTON_CLASS + " {",
+      "  cursor: pointer;",
+      "  padding: 1px 7px;",
+      "  font-size: 11px;",
+      "}",
+      "." + NOTE_BUTTON_CLASS + " {",
       "  cursor: pointer;",
       "  padding: 1px 7px;",
       "  font-size: 11px;",
@@ -684,6 +884,44 @@ javascript:(function () {
       }, data);
   }
 
+  function getCurrentVillageId() {
+    return (
+      cleanText(getGameDataValue("village.id")) ||
+      cleanText(
+        safe(function () {
+          return document
+            .querySelector("#commands_incomings[data-village]")
+            .getAttribute("data-village");
+        }, ""),
+      ) ||
+      cleanText(getUrlParam(window.location.href, "village")) ||
+      cleanText(getUrlParam(readVillageIdFromMapHref(), "village"))
+    );
+  }
+
+  function readVillageIdFromMapHref() {
+    var area = document.querySelector(
+      "#map area[href*='village='][href*='screen=']",
+    );
+    return area ? area.getAttribute("href") : "";
+  }
+
+  function getCsrfToken() {
+    return (
+      cleanText(
+        safe(function () {
+          return window.csrf_token;
+        }, ""),
+      ) ||
+      cleanText(getGameDataValue("csrf")) ||
+      cleanText(
+        safe(function () {
+          return window.TribalWars.getGameData().csrf;
+        }, ""),
+      )
+    );
+  }
+
   function getUrlParam(url, key) {
     try {
       return new URL(url, window.location.origin).searchParams.get(key);
@@ -696,6 +934,22 @@ javascript:(function () {
     return String(value == null ? "" : value)
       .replace(/\s+/g, " ")
       .trim();
+  }
+
+  function cleanMultiline(value) {
+    return String(value == null ? "" : value)
+      .replace(/\r\n/g, "\n")
+      .replace(/\r/g, "\n")
+      .trim();
+  }
+
+  function escapeHtml(value) {
+    return String(value == null ? "" : value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#039;");
   }
 
   function safe(fn, fallback) {
