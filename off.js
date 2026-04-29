@@ -7,7 +7,8 @@
     const RANGE_MIN = -25;
     const RANGE_MAX = 90;
     const DEFAULT_RANGE_FROM = -5;
-    const DEFAULT_RANGE_TO = 20;
+    const DEFAULT_RANGE_TO = 15;
+    const SETTINGS_VERSION = 2;
 
     const DEFAULT_ACTIVE_UNITS = {
         axe: true,
@@ -212,6 +213,7 @@
         normalize_settings: function (stored) {
             const fallback_arrival_ms = Off.get_server_now_ms() + 20 * 60 * 1000;
             const base = {
+                settings_version: SETTINGS_VERSION,
                 targets: '',
                 group: '-1',
                 strategy: 'DEPART_ASC',
@@ -223,13 +225,14 @@
             };
 
             const source = stored && typeof stored === 'object' ? stored : {};
+            const has_current_defaults = Helper.to_int(source.settings_version) >= SETTINGS_VERSION;
             base.targets = Helper.clean_text(source.targets || '');
             base.group = Helper.clean_text(source.group || base.group) || '-1';
             base.strategy = STRATEGIES[source.strategy] ? source.strategy : base.strategy;
             base.arrival_date = Helper.normalize_date_input_value(source.arrival_date, fallback_arrival_ms);
             base.arrival_time = Helper.normalize_time_input_value(source.arrival_time, fallback_arrival_ms);
-            base.offset_from_min = Off.clamp_offset(source.offset_from_min, DEFAULT_RANGE_FROM);
-            base.offset_to_min = Off.clamp_offset(source.offset_to_min, DEFAULT_RANGE_TO);
+            base.offset_from_min = Off.clamp_offset(has_current_defaults ? source.offset_from_min : DEFAULT_RANGE_FROM, DEFAULT_RANGE_FROM);
+            base.offset_to_min = Off.clamp_offset(has_current_defaults ? source.offset_to_min : DEFAULT_RANGE_TO, DEFAULT_RANGE_TO);
             if (base.offset_from_min > base.offset_to_min) {
                 const tmp = base.offset_from_min;
                 base.offset_from_min = base.offset_to_min;
@@ -287,8 +290,11 @@
 .off-root .off-range-block{margin-top:10px;border:1px solid #c2a97d;background:#f7f0df;padding:8px;border-radius:4px}
 .off-root .off-range-values{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 .off-root .off-range-values input{width:72px}
-.off-root .off-range-slider{position:relative;height:28px;margin:6px 4px}
-.off-root .off-range-slider input[type="range"]{position:absolute;left:0;top:4px;width:100%;pointer-events:none;background:transparent}
+.off-root .off-range-slider{position:relative;height:28px;margin:6px 4px;--range-left:17.39%;--range-right:34.78%}
+.off-root .off-range-track{position:absolute;left:0;right:0;top:13px;height:6px;border-radius:999px;background:linear-gradient(to right,#d4c4a0 0%,#d4c4a0 var(--range-left),#9f7b3e var(--range-left),#9f7b3e var(--range-right),#d4c4a0 var(--range-right),#d4c4a0 100%)}
+.off-root .off-range-slider input[type="range"]{position:absolute;left:0;top:4px;width:100%;pointer-events:none;background:transparent;appearance:none;-webkit-appearance:none}
+.off-root .off-range-slider input[type="range"]::-webkit-slider-runnable-track{background:transparent;border:0}
+.off-root .off-range-slider input[type="range"]::-moz-range-track{background:transparent;border:0}
 .off-root .off-range-slider input[type="range"]::-webkit-slider-thumb{pointer-events:auto}
 .off-root .off-range-slider input[type="range"]::-moz-range-thumb{pointer-events:auto}
 .off-root .off-units{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;padding:6px;border:1px solid #c2a97d;background:#fff8ea}
@@ -370,6 +376,7 @@
                         <span>до <input id="${offset_to_min_id}" type="number" min="${RANGE_MIN}" max="${RANGE_MAX}" step="1"> мин</span>
                     </div>
                     <div class="off-range-slider">
+                        <div class="off-range-track"></div>
                         <input id="${offset_from_range_id}" type="range" min="${RANGE_MIN}" max="${RANGE_MAX}" step="1">
                         <input id="${offset_to_range_id}" type="range" min="${RANGE_MIN}" max="${RANGE_MAX}" step="1">
                     </div>
@@ -549,6 +556,14 @@
             if (to_range) to_range.value = String(to);
             if (from_input) from_input.value = String(from);
             if (to_input) to_input.value = String(to);
+            const range_slider = document.querySelector(`#${Helper.get_id().replace(/\./g, '\\.')} .off-range-slider`);
+            if (range_slider) {
+                const span = RANGE_MAX - RANGE_MIN;
+                const left = ((from - RANGE_MIN) / span) * 100;
+                const right = ((to - RANGE_MIN) / span) * 100;
+                range_slider.style.setProperty('--range-left', `${Math.max(0, Math.min(100, left)).toFixed(2)}%`);
+                range_slider.style.setProperty('--range-right', `${Math.max(0, Math.min(100, right)).toFixed(2)}%`);
+            }
         },
 
         sync_settings_from_ui: function () {
@@ -609,6 +624,17 @@
             return Off.off_units.filter(unit_name => !!Off.settings.active_units[unit_name]);
         },
 
+        get_linked_units_for_anchor: function (anchor_unit, active_units) {
+            const active = new Set(active_units || []);
+            const chains = {
+                snob: ['snob', 'ram', 'light', 'axe'],
+                ram: ['ram', 'light', 'axe'],
+                axe: ['axe', 'light'],
+            };
+            const chain = chains[anchor_unit] || [anchor_unit];
+            return chain.filter(unit_name => active.has(unit_name));
+        },
+
         collect_user_input: function () {
             Off.sync_settings_from_ui();
             const targets_control = Helper.get_control('targets');
@@ -640,7 +666,7 @@
             if (!Number.isFinite(distance) || distance <= 0) return null;
 
             const now_ms = Off.get_server_now_ms();
-            const row_units = {};
+            const available_candidates = {};
             for (const unit_name of user_input.active_units) {
                 const count = Math.max(0, Helper.to_int(village.units[unit_name]));
                 if (!count) continue;
@@ -649,21 +675,36 @@
                 const travel_ms = distance * speed * 60 * 1000;
                 const departure_ms = user_input.arrival_ms - travel_ms;
                 const offset_ms = departure_ms - now_ms;
-                if (offset_ms < user_input.offset_from_ms || offset_ms > user_input.offset_to_ms) continue;
-                row_units[unit_name] = {
+                available_candidates[unit_name] = {
                     max: count,
                     speed,
                     travel_ms,
                     departure_ms,
+                    offset_ms,
                     pop: Off.get_unit_pop(unit_name),
                 };
             }
 
-            const unit_names = Object.keys(row_units);
-            if (!unit_names.length) return null;
-            const slowest_unit = unit_names
-                .sort((lhs, rhs) => row_units[rhs].travel_ms - row_units[lhs].travel_ms)[0];
-            const selected_departure_ms = row_units[slowest_unit].departure_ms;
+            const anchor_units = Object.keys(available_candidates)
+                .filter(unit_name =>
+                    available_candidates[unit_name].offset_ms >= user_input.offset_from_ms &&
+                    available_candidates[unit_name].offset_ms <= user_input.offset_to_ms
+                )
+                .sort((lhs, rhs) => available_candidates[rhs].travel_ms - available_candidates[lhs].travel_ms);
+            if (!anchor_units.length) return null;
+
+            const anchor_unit = anchor_units[0];
+            const selected_departure_ms = available_candidates[anchor_unit].departure_ms;
+            const row_units = {};
+            const linked_units = Off.get_linked_units_for_anchor(anchor_unit, user_input.active_units);
+            for (const unit_name of linked_units) {
+                const candidate = available_candidates[unit_name];
+                if (!candidate) continue;
+                if (candidate.departure_ms < selected_departure_ms) continue;
+                row_units[unit_name] = candidate;
+            }
+
+            if (!Object.keys(row_units).length) return null;
 
             return {
                 target,
@@ -675,8 +716,9 @@
                 arrival_ms: user_input.arrival_ms,
                 departure_ms: selected_departure_ms,
                 offset_ms: selected_departure_ms - now_ms,
+                anchor_unit,
                 units: row_units,
-                population: unit_names.reduce((sum, unit_name) => sum + row_units[unit_name].max * row_units[unit_name].pop, 0),
+                population: Object.keys(row_units).reduce((sum, unit_name) => sum + row_units[unit_name].max * row_units[unit_name].pop, 0),
             };
         },
 
@@ -952,6 +994,199 @@
                 : null;
         },
 
+        parse_arrival_from_text: function (raw_text) {
+            const source = Helper.clean_text(String(raw_text === null || raw_text === undefined ? '' : raw_text))
+                .replace(/\s+/g, ' ');
+            if (!source) return null;
+
+            const now = new Date(Off.get_server_now_ms());
+            const month_name_to_number = function (raw_month) {
+                const month = Helper.clean_text(raw_month).toLowerCase().replace(/\.$/, '');
+                const aliases = [
+                    { keys: ['jan', 'january', 'янв', 'январ'], value: 1 },
+                    { keys: ['feb', 'february', 'фев', 'феврал'], value: 2 },
+                    { keys: ['mar', 'march', 'мар', 'март'], value: 3 },
+                    { keys: ['apr', 'april', 'апр', 'апрел'], value: 4 },
+                    { keys: ['may', 'мая', 'май'], value: 5 },
+                    { keys: ['jun', 'june', 'июн', 'июнь'], value: 6 },
+                    { keys: ['jul', 'july', 'июл', 'июль'], value: 7 },
+                    { keys: ['aug', 'august', 'авг', 'август'], value: 8 },
+                    { keys: ['sep', 'sept', 'september', 'сен', 'сентябр'], value: 9 },
+                    { keys: ['oct', 'october', 'окт', 'октябр'], value: 10 },
+                    { keys: ['nov', 'november', 'ноя', 'ноябр'], value: 11 },
+                    { keys: ['dec', 'december', 'дек', 'декабр'], value: 12 },
+                ];
+                for (const alias of aliases) {
+                    if (alias.keys.some(key => month.startsWith(key))) return alias.value;
+                }
+                return null;
+            };
+            const build_datetime = function ({ year, month, day, hour, minute, second = 0, millisecond = 0, can_roll_year = false }) {
+                const y = Number(year);
+                const m = Number(month);
+                const d = Number(day);
+                const hh = Number(hour);
+                const mm = Number(minute);
+                const ss = Number(second);
+                const ms = Number(millisecond);
+                if (![y, m, d, hh, mm, ss, ms].every(Number.isFinite)) return null;
+                if (m < 1 || m > 12 || d < 1 || d > 31 || hh > 23 || mm > 59 || ss > 59 || ms > 999) return null;
+                const parsed = new Date(y, m - 1, d, hh, mm, ss, ms);
+                if (
+                    parsed.getFullYear() !== y ||
+                    parsed.getMonth() !== m - 1 ||
+                    parsed.getDate() !== d ||
+                    parsed.getHours() !== hh ||
+                    parsed.getMinutes() !== mm ||
+                    parsed.getSeconds() !== ss
+                ) {
+                    return null;
+                }
+                if (can_roll_year && parsed.getTime() < now.getTime() - 12 * 60 * 60 * 1000) {
+                    const rolled = new Date(y + 1, m - 1, d, hh, mm, ss, ms);
+                    if (rolled.getFullYear() === y + 1 && rolled.getMonth() === m - 1 && rolled.getDate() === d) {
+                        return rolled.getTime();
+                    }
+                }
+                return parsed.getTime();
+            };
+            const take_last_match = function (regex) {
+                let last = null;
+                let match = null;
+                regex.lastIndex = 0;
+                while ((match = regex.exec(source)) !== null) last = match;
+                return last;
+            };
+
+            const date_match = take_last_match(/(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?\.?\s*(?:в\s+)?(\d{1,2}):(\d{2})(?::(\d{2}))?(?:[.:](\d{1,3}))?/gi);
+            if (date_match) {
+                const explicit_year = Helper.clean_text(date_match[3] || '');
+                const year = explicit_year
+                    ? Number(explicit_year.length === 2 ? `20${explicit_year}` : explicit_year)
+                    : now.getFullYear();
+                const parsed = build_datetime({
+                    year,
+                    month: date_match[2],
+                    day: date_match[1],
+                    hour: date_match[4],
+                    minute: date_match[5],
+                    second: date_match[6] || 0,
+                    millisecond: date_match[7] || 0,
+                    can_roll_year: !explicit_year,
+                });
+                if (Number.isFinite(parsed)) return parsed;
+            }
+
+            const month_name_match = take_last_match(/([a-zа-яё]{3,12})\.?\s+(\d{1,2})\s*,\s*(\d{4})\s*(?:г\.?)?\s*(\d{1,2}):(\d{2})(?::(\d{2}))?(?:[.:](\d{1,3}))?/gi);
+            if (month_name_match) {
+                const month_number = month_name_to_number(month_name_match[1]);
+                if (Number.isFinite(month_number)) {
+                    const parsed = build_datetime({
+                        year: month_name_match[3],
+                        month: month_number,
+                        day: month_name_match[2],
+                        hour: month_name_match[4],
+                        minute: month_name_match[5],
+                        second: month_name_match[6] || 0,
+                        millisecond: month_name_match[7] || 0,
+                    });
+                    if (Number.isFinite(parsed)) return parsed;
+                }
+            }
+
+            const relative_match = take_last_match(/(сегодня|today|завтра|tomorrow)\s*(?:в\s+)?(\d{1,2}):(\d{2})(?::(\d{2}))?(?:[.:](\d{1,3}))?/gi);
+            if (relative_match) {
+                const token = String(relative_match[1] || '').toLowerCase();
+                const shift_days = token === 'завтра' || token === 'tomorrow' ? 1 : 0;
+                const basis = new Date(now.getFullYear(), now.getMonth(), now.getDate() + shift_days, 0, 0, 0, 0);
+                const parsed = build_datetime({
+                    year: basis.getFullYear(),
+                    month: basis.getMonth() + 1,
+                    day: basis.getDate(),
+                    hour: relative_match[2],
+                    minute: relative_match[3],
+                    second: relative_match[4] || 0,
+                    millisecond: relative_match[5] || 0,
+                });
+                if (Number.isFinite(parsed)) return parsed;
+            }
+
+            const time_match = take_last_match(/(?:^|\s)(\d{1,2}):(\d{2})(?::(\d{2}))?(?:[.:](\d{1,3}))?(?!\d)/g);
+            if (time_match) {
+                const parsed = build_datetime({
+                    year: now.getFullYear(),
+                    month: now.getMonth() + 1,
+                    day: now.getDate(),
+                    hour: time_match[1],
+                    minute: time_match[2],
+                    second: time_match[3] || 0,
+                    millisecond: time_match[4] || 0,
+                });
+                if (Number.isFinite(parsed)) return parsed;
+            }
+
+            return null;
+        },
+
+        get_arrival_text_from_click_target: function (target) {
+            if (!target) return null;
+            const copy_node = target.closest('[data-copy-time]');
+            if (copy_node) {
+                const copied = Helper.clean_text(copy_node.getAttribute('data-copy-time') || '');
+                if (copied) return copied;
+            }
+            const command_row = target.closest('tr.command-row');
+            if (command_row && command_row.cells && command_row.cells.length > 1) {
+                const text = Helper.clean_text(command_row.cells[1].textContent || '');
+                if (text) return text;
+            }
+            const td = target.closest('td');
+            if (td) {
+                const text = Helper.clean_text(td.textContent || '');
+                if (text) return text;
+            }
+            return Helper.clean_text(target.textContent || '') || null;
+        },
+
+        apply_arrival_from_click: function (arrival_ms) {
+            if (!Number.isFinite(arrival_ms)) return false;
+            const date_control = Helper.get_control('arrival_date');
+            const time_control = Helper.get_control('arrival_time');
+            if (date_control) date_control.value = Helper.format_date_ymd(arrival_ms);
+            if (time_control) time_control.value = Helper.format_hms(arrival_ms);
+            Off.sync_settings_from_ui();
+            return true;
+        },
+
+        bind_external_arrival_picker: function () {
+            const event_namespace = '.ScriptMMOffArrivalPicker';
+            jQuery(document).off(`click${event_namespace}`);
+            jQuery(document).on(`click${event_namespace}`, event => {
+                const root = Helper.get_control();
+                if (!root) return;
+                const target = event.target && event.target.nodeType === 1
+                    ? event.target
+                    : event.target && event.target.parentElement
+                        ? event.target.parentElement
+                        : null;
+                if (!target || root.contains(target)) return;
+                const clicked_text = Off.get_arrival_text_from_click_target(target);
+                const from_copy_attr = !!target.closest('[data-copy-time]');
+                if (!from_copy_attr && !/(сегодня|завтра|today|tomorrow|\d{1,2}\.\d{1,2}|[a-zа-яё]{3,12}\.?\s+\d{1,2})/i.test(String(clicked_text || ''))) {
+                    return;
+                }
+                const arrival_ms = Off.parse_arrival_from_text(clicked_text);
+                if (!Number.isFinite(arrival_ms)) return;
+                if (Off.apply_arrival_from_click(arrival_ms)) {
+                    UI.SuccessMessage(`Вставлено время прихода: ${Helper.format_date_ymd(arrival_ms)} ${Helper.format_hms(arrival_ms)}`);
+                }
+            });
+        },
+
+        unbind_external_arrival_picker: function () {
+            jQuery(document).off('.ScriptMMOffArrivalPicker');
+        },
+
         set_targets_to_current_coord: function () {
             const coord = Off.extract_current_coord();
             const targets = Helper.get_control('targets');
@@ -985,6 +1220,7 @@
 
             await Off.get_world_info();
             Off.apply_settings_to_ui();
+            Off.bind_external_arrival_picker();
 
             ['targets', 'group', 'strategy', 'arrival_date', 'arrival_time'].forEach(control_name => {
                 const control = Helper.get_control(control_name);
@@ -1052,6 +1288,7 @@
             const instance = Helper.get_control();
             if (instance) {
                 instance.remove();
+                Off.unbind_external_arrival_picker();
                 if (Off.countdown_timer_id) clearInterval(Off.countdown_timer_id);
                 return;
             }
