@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.35";
+  const VERSION = "0.10.36";
   const LOG_PREFIX = "[ScriptMM]";
   const MULTI_TAB_PRESENCE_KEY = "scriptmm.active_instances.v1";
   const MULTI_TAB_HEARTBEAT_INTERVAL_MS = 3000;
@@ -16084,6 +16084,212 @@
       root.appendChild(backdrop);
     });
 
+  const buildScheduledCommandTimingWindow = (commandRaw) => {
+    const command = normalizeScheduledCommand(commandRaw);
+    if (!command) return null;
+    const startMs = toFiniteEpochMs(command.timingStartMs);
+    const endMs = toFiniteEpochMs(command.timingEndMs);
+    const pointMs = toFiniteEpochMs(command.timingPointMs);
+    const incomingEtaMs = toFiniteEpochMs(command.incomingEtaMs);
+    const rawLabel = cleanText(command.timingLabel);
+    if (Number.isFinite(startMs) && Number.isFinite(endMs)) {
+      const fromMs = Math.min(startMs, endMs);
+      const toMs = Math.max(startMs, endMs);
+      return {
+        type: "range",
+        startMs: fromMs,
+        endMs: toMs,
+        label: buildNormalizedTimingLabel({
+          timingType: command.timingType,
+          timingLabel: command.timingLabel,
+          timingStartMs: fromMs,
+          timingEndMs: toMs,
+          timingPointMs: command.timingPointMs,
+        }),
+      };
+    }
+    if (Number.isFinite(pointMs)) {
+      return {
+        type: "point",
+        startMs: pointMs,
+        endMs: pointMs,
+        label: buildNormalizedTimingLabel({
+          timingType: command.timingType,
+          timingLabel: command.timingLabel,
+          timingPointMs: pointMs,
+        }),
+      };
+    }
+    if (Number.isFinite(incomingEtaMs)) {
+      return {
+        type: "eta",
+        startMs: incomingEtaMs,
+        endMs: incomingEtaMs,
+        label: formatTimeWithMs(incomingEtaMs),
+      };
+    }
+    if (rawLabel && rawLabel !== "—") {
+      return {
+        type: "label",
+        startMs: null,
+        endMs: null,
+        label: rawLabel,
+      };
+    }
+    return null;
+  };
+
+  const scheduledCommandTimingWindowsMatch = (
+    leftWindow,
+    rightWindow,
+    toleranceMs = 50,
+  ) => {
+    if (!leftWindow || !rightWindow) return false;
+    const leftHasMs =
+      Number.isFinite(leftWindow.startMs) && Number.isFinite(leftWindow.endMs);
+    const rightHasMs =
+      Number.isFinite(rightWindow.startMs) && Number.isFinite(rightWindow.endMs);
+    if (leftHasMs && rightHasMs) {
+      const leftStart = Math.min(leftWindow.startMs, leftWindow.endMs);
+      const leftEnd = Math.max(leftWindow.startMs, leftWindow.endMs);
+      const rightStart = Math.min(rightWindow.startMs, rightWindow.endMs);
+      const rightEnd = Math.max(rightWindow.startMs, rightWindow.endMs);
+      return (
+        Math.abs(leftStart - rightStart) <= toleranceMs &&
+        Math.abs(leftEnd - rightEnd) <= toleranceMs
+      );
+    }
+    const leftLabel = cleanText(leftWindow.label);
+    const rightLabel = cleanText(rightWindow.label);
+    return Boolean(leftLabel && rightLabel && leftLabel === rightLabel);
+  };
+
+  const buildLocalScheduledDuplicateSummary = (commandRaw) => {
+    const command = normalizeScheduledCommand(commandRaw);
+    if (!command) return null;
+    const targetCoord = normalizeCoordIdentity(command.targetCoord);
+    const timingWindow = buildScheduledCommandTimingWindow(command);
+    if (!targetCoord || !timingWindow) return null;
+    const commandId = String(cleanText(command.id) || "");
+    const scheduled = syncScheduledCommandsFromStorage();
+    const matches = (Array.isArray(scheduled) ? scheduled : [])
+      .map((item) => normalizeScheduledCommand(item))
+      .filter(Boolean)
+      .filter((item) => !isFinalManeuverStatus(item.status))
+      .filter((item) => String(cleanText(item.id) || "") !== commandId)
+      .filter(
+        (item) => normalizeCoordIdentity(item.targetCoord) === targetCoord,
+      )
+      .filter((item) =>
+        scheduledCommandTimingWindowsMatch(
+          buildScheduledCommandTimingWindow(item),
+          timingWindow,
+        ),
+      );
+    if (!matches.length) return null;
+
+    const summedUnits = {};
+    matches.forEach((item) => {
+      const itemUnits = normalizeUnitsMap(item.units);
+      Object.entries(itemUnits).forEach(([unit, count]) => {
+        const safeCount = Math.max(0, toInt(count) || 0);
+        if (!unit || safeCount <= 0) return;
+        summedUnits[unit] = (summedUnits[unit] || 0) + safeCount;
+      });
+    });
+    const originSamples = matches
+      .map((item) => cleanText(item.fromVillageCoord || item.fromVillageId))
+      .filter(Boolean)
+      .slice(0, 5);
+    return {
+      targetCoord,
+      timingLabel:
+        cleanText(timingWindow.label) ||
+        buildNormalizedTimingLabel({
+          timingType: command.timingType,
+          timingLabel: command.timingLabel,
+          timingStartMs: command.timingStartMs,
+          timingEndMs: command.timingEndMs,
+          timingPointMs: command.timingPointMs,
+        }),
+      duplicateCount: matches.length,
+      summedUnits,
+      originSamples,
+      matches,
+    };
+  };
+
+  const confirmLocalScheduledDuplicate = (commandRaw) =>
+    new Promise((resolve) => {
+      const summary = buildLocalScheduledDuplicateSummary(commandRaw);
+      if (!summary) {
+        resolve(true);
+        return;
+      }
+      const targetText = cleanText(summary.targetCoord) || "?";
+      const timingText = cleanText(summary.timingLabel) || "—";
+      const duplicateCount = Math.max(1, toInt(summary.duplicateCount) || 1);
+      const unitsHtml =
+        formatPlanUnitsIconsHtml(
+          normalizeSupportUnitsMap(summary.summedUnits, state.speedModel),
+        ) || "—";
+      const originText = summary.originSamples.length
+        ? summary.originSamples.join(", ")
+        : null;
+      console.info(`${LOG_PREFIX} [plan-schedule][local-duplicate]`, {
+        version: VERSION,
+        targetCoord: targetText,
+        timingLabel: timingText,
+        duplicateCount,
+        summedUnits: normalizeUnitsMap(summary.summedUnits),
+        originSamples: summary.originSamples,
+      });
+      const plainMessage = `На цель ${targetText} в окно ${timingText} уже запланировано отправок: ${duplicateCount}. Всё равно запланировать?`;
+      const root =
+        document.body || (state.ui && state.ui.root ? state.ui.root : null);
+      if (!root) {
+        resolve(Boolean(window.confirm(plainMessage)));
+        return;
+      }
+
+      const backdrop = document.createElement("div");
+      backdrop.className = "smm-confirm-dialog-backdrop";
+      backdrop.innerHTML = `
+<div class="smm-confirm-dialog-card" role="dialog" aria-modal="true">
+  <div class="smm-confirm-dialog-title">Уже есть план на это окно</div>
+  <div class="smm-confirm-dialog-text">Цель: ${escapeHtml(targetText)} · окно: ${escapeHtml(
+        timingText,
+      )} · уже запланировано отправок: ${escapeHtml(String(duplicateCount))}</div>
+  <div class="smm-confirm-dialog-text">Суммарно уже в плане: ${unitsHtml}</div>
+  ${
+    originText
+      ? `<div class="smm-confirm-dialog-text">Откуда: ${escapeHtml(originText)}${
+          duplicateCount > summary.originSamples.length ? "…" : ""
+        }</div>`
+      : ""
+  }
+  <div class="smm-confirm-dialog-actions">
+    <button type="button" class="smm-btn smm-confirm-cancel-btn">Отмена</button>
+    <button type="button" class="smm-btn smm-confirm-yes-btn">Всё равно запланировать</button>
+  </div>
+</div>`;
+      const close = (accepted) => {
+        if (backdrop && backdrop.parentNode)
+          backdrop.parentNode.removeChild(backdrop);
+        resolve(Boolean(accepted));
+      };
+      backdrop.addEventListener("click", (event) => {
+        if (event.target === backdrop) close(false);
+      });
+      const yesButton = backdrop.querySelector(".smm-confirm-yes-btn");
+      const cancelButton = backdrop.querySelector(".smm-confirm-cancel-btn");
+      if (yesButton) yesButton.addEventListener("click", () => close(true));
+      if (cancelButton) {
+        cancelButton.addEventListener("click", () => close(false));
+      }
+      root.appendChild(backdrop);
+    });
+
   const buildHubIncomingFromQueryRow = (row, thresholdUnitsEq) => {
     if (!row || typeof row !== "object") return null;
     const rowKey = cleanText(row.rowKey);
@@ -20781,6 +20987,14 @@ ${panelHtml}`;
         );
         return true;
       }
+      const duplicateAccepted = await confirmLocalScheduledDuplicate(normalized);
+      if (!duplicateAccepted) {
+        setMessageInlinePanelStatus(
+          panelNode,
+          "Планирование отменено: на эту цель и окно уже есть отправка.",
+        );
+        return true;
+      }
       const savedCommand = upsertScheduledCommandWithStorageSync(normalized);
       if (!savedCommand) {
         setMessageInlinePanelStatus(
@@ -23541,6 +23755,16 @@ ${panelHtml}`;
             return;
           }
 
+          const duplicateAccepted = await confirmLocalScheduledDuplicate(
+            normalized,
+          );
+          if (!duplicateAccepted) {
+            setStatus(
+              state.ui,
+              "Планирование отменено: на эту цель и окно уже есть отправка.",
+            );
+            return;
+          }
           const savedCommand = upsertScheduledCommandWithStorageSync(normalized);
           if (!savedCommand) {
             setStatus(state.ui, "Не удалось сохранить приказ в план.");
