@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.36";
+  const VERSION = "0.10.37";
   const LOG_PREFIX = "[ScriptMM]";
   const MULTI_TAB_PRESENCE_KEY = "scriptmm.active_instances.v1";
   const MULTI_TAB_HEARTBEAT_INTERVAL_MS = 3000;
@@ -16254,9 +16254,18 @@
 
       const backdrop = document.createElement("div");
       backdrop.className = "smm-confirm-dialog-backdrop";
+      backdrop.style.position = "fixed";
+      backdrop.style.inset = "0";
+      backdrop.style.display = "flex";
+      backdrop.style.alignItems = "center";
+      backdrop.style.justifyContent = "center";
+      backdrop.style.padding = "12px";
+      backdrop.style.background = "rgba(15,9,2,.52)";
+      backdrop.style.zIndex = "2147483646";
+      backdrop.style.boxSizing = "border-box";
       backdrop.innerHTML = `
 <div class="smm-confirm-dialog-card" role="dialog" aria-modal="true">
-  <div class="smm-confirm-dialog-title">Уже есть план на это окно</div>
+  <div class="smm-confirm-dialog-title">Уже запланировано на это окно</div>
   <div class="smm-confirm-dialog-text">Цель: ${escapeHtml(targetText)} · окно: ${escapeHtml(
         timingText,
       )} · уже запланировано отправок: ${escapeHtml(String(duplicateCount))}</div>
@@ -16273,6 +16282,41 @@
     <button type="button" class="smm-btn smm-confirm-yes-btn">Всё равно запланировать</button>
   </div>
 </div>`;
+      const card = backdrop.querySelector(".smm-confirm-dialog-card");
+      if (card) {
+        card.style.width = "min(560px,94vw)";
+        card.style.padding = "12px";
+        card.style.border = "1px solid #b89a5a";
+        card.style.borderRadius = "12px";
+        card.style.background =
+          "linear-gradient(165deg,#f7f3e8 0%,#efe6d0 52%,#e8dcc0 100%)";
+        card.style.boxShadow = "0 18px 60px rgba(0,0,0,.3)";
+        card.style.fontFamily = '"Trebuchet MS","Segoe UI",sans-serif';
+        card.style.color = "#4d3918";
+      }
+      const titleNode = backdrop.querySelector(".smm-confirm-dialog-title");
+      if (titleNode) {
+        titleNode.style.fontSize = "14px";
+        titleNode.style.fontWeight = "800";
+        titleNode.style.color = "#4b310d";
+        titleNode.style.marginBottom = "7px";
+      }
+      Array.from(backdrop.querySelectorAll(".smm-confirm-dialog-text")).forEach(
+        (node) => {
+          node.style.fontSize = "12px";
+          node.style.lineHeight = "1.4";
+          node.style.color = "#4d3918";
+          node.style.marginTop = "4px";
+        },
+      );
+      const actionsNode = backdrop.querySelector(".smm-confirm-dialog-actions");
+      if (actionsNode) {
+        actionsNode.style.display = "flex";
+        actionsNode.style.alignItems = "center";
+        actionsNode.style.justifyContent = "flex-end";
+        actionsNode.style.gap = "6px";
+        actionsNode.style.marginTop = "10px";
+      }
       const close = (accepted) => {
         if (backdrop && backdrop.parentNode)
           backdrop.parentNode.removeChild(backdrop);
@@ -16283,6 +16327,24 @@
       });
       const yesButton = backdrop.querySelector(".smm-confirm-yes-btn");
       const cancelButton = backdrop.querySelector(".smm-confirm-cancel-btn");
+      [cancelButton, yesButton].forEach((button) => {
+        if (!button) return;
+        button.style.border = "1px solid #b7904f";
+        button.style.background =
+          "linear-gradient(180deg,#f7e9ca 0%,#e1c58f 100%)";
+        button.style.color = "#4c2f0c";
+        button.style.borderRadius = "8px";
+        button.style.padding = "5px 10px";
+        button.style.fontSize = "12px";
+        button.style.fontWeight = "700";
+        button.style.cursor = "pointer";
+      });
+      if (yesButton) {
+        yesButton.style.borderColor = "#8f2f13";
+        yesButton.style.background =
+          "linear-gradient(180deg,#ffddc7 0%,#f3b084 100%)";
+        yesButton.style.color = "#5d1908";
+      }
       if (yesButton) yesButton.addEventListener("click", () => close(true));
       if (cancelButton) {
         cancelButton.addEventListener("click", () => close(false));
