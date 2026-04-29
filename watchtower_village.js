@@ -46,7 +46,8 @@ javascript:(function () {
   });
 
   if (!isSupportedVillagePage()) {
-    alert(
+    console.warn(
+      LOG_PREFIX,
       "Скрипт нужно запускать на странице деревни: Обзор, Площадь, информация о деревне или отчёт.",
     );
     return;
@@ -709,20 +710,6 @@ javascript:(function () {
           return null;
         }
 
-        var message =
-          "Вывести все подкрепления из деревни отчёта?\n\n" +
-          reportTarget.label +
-          "\nСтрок: " +
-          orders.length +
-          ". POST-запросов: " +
-          countSupportWithdrawRequests(orders) +
-          ".";
-
-        if (!window.confirm(message)) {
-          setStatus("Отчёт: вывод подкреплений отменён", "muted");
-          return null;
-        }
-
         return runSupportWithdrawJob(orders, false);
       })
       .catch(function (error) {
@@ -961,14 +948,6 @@ javascript:(function () {
       return;
     }
 
-    if (
-      !window.confirm(
-        "Вывести все войска из " + current.sourceText + " раздельно?",
-      )
-    ) {
-      return;
-    }
-
     runSupportWithdrawJob([current], true);
   }
 
@@ -982,20 +961,6 @@ javascript:(function () {
         "Вывод подкреплений: подкрепления из других деревень не найдены",
         "muted",
       );
-      return;
-    }
-
-    var message =
-      "Вывести все подкрепления из " +
-      countUniqueHomeVillages(orders) +
-      " деревень?\n\n" +
-      "Строк: " +
-      orders.length +
-      ". POST-запросов: " +
-      countSupportWithdrawRequests(orders) +
-      ".";
-
-    if (!window.confirm(message)) {
       return;
     }
 
