@@ -9,6 +9,7 @@ javascript:(function () {
   var REFRESH_BUTTON_CLASS = "scriptmm-wt-village-refresh";
   var NOTE_BUTTON_CLASS = "scriptmm-wt-village-note";
   var WITHDRAW_ALL_BUTTON_CLASS = "scriptmm-wt-village-withdraw-all";
+  var WITHDRAW_ALL_INLINE_BUTTON_CLASS = "scriptmm-wt-village-withdraw-all-inline";
   var WITHDRAW_ROW_BUTTON_CLASS = "scriptmm-wt-village-withdraw-row";
   var FETCH_COOLDOWN_MS = 12000;
   var RENDER_EVERY_MS = 1000;
@@ -633,6 +634,7 @@ javascript:(function () {
   function initSupportWithdrawTools() {
     var orders = collectSupportWithdrawOrders();
     renderSupportWithdrawButtons(orders);
+    renderSupportWithdrawAllButton(orders);
 
     if (!orders.length) {
       setStatus("Вывод подкреплений: строки подкреплений не найдены", "muted");
@@ -755,11 +757,55 @@ javascript:(function () {
     });
   }
 
+  function renderSupportWithdrawAllButton(orders) {
+    var form = document.querySelector("#withdraw_selected_units_village_info");
+    if (!form || form.querySelector("." + WITHDRAW_ALL_INLINE_BUTTON_CLASS)) {
+      return;
+    }
+
+    var submit = form.querySelector('input[type="submit"][value="Отослать"]');
+    var cell = submit ? submit.closest("th, td") : null;
+    if (!cell) {
+      cell = form.querySelector(
+        "tr:last-child th:last-child, tr:last-child td:last-child",
+      );
+    }
+    if (!cell) {
+      return;
+    }
+
+    var button = document.createElement("button");
+    button.type = "button";
+    button.className =
+      "btn " +
+      WITHDRAW_ALL_BUTTON_CLASS +
+      " " +
+      WITHDRAW_ALL_INLINE_BUTTON_CLASS;
+    button.innerHTML = "Отослать вообще<br>всех раздельно";
+    button.title =
+      "Вывести все найденные подкрепления раздельно, строк: " + orders.length;
+    button.addEventListener("click", function (event) {
+      event.preventDefault();
+      withdrawAllSupportOrders();
+    });
+
+    if (submit) {
+      cell.insertBefore(button, submit);
+    } else {
+      cell.appendChild(button);
+    }
+  }
+
   function clearSupportWithdrawButtons() {
     Array.from(document.querySelectorAll("." + WITHDRAW_ROW_BUTTON_CLASS))
       .concat(
         Array.from(
           document.querySelectorAll("." + WITHDRAW_ROW_BUTTON_CLASS + "-break"),
+        ),
+      )
+      .concat(
+        Array.from(
+          document.querySelectorAll("." + WITHDRAW_ALL_INLINE_BUTTON_CLASS),
         ),
       )
       .forEach(function (node) {
@@ -788,6 +834,7 @@ javascript:(function () {
   function withdrawAllSupportOrders() {
     var orders = collectSupportWithdrawOrders();
     renderSupportWithdrawButtons(orders);
+    renderSupportWithdrawAllButton(orders);
 
     if (!orders.length) {
       setStatus(
@@ -1118,6 +1165,12 @@ javascript:(function () {
       "  cursor: pointer;",
       "  padding: 1px 7px;",
       "  font-size: 11px;",
+      "}",
+      "." + WITHDRAW_ALL_INLINE_BUTTON_CLASS + " {",
+      "  margin-right: 6px;",
+      "  padding: 2px 7px;",
+      "  line-height: 1.15;",
+      "  white-space: normal;",
       "}",
       "." + WITHDRAW_ROW_BUTTON_CLASS + " {",
       "  display: inline-block;",
