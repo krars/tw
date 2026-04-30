@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.37";
+  const VERSION = "0.10.38";
   const LOG_PREFIX = "[ScriptMM]";
   const MULTI_TAB_PRESENCE_KEY = "scriptmm.active_instances.v1";
   const MULTI_TAB_HEARTBEAT_INTERVAL_MS = 3000;
@@ -8702,6 +8702,192 @@
         });
       });
     }
+
+    const mapTextOffsetToNodeRange = (spans, startOffset, endOffset) => {
+      const start = Number(startOffset);
+      const end = Number(endOffset);
+      if (!Array.isArray(spans) || !Number.isFinite(start) || !Number.isFinite(end))
+        return null;
+      const span = spans.find(
+        (item) => start >= item.start && end <= item.end,
+      );
+      if (!span || !span.node) return null;
+      return {
+        node: span.node,
+        start: start - span.start,
+        end: end - span.start,
+      };
+    };
+
+    const collectTextNodeSpans = (container) => {
+      const spans = [];
+      if (!container) return { text: "", spans };
+      const walker = doc.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
+        acceptNode: (node) => {
+          const parent = node && node.parentElement;
+          if (!parent) return NodeFilter.FILTER_REJECT;
+          if (
+            parent.closest(
+              "#scriptmm-overlay-root, .smm-msg-inline-actions, .smm-msg-inline-panel, #smm-msg-inline-fallback, .smm-msg-manual-inline",
+            )
+          ) {
+            return NodeFilter.FILTER_REJECT;
+          }
+          const text = String(node.nodeValue || "").replace(/\u00a0/g, " ");
+          return cleanText(text)
+            ? NodeFilter.FILTER_ACCEPT
+            : NodeFilter.FILTER_REJECT;
+        },
+      });
+      let text = "";
+      while (walker.nextNode()) {
+        const node = walker.currentNode;
+        const value = String(node.nodeValue || "").replace(/\u00a0/g, " ");
+        const start = text.length;
+        text += value;
+        spans.push({ node, start, end: text.length, text: value });
+      }
+      return { text, spans };
+    };
+
+    const findTimeTokenRangeAfterOffset = (text, fromOffset, timeToken) => {
+      const token = cleanText(timeToken);
+      if (!token) return null;
+      const normalizedToken = token.replace(/^(\d):/, "0$1:");
+      const source = String(text || "");
+      const startFrom = Math.max(0, Number(fromOffset) || 0);
+      const re = /(\d{1,2}):(\d{2}):(\d{2})(?::(\d{1,3}))?/g;
+      let match = null;
+      re.lastIndex = startFrom;
+      while ((match = re.exec(source))) {
+        const candidate = `${String(toInt(match[1]) || 0).padStart(2, "0")}:${String(
+          toInt(match[2]) || 0,
+        ).padStart(2, "0")}:${String(toInt(match[3]) || 0).padStart(
+          2,
+          "0",
+        )}:${String(Math.max(0, toInt(match[4]) || 0)).padStart(3, "0")}`;
+        if (candidate === normalizedToken) {
+          const start = Number(match.index);
+          const end = start + String(match[0] || "").length;
+          return { start, end };
+        }
+      }
+      return null;
+    };
+
+    const noteBodies = Array.from(root.querySelectorAll(".village-note-body"));
+    noteBodies.forEach((noteBody, noteIndex) => {
+      const { text: noteTextRaw, spans } = collectTextNodeSpans(noteBody);
+      const noteText = String(noteTextRaw || "").replace(/\u00a0/g, " ");
+      if (!/время\s*прибытия/i.test(noteText)) return;
+
+      const markerRe = /время\s*прибытия\s*:?\s*/gi;
+      let markerMatch = null;
+      while ((markerMatch = markerRe.exec(noteText))) {
+        const markerStart = Number(markerMatch.index);
+        const markerEnd = markerStart + String(markerMatch[0] || "").length;
+        const afterMarker = cleanText(noteText.slice(markerEnd, markerEnd + 220));
+        const parsedDate = parseMessageArrivalDatePayload(afterMarker);
+        if (!parsedDate || !Number.isFinite(parsedDate.etaEpochMs)) continue;
+
+        const beforeMarker = cleanText(
+          noteText.slice(Math.max(0, markerStart - 360), markerStart),
+        );
+        const lineText = cleanText(
+          noteText.slice(Math.max(0, markerStart - 220), markerEnd + 220),
+        );
+        const originCoordRaw = getLastCoordKeyFromText(beforeMarker);
+        const unit =
+          detectUnitFromText(beforeMarker) || detectUnitFromText(lineText);
+        const commandIcons = Array.from(noteBody.querySelectorAll("img[src]"))
+          .map((img) => cleanText(img.getAttribute("src")))
+          .filter(Boolean);
+        const commandTypeByIcon =
+          commandIcons
+            .map((src) => detectCommandTypeByIcon(src))
+            .find((type) => type && type !== "other") || "support";
+        const unitIconsByKey = {};
+        const detectedUnits = unit ? [unit] : [];
+        if (unit) unitIconsByKey[unit] = getUnitIconFallback(unit);
+        const targetCoordObj = parseCoord(targetCoord);
+        const originCoordObj = parseCoord(originCoordRaw);
+        const etaEpochMs = parsedDate.etaEpochMs;
+        const arrivalMs = Number.isFinite(parsedDate.arrivalMs)
+          ? parsedDate.arrivalMs
+          : null;
+        const timerSeconds = Math.max(
+          0,
+          Math.round((etaEpochMs - getServerNowMs()) / 1000),
+        );
+        const player = cleanText(parsedDate.attackerName) || "unknown";
+        const incomingId = `iv_note_${hashString(
+          `${targetCoord || "?"}|${originCoordRaw || "?"}|${etaEpochMs}|${Math.max(
+            0,
+            toInt(arrivalMs) || 0,
+          )}|${noteIndex}|${markerStart}|${lineText}`,
+        )}`;
+        const timeRange = findTimeTokenRangeAfterOffset(
+          noteText,
+          markerEnd,
+          parsedDate.timeToken,
+        );
+        const nodeRange = timeRange
+          ? mapTextOffsetToNodeRange(spans, timeRange.start, timeRange.end)
+          : null;
+
+        items.push({
+          id: incomingId,
+          commandType: commandTypeByIcon,
+          displayType: commandTypeByIcon,
+          commandLabel: lineText || beforeMarker || "заметка",
+          kindText: unit ? getUnitLabel(unit) : null,
+          target: targetTitle || targetCoord || "?",
+          targetCoord: targetCoord || null,
+          targetVillageId:
+            cleanText(
+              getUrlParam(location.href, "i") ||
+                getUrlParam(location.href, "id") ||
+                getUrlParam(location.href, "village"),
+            ) || null,
+          origin: originCoordRaw || "unknown",
+          originCoord: originCoordRaw || null,
+          originVillageId: null,
+          player,
+          playerId: null,
+          distance: calcDistance(originCoordObj, targetCoordObj),
+          commandId: null,
+          sourceCommandId: null,
+          commandUrl: null,
+          arrivalText: formatArrivalTextFromEpochMs(etaEpochMs),
+          arrivalMs,
+          arrivalEpochMs: etaEpochMs,
+          arrivalEpochSource: "info_village_note",
+          timerText: formatCountdown(timerSeconds),
+          timerSeconds,
+          guessedUnit: unit || null,
+          guessedUnitIcon: unit ? getUnitIconFallback(unit) : null,
+          squadUnits: {},
+          detectedUnits,
+          unitIconsByKey,
+        });
+        anchors.push({
+          incomingId,
+          hostElement:
+            nodeRange && nodeRange.node && nodeRange.node.parentElement
+              ? nodeRange.node.parentElement
+              : noteBody,
+          sourceNode: nodeRange ? nodeRange.node : null,
+          lineOffsetStart: nodeRange ? nodeRange.start : null,
+          lineOffsetEnd: nodeRange ? nodeRange.end : null,
+          timeToken: cleanText(parsedDate.timeToken) || null,
+          originCoord: originCoordRaw || null,
+          targetCoord: targetCoord || null,
+          player,
+          line: lineText || beforeMarker || null,
+          sourceKind: "info_village_note",
+        });
+      }
+    });
 
     const uniqueItems = [];
     const uniqueItemsBySignature = new Map();
@@ -19666,6 +19852,9 @@ ${panelHtml}`;
           ? entry.hostElement
           : null;
       if (!host) return false;
+      if (cleanText(entry && entry.sourceKind) === "info_village_note") {
+        return Boolean(host.closest && host.closest(".village-note-body"));
+      }
       const container = host.closest
         ? host.closest(
             "#commands_outgoings, .commands-container[data-type='towards_village']",
