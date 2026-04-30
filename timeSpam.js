@@ -1112,8 +1112,7 @@ javascript:(function(){
         let villageOwnerByCoordPromise = null;
         let activeTabIndex = 0;
         let tabStates = [];
-        let templates = []; // [{name: 'Rush', units: {ram:5, catapult:3}, active: true}]
-        let activeTemplateIds = new Set();
+        let templates = []; // runtime templates for active tab only
 
         function getDefaultTabName(idx = 0) {
             return `вкладка ${idx + 1}`;
@@ -1136,6 +1135,26 @@ javascript:(function(){
             }).filter(t => Object.keys(t.units).length > 0);
         }
 
+        function getTemplateActiveIndicesFromTemplates(list) {
+            const arr = Array.isArray(list) ? list : [];
+            const out = [];
+            arr.forEach((t, idx) => {
+                if (t && t.active !== false) out.push(idx);
+            });
+            return out;
+        }
+
+        function applyActiveIndicesToTemplates(list, activeIndices) {
+            const normalized = normalizeTemplates(list);
+            if (!normalized.length) return [];
+            const set = new Set(normalizeTemplateActiveIndices(activeIndices, normalized.length));
+            return normalized.map((t, idx) => ({
+                name: cleanText(t?.name) || `Шаблон ${idx + 1}`,
+                units: { ...(t?.units || {}) },
+                active: set.has(idx)
+            }));
+        }
+
         function createDefaultTabState(idx = 0) {
             return {
                 name: getDefaultTabName(idx),
@@ -1155,6 +1174,7 @@ javascript:(function(){
                 openInNewTab: false,
                 noblePretimeWindows: [],
                 groupId: '0',
+                templates: [],
                 templateActiveIndices: []
             };
         }
@@ -1173,8 +1193,9 @@ javascript:(function(){
             return out.sort((a, b) => a - b);
         }
 
-        function normalizeTabState(raw, idx, templateCount, oldActiveIds = []) {
+        function normalizeTabState(raw, idx, legacyTemplates = [], oldActiveIds = []) {
             const base = createDefaultTabState(idx);
+            const legacyList = normalizeTemplates(legacyTemplates);
             if (raw && typeof raw === 'object') {
                 const coordsRaw = Array.isArray(raw.coords) ? raw.coords : [];
                 const windowsRaw = Array.isArray(raw.timeWindows) ? raw.timeWindows : [];
@@ -1202,14 +1223,23 @@ javascript:(function(){
                 base.openInNewTab = !!raw.openInNewTab;
                 base.noblePretimeWindows = pretimeRaw.map(normalizeNoblePretimeEntry).filter(Boolean);
                 base.groupId = cleanText(raw.groupId) || '0';
-                if (Array.isArray(raw.templateActiveIndices)) {
-                    base.templateActiveIndices = normalizeTemplateActiveIndices(raw.templateActiveIndices, templateCount);
-                } else if (idx === 0 && oldActiveIds.length) {
-                    base.templateActiveIndices = normalizeTemplateActiveIndices(oldActiveIds, templateCount);
+                const hasOwnTemplates = Array.isArray(raw.templates) && raw.templates.length > 0;
+                if (hasOwnTemplates) {
+                    base.templates = normalizeTemplates(raw.templates);
+                    if (Array.isArray(raw.templateActiveIndices)) {
+                        base.templates = applyActiveIndicesToTemplates(base.templates, raw.templateActiveIndices);
+                    }
+                } else if (legacyList.length) {
+                    const legacyActive = Array.isArray(raw.templateActiveIndices)
+                        ? raw.templateActiveIndices
+                        : (idx === 0 ? oldActiveIds : []);
+                    base.templates = applyActiveIndicesToTemplates(legacyList, legacyActive);
                 }
-            } else if (idx === 0 && oldActiveIds.length) {
-                base.templateActiveIndices = normalizeTemplateActiveIndices(oldActiveIds, templateCount);
+            } else if (legacyList.length) {
+                const fallbackActive = idx === 0 ? oldActiveIds : [];
+                base.templates = applyActiveIndicesToTemplates(legacyList, fallbackActive);
             }
+            base.templateActiveIndices = getTemplateActiveIndicesFromTemplates(base.templates);
             return base;
         }
 
@@ -1221,8 +1251,7 @@ javascript:(function(){
         }
 
         function getTemplateActiveSetForCurrentTab() {
-            const tab = getCurrentTabState();
-            return new Set(normalizeTemplateActiveIndices(tab.templateActiveIndices, templates.length));
+            return new Set(getTemplateActiveIndicesFromTemplates(templates));
         }
 
         function isTemplateActiveForCurrentTab(idx) {
@@ -1230,25 +1259,11 @@ javascript:(function(){
         }
 
         function setTemplateActiveForCurrentTab(idx, isActive) {
+            const safeIdx = Math.max(0, toInt(idx));
+            if (!templates[safeIdx]) return;
+            templates[safeIdx].active = !!isActive;
             const tab = getCurrentTabState();
-            const set = new Set(normalizeTemplateActiveIndices(tab.templateActiveIndices, templates.length));
-            if (isActive) set.add(idx);
-            else set.delete(idx);
-            tab.templateActiveIndices = Array.from(set).sort((a, b) => a - b);
-            activeTemplateIds = new Set(tab.templateActiveIndices);
-        }
-
-        function shiftTemplateIndicesAfterDelete(deletedIdx) {
-            const deleted = Math.max(0, toInt(deletedIdx));
-            tabStates = tabStates.map((tab, idx) => {
-                const normalized = normalizeTabState(tab, idx, templates.length + 1);
-                normalized.templateActiveIndices = normalized.templateActiveIndices
-                    .filter(i => i !== deleted)
-                    .map(i => i > deleted ? i - 1 : i)
-                    .filter(i => i >= 0 && i < templates.length);
-                return normalized;
-            });
-            activeTemplateIds = getTemplateActiveSetForCurrentTab();
+            tab.templateActiveIndices = getTemplateActiveIndicesFromTemplates(templates);
         }
 
         function applyTabStateToRuntime(tab) {
@@ -1275,7 +1290,10 @@ javascript:(function(){
             noblePretimeWindows = (Array.isArray(tab.noblePretimeWindows) ? tab.noblePretimeWindows : [])
                 .map(normalizeNoblePretimeEntry)
                 .filter(Boolean);
-            activeTemplateIds = getTemplateActiveSetForCurrentTab();
+            templates = normalizeTemplates(tab?.templates);
+            if (!templates.length && Array.isArray(tab?.templateActiveIndices) && tab?.templates?.length) {
+                templates = applyActiveIndicesToTemplates(tab.templates, tab.templateActiveIndices);
+            }
         }
 
         function persistRuntimeToCurrentTab() {
@@ -1312,22 +1330,21 @@ javascript:(function(){
                 .filter(Boolean);
             const groupSel = document.getElementById('ts-group');
             if (groupSel) tab.groupId = String(groupSel.value || '0');
-            tab.templateActiveIndices = Array.from(getTemplateActiveSetForCurrentTab()).sort((a, b) => a - b);
+            tab.templates = normalizeTemplates(templates);
+            tab.templateActiveIndices = getTemplateActiveIndicesFromTemplates(tab.templates);
             tab.name = cleanText(tab.name) || getDefaultTabName(activeTabIndex);
         }
 
         function applyTemplatesFromConfig(config, rerender = false) {
-            templates = normalizeTemplates(config?.templates);
-            const oldActiveIds = templates
-                .map((t, i) => (t?.active !== false ? i : null))
-                .filter(v => v != null);
+            const legacyTemplates = normalizeTemplates(config?.templates);
+            const oldActiveIds = getTemplateActiveIndicesFromTemplates(legacyTemplates);
 
             const rawTabs = Array.isArray(config?.tabs) ? config.tabs : [];
             const tabs = [];
             for (let i = 0; i < TABS_COUNT; i++) {
                 const rawTab = rawTabs[i];
                 if (rawTab) {
-                    tabs.push(normalizeTabState(rawTab, i, templates.length, oldActiveIds));
+                    tabs.push(normalizeTabState(rawTab, i, legacyTemplates, oldActiveIds));
                     continue;
                 }
                 if (i === 0 && config && !rawTabs.length) {
@@ -1349,11 +1366,15 @@ javascript:(function(){
                         openInNewTab: config.openInNewTab,
                         noblePretimeWindows: Array.isArray(config.noblePretimeWindows) ? config.noblePretimeWindows : [],
                         groupId: config.groupId,
+                        templates: legacyTemplates,
                         templateActiveIndices: oldActiveIds
                     };
-                    tabs.push(normalizeTabState(legacy, i, templates.length, oldActiveIds));
+                    tabs.push(normalizeTabState(legacy, i, legacyTemplates, oldActiveIds));
                 } else {
-                    tabs.push(normalizeTabState(null, i, templates.length, oldActiveIds));
+                    const fallbackRaw = legacyTemplates.length
+                        ? { templates: legacyTemplates, templateActiveIndices: [] }
+                        : null;
+                    tabs.push(normalizeTabState(fallbackRaw, i, legacyTemplates, oldActiveIds));
                 }
             }
             tabStates = tabs;
@@ -1370,10 +1391,11 @@ javascript:(function(){
             syncRuntimeFromUI();
             persistRuntimeToCurrentTab();
             const tab = getCurrentTabState();
+            const legacyTemplatesMirror = normalizeTemplates(tabStates[0]?.templates || []);
             const config = {
                 activeTabIndex,
-                tabs: tabStates.map((t, i) => normalizeTabState(t, i, templates.length)),
-                templates,
+                tabs: tabStates.map((t, i) => normalizeTabState(t, i)),
+                templates: legacyTemplatesMirror,
                 // legacy mirrors for backward compatibility
                 coords: tab.coords,
                 timeWindows: tab.timeWindows,
@@ -1403,7 +1425,6 @@ javascript:(function(){
                     tabStates = Array.from({ length: TABS_COUNT }, (_, i) => createDefaultTabState(i));
                     activeTabIndex = 0;
                     templates = [];
-                    activeTemplateIds = new Set();
                     applyTabStateToRuntime(getCurrentTabState());
                     return null;
                 }
@@ -1420,7 +1441,6 @@ javascript:(function(){
                 tabStates = Array.from({ length: TABS_COUNT }, (_, i) => createDefaultTabState(i));
                 activeTabIndex = 0;
                 templates = [];
-                activeTemplateIds = new Set();
                 applyTabStateToRuntime(getCurrentTabState());
                 return null;
             }
@@ -2330,13 +2350,7 @@ javascript:(function(){
                 tabStates = Array.from({ length: TABS_COUNT }, (_, i) => createDefaultTabState(i));
             }
 
-            if (Array.isArray(payload.parsedTemplates) && payload.parsedTemplates.length > 0) {
-                templates = normalizeTemplates(payload.parsedTemplates);
-                tabStates = Array.from({ length: TABS_COUNT }, (_, i) => normalizeTabState(tabStates[i], i, templates.length));
-                tabStates.forEach(tab => { tab.templateActiveIndices = []; });
-            }
-
-            const tab = normalizeTabState(tabStates[safeTabIndex], safeTabIndex, templates.length);
+            const tab = normalizeTabState(tabStates[safeTabIndex], safeTabIndex);
             if (cleanText(payload.tabName)) tab.name = cleanText(payload.tabName);
             tab.coords = (Array.isArray(payload.coords) ? payload.coords : [])
                 .map(c => cleanText(c))
@@ -2359,12 +2373,16 @@ javascript:(function(){
             tab.noblePretimeEnabled = !!payload.noblePretimeEnabled;
             tab.noblePretimeWindowMinutes = Math.max(1, toInt(payload.noblePretimeWindowMinutes) || 3);
             tab.noblePretimeWindows = [];
-            tab.templateActiveIndices = normalizeTemplateActiveIndices(payload.activeTemplateIndices, templates.length);
+            if (Array.isArray(payload.parsedTemplates) && payload.parsedTemplates.length > 0) {
+                const importedTemplates = normalizeTemplates(payload.parsedTemplates);
+                const importedActive = normalizeTemplateActiveIndices(payload.activeTemplateIndices, importedTemplates.length);
+                tab.templates = applyActiveIndicesToTemplates(importedTemplates, importedActive);
+            }
+            tab.templateActiveIndices = getTemplateActiveIndicesFromTemplates(tab.templates);
 
-            tabStates[safeTabIndex] = tab;
+            tabStates[safeTabIndex] = normalizeTabState(tab, safeTabIndex);
             activeTabIndex = safeTabIndex;
-            applyTabStateToRuntime(tab);
-            activeTemplateIds = getTemplateActiveSetForCurrentTab();
+            applyTabStateToRuntime(tabStates[safeTabIndex]);
             if (document.getElementById('ts-panel')) {
                 applyActiveTabToUI();
             }
@@ -4247,6 +4265,11 @@ javascript:(function(){
                                 capByTarget[tKey] = cnt + 1;
                                 nearest30.push(item);
                             });
+                            if (nearest30.length === 0) {
+                                // If all rows were filtered only by per-target cap, still show nearest variants
+                                // so the user sees timing options instead of an empty modal.
+                                nearestCandidates.slice(0, 30).forEach(item => nearest30.push(item));
+                            }
                             showNearestWindow(nearest30);
                             if (noblePretimeEnabled) setNoblePretimeProgress(true, 1, 1, `Пересчёт завершён: ближайших вариантов ${nearest30.length}`);
                             return { status: 'no_immediate', resultsCount: 0, uniqueCount: 0, nearestCount: nearest30.length };
@@ -4496,7 +4519,8 @@ javascript:(function(){
                 if (isNaN(idx) || !templates[idx]) return;
                 if (delBtn) {
                     templates.splice(idx, 1);
-                    shiftTemplateIndicesAfterDelete(idx);
+                    const tab = getCurrentTabState();
+                    tab.templateActiveIndices = getTemplateActiveIndicesFromTemplates(templates);
                     renderTemplates();
                     renderUnitsRow();
                     saveConfig();
