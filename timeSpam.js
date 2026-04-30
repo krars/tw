@@ -17,6 +17,7 @@ javascript:(function(){
         const PRETIME_FETCH_DELAY_MS = 400;
         const TABS_COUNT = 4;
         const SUPPORT_CYCLE_KEY = '__timespam_support_cycle_v1';
+        const CONFIRM_CTX_KEY = '__timespam_confirm_ctx_v1';
 
         // Cache utility
         const UNITS_URL_PATTERN = 'mode=units';
@@ -761,6 +762,201 @@ javascript:(function(){
             try { sessionStorage.removeItem(SUPPORT_CYCLE_KEY); } catch(e) {}
         }
 
+        function readConfirmContext() {
+            try {
+                const raw = sessionStorage.getItem(CONFIRM_CTX_KEY);
+                if (!raw) return null;
+                const parsed = JSON.parse(raw);
+                if (!parsed || typeof parsed !== 'object') return null;
+                const ts = Number(parsed.ts);
+                if (!Number.isFinite(ts) || ts <= 0) return null;
+                return {
+                    ts,
+                    targetCoord: cleanText(parsed.targetCoord),
+                    windowLabel: cleanText(parsed.windowLabel),
+                    targetDateYmd: cleanText(parsed.targetDateYmd),
+                    noblePretimeEnabled: !!parsed.noblePretimeEnabled
+                };
+            } catch(e) {
+                return null;
+            }
+        }
+
+        function saveConfirmContext(ctx) {
+            try {
+                const payload = {
+                    ts: Date.now(),
+                    targetCoord: cleanText(ctx?.targetCoord),
+                    windowLabel: cleanText(ctx?.windowLabel),
+                    targetDateYmd: cleanText(ctx?.targetDateYmd),
+                    noblePretimeEnabled: !!ctx?.noblePretimeEnabled
+                };
+                sessionStorage.setItem(CONFIRM_CTX_KEY, JSON.stringify(payload));
+            } catch(e) {}
+        }
+
+        function clearConfirmContext() {
+            try { sessionStorage.removeItem(CONFIRM_CTX_KEY); } catch(e) {}
+        }
+
+        function parseWindowLabelToRange(label) {
+            const raw = cleanText(label);
+            if (!raw) return null;
+            const m = raw.match(/([0-9]{2}:[0-9]{2}:[0-9]{2})\s*[—-]\s*([0-9]{2}:[0-9]{2}:[0-9]{2})/);
+            if (!m) return null;
+            const from = cleanText(m[1]);
+            const to = cleanText(m[2]);
+            if (parseClockToSec(from) == null || parseClockToSec(to) == null) return null;
+            return { from, to };
+        }
+
+        function parseConfirmArrivalMsFromPage() {
+            const parseFromText = (txt) => {
+                const text = String(txt || '').replace(/\u00a0/g, ' ');
+                const fullMatch = text.match(/(\d{1,2}\.\d{1,2}\.\d{2,4}\s+\d{1,2}:\d{2}:\d{2}(?:[:.,]\d{1,3})?)/);
+                if (fullMatch) {
+                    const ms = parseNoblePretimeTimestampToMs(cleanText(fullMatch[1]));
+                    if (Number.isFinite(ms) && ms > 0) return Math.round(ms);
+                }
+                const timeMatch = text.match(/(\d{1,2}:\d{2}:\d{2}(?:[:.,]\d{1,3})?)/);
+                if (timeMatch) {
+                    const ms = parseNoblePretimeTimestampToMs(cleanText(timeMatch[1]));
+                    if (Number.isFinite(ms) && ms > 0) return Math.round(ms);
+                }
+                return null;
+            };
+
+            const relNode = document.querySelector('#date_arrival .relative_time[data-duration], .relative_time[data-duration]');
+            const relDur = toInt(relNode?.getAttribute('data-duration'));
+            if (relDur > 0) {
+                const ms = getServerTimeMs() + relDur * 1000;
+                if (Number.isFinite(ms) && ms > 0) return Math.round(ms);
+            }
+
+            const numericInputs = [
+                'input[name="arrival_time"]',
+                'input[name="arrival"]',
+                'input[name*="arrival"]',
+                'input[id*="arrival"]'
+            ];
+            for (const sel of numericInputs) {
+                const el = document.querySelector(sel);
+                const val = cleanText(el?.value || el?.getAttribute('value') || '');
+                if (!/^\d{9,}$/.test(val)) continue;
+                const num = Number(val);
+                if (!Number.isFinite(num) || num <= 0) continue;
+                if (num > 1e12) return Math.round(num);
+                if (num > 1e9) return Math.round(num * 1000);
+            }
+
+            const directSelectors = [
+                '#date_arrival',
+                '.date_arrival',
+                '[id*="arrival"]',
+                '[class*="arrival"]'
+            ];
+            for (const sel of directSelectors) {
+                const els = Array.from(document.querySelectorAll(sel));
+                for (const el of els) {
+                    const ms = parseFromText(el?.textContent || '');
+                    if (Number.isFinite(ms) && ms > 0) return ms;
+                }
+            }
+
+            const rows = Array.from(document.querySelectorAll('table.vis tr, .vis tr, tr'));
+            for (const row of rows) {
+                const rowText = cleanText(row?.textContent || '');
+                if (!/(прибыт|arrival|доходит)/i.test(rowText)) continue;
+                const ms = parseFromText(rowText);
+                if (Number.isFinite(ms) && ms > 0) return ms;
+            }
+
+            return null;
+        }
+
+        function isArrivalInsideWindow(arrivalSec, fromSec, toSec) {
+            if (fromSec == null || toSec == null) return false;
+            if (toSec >= fromSec) return arrivalSec >= fromSec && arrivalSec <= toSec;
+            return arrivalSec >= fromSec || arrivalSec <= toSec;
+        }
+
+        function isArrivalEarlierThanWindow(arrivalSec, fromSec, toSec) {
+            if (fromSec == null || toSec == null) return false;
+            if (isArrivalInsideWindow(arrivalSec, fromSec, toSec)) return false;
+            if (toSec >= fromSec) return arrivalSec < fromSec;
+            return true; // for wrap windows, gap between "to" and "from" treated as early to next start
+        }
+
+        function getExpectedWindowsForConfirmTarget(tab, targetCoord, confirmCtx) {
+            const windows = [];
+            const ctxRange = parseWindowLabelToRange(confirmCtx?.windowLabel || '');
+            if (ctxRange && cleanText(confirmCtx?.targetCoord) === targetCoord) {
+                windows.push(ctxRange);
+            }
+            if (windows.length) return windows;
+
+            if (!!tab?.noblePretimeEnabled) {
+                const fromCoordsMap = buildCoordPretimeMap(Array.isArray(tab?.coords) ? tab.coords : []);
+                const fromCoords = fromCoordsMap[targetCoord];
+                if (fromCoords && parseClockToSec(fromCoords.from) != null && parseClockToSec(fromCoords.to) != null) {
+                    return [{ from: fromCoords.from, to: fromCoords.to }];
+                }
+                const saved = (Array.isArray(tab?.noblePretimeWindows) ? tab.noblePretimeWindows : [])
+                    .map(normalizeNoblePretimeEntry)
+                    .filter(Boolean)
+                    .find(x => cleanText(x.coord) === targetCoord);
+                if (saved && parseClockToSec(saved.from) != null && parseClockToSec(saved.to) != null) {
+                    return [{ from: saved.from, to: saved.to }];
+                }
+                return [];
+            }
+
+            return (Array.isArray(tab?.timeWindows) ? tab.timeWindows : [])
+                .map(w => ({ from: cleanText(w?.from), to: cleanText(w?.to) }))
+                .filter(w => parseClockToSec(w.from) != null && parseClockToSec(w.to) != null);
+        }
+
+        function markTargetAsSigilInActiveTab(targetCoord) {
+            const tab = getCurrentTabState();
+            const source = normalizeCoordsArray(Array.isArray(tab?.coords) ? tab.coords : []);
+            if (!source.length) return false;
+
+            const hasGlobal = source.some(row => parseCoordSigilInfo(row).isGlobal);
+            if (hasGlobal) return false;
+
+            let changed = false;
+            let found = false;
+            const updated = source.map(row => {
+                const info = parseCoordSigilInfo(row);
+                const coord = cleanText(info.cleanCoordText);
+                if (!coord) return row;
+                if (coord !== targetCoord) return row;
+                found = true;
+                if (info.hasSigil) return row;
+                changed = true;
+                return buildCoordEntryText(coord, '', true, info.lastSnobAtMs, info.lastSnobRaw);
+            });
+
+            if (!found) {
+                updated.push(`${targetCoord}!`);
+                changed = true;
+            }
+            if (!changed) return false;
+
+            tab.coords = updated;
+            saveConfig();
+            return true;
+        }
+
+        function goBackAfterEarlyConfirm() {
+            const step = history.length > 2 ? -2 : -1;
+            try {
+                history.go(step);
+            } catch(e) {
+                try { history.back(); } catch(err) {}
+            }
+        }
+
         function getSupportPageKey() {
             const params = new URLSearchParams(location.search);
             const screen = cleanText(params.get('screen'));
@@ -802,6 +998,57 @@ javascript:(function(){
             const tryMode = cleanText(params.get('try'));
             if (screen !== 'place' || tryMode !== 'confirm') return false;
 
+            const x = cleanText(params.get('x') || document.querySelector('input[name="x"]')?.value || '');
+            const y = cleanText(params.get('y') || document.querySelector('input[name="y"]')?.value || '');
+            const targetCoord = (x && y) ? `${toInt(x)}|${toInt(y)}` : '';
+
+            loadConfig();
+            const tab = getCurrentTabState();
+            const confirmCtx = readConfirmContext();
+            const ctxFresh = !!confirmCtx && (Date.now() - Number(confirmCtx.ts || 0)) < 30 * 60 * 1000;
+            const windows = targetCoord ? getExpectedWindowsForConfirmTarget(tab, targetCoord, ctxFresh ? confirmCtx : null) : [];
+            const arrivalMs = parseConfirmArrivalMsFromPage();
+
+            if (targetCoord && Number.isFinite(arrivalMs) && arrivalMs > 0 && windows.length > 0) {
+                const targetDate = normalizeDateYmd(tab?.targetDateYmd, formatServerDateYmd());
+                const useDateFilter = !!tab?.dateFilterEnabled;
+                const arrivalDate = formatServerDateYmd(arrivalMs);
+                const arrivalSec = getServerSecondsSinceMidnightFromMs(arrivalMs);
+                let isEarly = false;
+                let inWindow = false;
+
+                if (useDateFilter && arrivalDate < targetDate) {
+                    isEarly = true;
+                } else if (!(useDateFilter && arrivalDate > targetDate)) {
+                    for (const w of windows) {
+                        const fromSec = parseClockToSec(w.from);
+                        const toSec = parseClockToSec(w.to);
+                        if (fromSec == null || toSec == null) continue;
+                        if (isArrivalInsideWindow(arrivalSec, fromSec, toSec)) {
+                            inWindow = true;
+                            break;
+                        }
+                    }
+                    if (!inWindow) {
+                        isEarly = windows.some(w => {
+                            const fromSec = parseClockToSec(w.from);
+                            const toSec = parseClockToSec(w.to);
+                            return isArrivalEarlierThanWindow(arrivalSec, fromSec, toSec);
+                        });
+                    }
+                }
+
+                if (isEarly) {
+                    const changed = markTargetAsSigilInActiveTab(targetCoord);
+                    clearConfirmContext();
+                    showNotice(changed
+                        ? `Прилёт раньше окна: ${targetCoord} помечена "!" и выполнен возврат назад`
+                        : 'Прилёт раньше окна: выполнен возврат назад', 'warn', 3200);
+                    goBackAfterEarlyConfirm();
+                    return true;
+                }
+            }
+
             const target = document.activeElement || document.body || document.documentElement;
             const fire = (el, type) => {
                 if (!el || typeof el.dispatchEvent !== 'function') return;
@@ -836,6 +1083,7 @@ javascript:(function(){
                 }
             }, 80);
 
+            clearConfirmContext();
             showNotice('Подтверждение: отправлен Enter', 'info', 1800);
             return true;
         }
@@ -3513,6 +3761,12 @@ javascript:(function(){
                                 console.log(`%c>>> Уже на нужной странице! Оставлено ${uniqueResults.length} отправок в очереди`, 'font-size:14px;font-weight:bold;color:green');
                             } else {
                                 const fullUrl = `${location.origin}${location.pathname}?${r.sendUrl}`;
+                                saveConfirmContext({
+                                    targetCoord: r.targetCoord,
+                                    windowLabel: r.windowLabel,
+                                    targetDateYmd: '',
+                                    noblePretimeEnabled: !!noblePretimeEnabled
+                                });
                                 console.log(`%c>>> Отправлено ${uniqueResults.length} ссылок, переходим в этой вкладке: ${fullUrl}`, 'font-size:14px;font-weight:bold;color:red');
                                 navigateToSend(fullUrl, openInNewTab);
                             }
@@ -4036,6 +4290,12 @@ javascript:(function(){
                                 console.log(`%c>>> Уже на нужной странице! Оставлено ${uniqueResults.length} отправок`, 'font-size:14px;font-weight:bold;color:green');
                             } else {
                                 const fullUrl = `${location.origin}${location.pathname}?${r.sendUrl}`;
+                                saveConfirmContext({
+                                    targetCoord: r.targetCoord,
+                                    windowLabel: r.windowLabel,
+                                    targetDateYmd: useDateFilter ? targetDate : '',
+                                    noblePretimeEnabled: !!noblePretimeEnabled
+                                });
                                 console.log(`%c>>> ${uniqueResults.length} ссылок, переходим в этой вкладке: ${fullUrl}`, 'font-size:14px;font-weight:bold;color:red');
                                 navigateToSend(fullUrl, openInNewTab);
                                 navigated = true;
