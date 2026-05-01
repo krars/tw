@@ -14,6 +14,7 @@
     incomingType: "unignored",
     incomingSubtype: "attacks",
     requestDelayMs: 700,
+    fallbackToVillageAssignment: true,
   };
 
   var LOG_PREFIX = "[groups.js]";
@@ -271,14 +272,173 @@
         { ajaxaction: "add_coordinates" },
         { coordinates: uniqueCoords.join("\n"), group_id: group.id },
         function (response) {
-          console.log(LOG_PREFIX, "[OK]", "added", uniqueCoords.length, "coords to", group.name, response);
-          resolve({ ok: true, group: group, coords: uniqueCoords, response: response });
+          if (response && response.status) {
+            console.log(LOG_PREFIX, "[OK]", "added", uniqueCoords.length, "coords to", group.name, response);
+            resolve({ ok: true, group: group, coords: uniqueCoords, response: response });
+            return;
+          }
+
+          var message =
+            (response && (response.message || response.error)) ||
+            "server returned a falsy/non-success response";
+          console.error(LOG_PREFIX, "[FAIL]", "add_coordinates failed for", group.name, group.id, message, response);
+          resolve({
+            ok: false,
+            group: group,
+            coords: uniqueCoords,
+            message: message,
+            response: response,
+          });
         },
         function (error) {
           reject(error || new Error("add_coordinates failed for group " + group.name));
         },
       );
     });
+  }
+
+  function tribalGet(screen, params) {
+    return new Promise(function (resolve, reject) {
+      if (!window.TribalWars || typeof TribalWars.get !== "function") {
+        reject(new Error("TribalWars.get is not available"));
+        return;
+      }
+      TribalWars.get(
+        screen,
+        params || {},
+        function (response) {
+          resolve(response);
+        },
+        function (error) {
+          reject(error || new Error("GET failed: " + screen));
+        },
+      );
+    });
+  }
+
+  function tribalPost(screen, params, data) {
+    return new Promise(function (resolve, reject) {
+      if (!window.TribalWars || typeof TribalWars.post !== "function") {
+        reject(new Error("TribalWars.post is not available"));
+        return;
+      }
+      TribalWars.post(
+        screen,
+        params || {},
+        data || {},
+        function (response) {
+          resolve(response);
+        },
+        function (error) {
+          reject(error || new Error("POST failed: " + screen));
+        },
+      );
+    });
+  }
+
+  async function addVillagesToGroupByAssignment(targets, group, options) {
+    var uniqueTargets = [];
+    var seen = new Set();
+
+    (targets || []).forEach(function (target) {
+      if (!target || !target.villageId || seen.has(String(target.villageId))) return;
+      seen.add(String(target.villageId));
+      uniqueTargets.push(target);
+    });
+
+    if (!uniqueTargets.length) {
+      return { skipped: true, reason: "no_villages", group: group };
+    }
+
+    if ((options || {}).dryRun) {
+      console.log(
+        LOG_PREFIX,
+        "[DRY fallback]",
+        "would assign",
+        uniqueTargets.length,
+        "villages to",
+        group.name,
+        group.id,
+        uniqueTargets.map(function (target) {
+          return target.villageId + " " + target.coord;
+        }),
+      );
+      return { dryRun: true, fallback: true, group: group, targets: uniqueTargets };
+    }
+
+    var results = [];
+    for (var index = 0; index < uniqueTargets.length; index += 1) {
+      var target = uniqueTargets[index];
+      await sleep(CONFIG.requestDelayMs);
+
+      try {
+        var groupsResponse = await tribalGet("groups", {
+          ajax: "load_groups",
+          village_id: target.villageId,
+        });
+        var availableGroups = Array.isArray(groupsResponse && groupsResponse.result)
+          ? groupsResponse.result
+          : [];
+        var currentIds = availableGroups
+          .filter(function (item) {
+            return item && item.in_group;
+          })
+          .map(function (item) {
+            return String(item.group_id);
+          });
+        var hasTargetGroup = availableGroups.some(function (item) {
+          return item && String(item.group_id) === String(group.id);
+        });
+
+        if (!hasTargetGroup) {
+          results.push({
+            ok: false,
+            villageId: target.villageId,
+            coord: target.coord,
+            reason: "target_group_not_available_for_village",
+          });
+          console.warn(LOG_PREFIX, "[fallback skip]", target.villageId, target.coord, group.name, "not available");
+          continue;
+        }
+
+        var nextIds = Array.from(new Set(currentIds.concat(String(group.id))));
+        var data = {
+          village_id: target.villageId,
+          mode: "village",
+          "groups[]": nextIds,
+        };
+        var saveResponse = await tribalPost("groups", { ajaxaction: "village" }, data);
+        var ok = Boolean(saveResponse && saveResponse.result);
+        results.push({
+          ok: ok,
+          villageId: target.villageId,
+          coord: target.coord,
+          group: group,
+          response: saveResponse,
+        });
+        console.log(
+          LOG_PREFIX,
+          ok ? "[fallback OK]" : "[fallback FAIL]",
+          "[" + (index + 1) + "/" + uniqueTargets.length + "]",
+          target.villageId,
+          target.coord,
+          "->",
+          group.name,
+          saveResponse,
+        );
+      } catch (error) {
+        results.push({
+          ok: false,
+          villageId: target.villageId,
+          coord: target.coord,
+          group: group,
+          error: String((error && error.message) || error),
+        });
+        console.error(LOG_PREFIX, "[fallback ERR]", target.villageId, target.coord, error);
+      }
+    }
+
+    return { fallback: true, group: group, results: results };
   }
 
   async function collect() {
@@ -366,26 +526,52 @@
     }
 
     var results = [];
-    results.push(
-      await addCoordinatesToGroup(
-        report.focusTargets.map(function (target) {
-          return target.coord;
-        }),
-        report.focusGroup,
-        opts,
-      ),
+    var focusResult = await addCoordinatesToGroup(
+      report.focusTargets.map(function (target) {
+        return target.coord;
+      }),
+      report.focusGroup,
+      opts,
     );
-
-    if (report.interceptGroup) {
+    results.push(focusResult);
+    if (
+      !opts.dryRun &&
+      CONFIG.fallbackToVillageAssignment &&
+      focusResult &&
+      focusResult.ok === false
+    ) {
       results.push(
-        await addCoordinatesToGroup(
-          report.interceptTargets.map(function (target) {
-            return target.coord;
-          }),
-          report.interceptGroup,
+        await addVillagesToGroupByAssignment(
+          report.focusTargets,
+          report.focusGroup,
           opts,
         ),
       );
+    }
+
+    if (report.interceptGroup) {
+      var interceptResult = await addCoordinatesToGroup(
+        report.interceptTargets.map(function (target) {
+          return target.coord;
+        }),
+        report.interceptGroup,
+        opts,
+      );
+      results.push(interceptResult);
+      if (
+        !opts.dryRun &&
+        CONFIG.fallbackToVillageAssignment &&
+        interceptResult &&
+        interceptResult.ok === false
+      ) {
+        results.push(
+          await addVillagesToGroupByAssignment(
+            report.interceptTargets,
+            report.interceptGroup,
+            opts,
+          ),
+        );
+      }
     }
 
     window.ScriptMMGroups.lastResults = results;
