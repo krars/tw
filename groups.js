@@ -8,6 +8,7 @@
     autoRun: true,
     autoRunDelayMs: 1000,
     dryRun: false,
+    showProgressWindow: true,
     focusGroupId: null,
     interceptGroupId: null,
     focusGroupNames: ["FOCUS"],
@@ -21,6 +22,158 @@
   };
 
   var LOG_PREFIX = "[groups.js]";
+
+  function setStyles(element, styles) {
+    Object.keys(styles).forEach(function (key) {
+      element.style[key] = styles[key];
+    });
+  }
+
+  var ProgressUI = {
+    root: null,
+    status: null,
+    bar: null,
+    meta: null,
+    detail: null,
+
+    ensure: function () {
+      if (!CONFIG.showProgressWindow || !document.body) return;
+      if (this.root && document.body.contains(this.root)) return;
+
+      var oldRoot = document.getElementById("scriptmm-groups-progress");
+      if (oldRoot && oldRoot.parentNode) oldRoot.parentNode.removeChild(oldRoot);
+
+      var root = document.createElement("div");
+      root.id = "scriptmm-groups-progress";
+      setStyles(root, {
+        position: "fixed",
+        top: "64px",
+        right: "14px",
+        width: "340px",
+        zIndex: "99999",
+        background: "#f4e4bc",
+        border: "1px solid #7d510f",
+        boxShadow: "0 2px 12px rgba(0, 0, 0, 0.35)",
+        font: "12px Verdana, Arial, sans-serif",
+        color: "#2f210f",
+      });
+
+      var header = document.createElement("div");
+      setStyles(header, {
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        gap: "8px",
+        padding: "7px 9px",
+        background: "#c1a264",
+        borderBottom: "1px solid #7d510f",
+        fontWeight: "700",
+      });
+      var title = document.createElement("span");
+      title.textContent = "groups.js";
+      var stopButton = document.createElement("button");
+      stopButton.type = "button";
+      stopButton.textContent = "Стоп";
+      setStyles(stopButton, {
+        cursor: "pointer",
+        padding: "2px 8px",
+        border: "1px solid #7d510f",
+        background: "#f7e9c8",
+        color: "#2f210f",
+        font: "12px Verdana, Arial, sans-serif",
+      });
+      stopButton.addEventListener("click", function () {
+        CONFIG.stopRequested = true;
+        window.ScriptMMGroupsStop = true;
+        ProgressUI.setStatus("Остановка после текущего запроса...");
+      });
+      header.appendChild(title);
+      header.appendChild(stopButton);
+
+      var body = document.createElement("div");
+      setStyles(body, { padding: "9px" });
+
+      var status = document.createElement("div");
+      setStyles(status, { marginBottom: "7px", fontWeight: "700" });
+
+      var barBox = document.createElement("div");
+      setStyles(barBox, {
+        height: "14px",
+        background: "#d7c59b",
+        border: "1px solid #7d510f",
+        overflow: "hidden",
+      });
+      var bar = document.createElement("div");
+      setStyles(bar, {
+        width: "0%",
+        height: "100%",
+        background: "#2f8a3a",
+        transition: "width 0.2s ease",
+      });
+      barBox.appendChild(bar);
+
+      var meta = document.createElement("div");
+      setStyles(meta, { marginTop: "6px", color: "#533915" });
+      var detail = document.createElement("div");
+      setStyles(detail, {
+        marginTop: "6px",
+        maxHeight: "56px",
+        overflow: "hidden",
+        color: "#533915",
+      });
+
+      body.appendChild(status);
+      body.appendChild(barBox);
+      body.appendChild(meta);
+      body.appendChild(detail);
+      root.appendChild(header);
+      root.appendChild(body);
+      document.body.appendChild(root);
+
+      this.root = root;
+      this.status = status;
+      this.bar = bar;
+      this.meta = meta;
+      this.detail = detail;
+    },
+
+    setStatus: function (text) {
+      this.ensure();
+      if (this.status) this.status.textContent = cleanText(text);
+    },
+
+    setProgress: function (current, total, label) {
+      this.ensure();
+      current = Number(current) || 0;
+      total = Number(total) || 0;
+      var percent = total > 0 ? Math.max(0, Math.min(100, Math.round((current / total) * 100))) : 0;
+      if (this.bar) {
+        this.bar.style.background = "#2f8a3a";
+        this.bar.style.width = percent + "%";
+      }
+      if (this.meta) {
+        this.meta.textContent = total > 0
+          ? cleanText(label) + ": " + current + "/" + total + " (" + percent + "%)"
+          : cleanText(label || "");
+      }
+    },
+
+    setDetail: function (text) {
+      this.ensure();
+      if (this.detail) this.detail.textContent = cleanText(text);
+    },
+
+    done: function (text) {
+      this.setStatus(text || "Готово");
+      this.setProgress(1, 1, "Завершено");
+    },
+
+    error: function (error) {
+      this.setStatus("Ошибка");
+      this.setDetail((error && error.message) || error || "Неизвестная ошибка");
+      if (this.bar) this.bar.style.background = "#b33";
+    },
+  };
 
   function cleanText(value) {
     return String(value == null ? "" : value)
@@ -291,10 +444,16 @@
     }
 
     if ((options || {}).dryRun) {
+      ProgressUI.setStatus("Проверка без сохранения: " + group.name);
+      ProgressUI.setProgress(1, 1, "DRY " + group.name);
+      ProgressUI.setDetail("Координат: " + uniqueCoords.length);
       console.log(LOG_PREFIX, "[DRY]", "would add", uniqueCoords.length, "coords to", group.name, group.id, uniqueCoords);
       return { dryRun: true, group: group, coords: uniqueCoords };
     }
 
+    ProgressUI.setStatus("Добавляю координаты в " + group.name);
+    ProgressUI.setProgress(0, 1, group.name);
+    ProgressUI.setDetail("Координат: " + uniqueCoords.length);
     await sleep(CONFIG.requestDelayMs);
 
     return new Promise(function (resolve, reject) {
@@ -309,6 +468,8 @@
         { coordinates: uniqueCoords.join("\n"), group_id: group.id },
         function (response) {
           if (response && response.status) {
+            ProgressUI.setProgress(1, 1, group.name);
+            ProgressUI.setDetail("Добавлено координат: " + uniqueCoords.length);
             console.log(LOG_PREFIX, "[OK]", "added", uniqueCoords.length, "coords to", group.name, response);
             resolve({ ok: true, group: group, coords: uniqueCoords, response: response });
             return;
@@ -317,6 +478,8 @@
           var message =
             (response && (response.message || response.error)) ||
             "server returned a falsy/non-success response";
+          ProgressUI.setProgress(1, 1, group.name);
+          ProgressUI.setDetail("Пакетное добавление не прошло, будет fallback");
           console.error(LOG_PREFIX, "[FAIL]", "add_coordinates failed for", group.name, group.id, message, response);
           resolve({
             ok: false,
@@ -387,6 +550,9 @@
     }
 
     if ((options || {}).dryRun) {
+      ProgressUI.setStatus("Проверка fallback: " + group.name);
+      ProgressUI.setProgress(1, 1, "DRY fallback " + group.name);
+      ProgressUI.setDetail("Деревень: " + uniqueTargets.length);
       console.log(
         LOG_PREFIX,
         "[DRY fallback]",
@@ -402,14 +568,23 @@
       return { dryRun: true, fallback: true, group: group, targets: uniqueTargets };
     }
 
+    ProgressUI.setStatus("Fallback: добавляю деревни в " + group.name);
+    ProgressUI.setProgress(0, uniqueTargets.length, group.name);
+    ProgressUI.setDetail("0/" + uniqueTargets.length);
+
     var results = [];
     for (var index = 0; index < uniqueTargets.length; index += 1) {
       if (isStopRequested()) {
+        ProgressUI.setStatus("Остановлено");
+        ProgressUI.setDetail("Остановлено на " + index + "/" + uniqueTargets.length);
         console.warn(LOG_PREFIX, "[fallback stop]", "stopped before", index + 1, "of", uniqueTargets.length);
         break;
       }
 
       var target = uniqueTargets[index];
+      ProgressUI.setStatus("Fallback: " + group.name);
+      ProgressUI.setProgress(index, uniqueTargets.length, group.name);
+      ProgressUI.setDetail("Обрабатываю " + target.coord + " (" + target.villageId + ")");
       await sleep(CONFIG.requestDelayMs);
 
       try {
@@ -439,6 +614,8 @@
             reason: "target_group_not_available_for_village",
           });
           console.warn(LOG_PREFIX, "[fallback skip]", target.villageId, target.coord, group.name, "not available");
+          ProgressUI.setProgress(index + 1, uniqueTargets.length, group.name);
+          ProgressUI.setDetail("SKIP " + target.coord + ": группа недоступна");
           continue;
         }
 
@@ -470,6 +647,8 @@
           group.name,
           saveResponse,
         );
+        ProgressUI.setProgress(index + 1, uniqueTargets.length, group.name);
+        ProgressUI.setDetail((ok ? "OK " : "FAIL ") + target.coord + " -> " + group.name);
       } catch (error) {
         results.push({
           ok: false,
@@ -479,6 +658,8 @@
           error: String((error && error.message) || error),
         });
         console.error(LOG_PREFIX, "[fallback ERR]", target.villageId, target.coord, error);
+        ProgressUI.setProgress(index + 1, uniqueTargets.length, group.name);
+        ProgressUI.setDetail("ERR " + target.coord + ": " + ((error && error.message) || error));
       }
     }
 
@@ -498,9 +679,20 @@
       page: -1,
     });
 
+    ProgressUI.setStatus("Собираю входящие атаки");
+    ProgressUI.setProgress(0, 3, "Сбор данных");
+    ProgressUI.setDetail(incomingsUrl);
     var incomingDoc = await fetchDocument(incomingsUrl);
+    ProgressUI.setStatus("Собираю занятое население");
+    ProgressUI.setProgress(1, 3, "Сбор данных");
+    ProgressUI.setDetail(productionUrl);
     var productionDoc = await fetchDocument(productionUrl);
+    ProgressUI.setStatus("Загружаю список групп");
+    ProgressUI.setProgress(2, 3, "Сбор данных");
+    ProgressUI.setDetail("groups ajax=load_group_menu");
     var groups = await fetchGroups();
+    ProgressUI.setProgress(3, 3, "Сбор данных");
+    ProgressUI.setStatus("Разбираю данные");
 
     var nobleTargets = parseIncomingTargets(incomingDoc);
     var populationByVillageId = parseVillagePopulation(productionDoc);
@@ -540,9 +732,17 @@
 
   async function run(options) {
     if (isStopRequested()) {
-      throw new Error("ScriptMMGroups is stopped. Set ScriptMMGroupsStop=false and config.stopRequested=false to run again.");
+      var stoppedError = new Error("ScriptMMGroups is stopped. Set ScriptMMGroupsStop=false and config.stopRequested=false to run again.");
+      ProgressUI.error(stoppedError);
+      throw stoppedError;
     }
 
+    ProgressUI.ensure();
+    ProgressUI.setStatus("Старт");
+    ProgressUI.setProgress(0, 1, "Подготовка");
+    ProgressUI.setDetail("Ищу входящие с дворянами и группы");
+
+    try {
     var opts = Object.assign({ dryRun: CONFIG.dryRun }, options || {});
     var report = await collect();
     window.ScriptMMGroups.lastReport = report;
@@ -573,6 +773,17 @@
       );
     }
 
+    ProgressUI.setStatus("Цели найдены");
+    ProgressUI.setProgress(1, 1, "Разбор данных");
+    ProgressUI.setDetail(
+      "FOCUS: " +
+        report.focusTargets.length +
+        ", " +
+        (report.interceptGroup ? report.interceptGroup.name : "Перехват") +
+        ": " +
+        report.interceptTargets.length,
+    );
+
     var results = [];
     var focusResult = await addCoordinatesToGroup(
       report.focusTargets.map(function (target) {
@@ -588,6 +799,8 @@
       focusResult &&
       focusResult.ok === false
     ) {
+      ProgressUI.setStatus("FOCUS: пакетный метод не прошел");
+      ProgressUI.setDetail("Пробую сохранить группу по деревням");
       results.push(
         await addVillagesToGroupByAssignment(
           report.focusTargets,
@@ -612,6 +825,8 @@
         interceptResult &&
         interceptResult.ok === false
       ) {
+        ProgressUI.setStatus(report.interceptGroup.name + ": пакетный метод не прошел");
+        ProgressUI.setDetail("Пробую сохранить группу по деревням");
         results.push(
           await addVillagesToGroupByAssignment(
             report.interceptTargets,
@@ -629,7 +844,19 @@
       intercept: report.interceptTargets.length,
       results: results,
     });
+    ProgressUI.done(
+      "Готово: FOCUS " +
+        report.focusTargets.length +
+        ", " +
+        (report.interceptGroup ? report.interceptGroup.name : "Перехват") +
+        " " +
+        report.interceptTargets.length,
+    );
     return { report: report, results: results };
+    } catch (error) {
+      ProgressUI.error(error);
+      throw error;
+    }
   }
 
   window.ScriptMMGroups = {
@@ -647,6 +874,7 @@
     stop: function () {
       CONFIG.stopRequested = true;
       window.ScriptMMGroupsStop = true;
+      ProgressUI.setStatus("Остановка после текущего запроса...");
       console.warn(LOG_PREFIX, "stop requested");
     },
   };
