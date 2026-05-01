@@ -5,7 +5,9 @@
   "use strict";
 
   var CONFIG = {
-    dryRun: true,
+    autoRun: true,
+    autoRunDelayMs: 1000,
+    dryRun: false,
     focusGroupId: null,
     interceptGroupId: null,
     focusGroupNames: ["FOCUS"],
@@ -15,6 +17,7 @@
     incomingSubtype: "attacks",
     requestDelayMs: 700,
     fallbackToVillageAssignment: true,
+    stopRequested: false,
   };
 
   var LOG_PREFIX = "[groups.js]";
@@ -31,8 +34,8 @@
   }
 
   function toInt(value) {
-    var match = String(value == null ? "" : value).replace(/\s+/g, "").match(/-?\d+/);
-    return match ? Number(match[0]) : null;
+    var match = String(value == null ? "" : value).match(/-?\d[\d\s.\u00a0]*/);
+    return match ? Number(match[0].replace(/[^\d-]/g, "")) : null;
   }
 
   function sleep(ms) {
@@ -91,6 +94,10 @@
   function parseCoord(text) {
     var match = String(text || "").match(/(\d{1,3})\|(\d{1,3})/);
     return match ? match[1] + "|" + match[2] : null;
+  }
+
+  function isStopRequested() {
+    return Boolean(CONFIG.stopRequested || window.ScriptMMGroupsStop);
   }
 
   function isNobleIconSrc(src) {
@@ -178,11 +185,40 @@
     });
   }
 
+  function findTableColumnIndex(table, headerText) {
+    var headers = Array.prototype.slice.call(
+      table ? table.querySelectorAll("thead th") : [],
+    );
+    var wanted = normalizeName(headerText);
+    for (var index = 0; index < headers.length; index += 1) {
+      if (normalizeName(headers[index].textContent).indexOf(wanted) !== -1) {
+        return index;
+      }
+    }
+    return -1;
+  }
+
+  function parseOccupiedPopulation(text) {
+    var occupied = String(text || "").split("/")[0];
+    return toInt(occupied);
+  }
+
   function parseVillagePopulation(doc) {
     var result = new Map();
-    var rows = Array.prototype.slice.call(doc.querySelectorAll("tr.nowrap"));
+    var table = doc.querySelector("#production_table");
+    var farmColumnIndex = findTableColumnIndex(table, "Усадьба");
+    var rows = Array.prototype.slice.call(
+      (table || doc).querySelectorAll("tr.nowrap, tr.row_a, tr.row_b"),
+    );
+
+    if (farmColumnIndex === -1) {
+      console.warn(LOG_PREFIX, "column 'Усадьба' not found on production page");
+      return result;
+    }
 
     rows.forEach(function (row) {
+      if (!row.cells || row.cells.length <= farmColumnIndex) return;
+
       var quickedit = row.querySelector(".quickedit-vn[data-id], .quickedit-label[data-id]");
       var villageId = quickedit ? quickedit.getAttribute("data-id") : null;
       if (!villageId) {
@@ -194,8 +230,8 @@
       var nameNode = row.querySelector(".quickedit-label");
       var name = cleanText(nameNode ? nameNode.textContent : row.cells[1] && row.cells[1].textContent);
       var coord = parseCoord(name || row.textContent);
-      var farmLink = row.querySelector("a[href*='screen=farm']");
-      var pop = farmLink ? toInt(farmLink.textContent) : null;
+      var farmCell = row.cells[farmColumnIndex];
+      var pop = farmCell ? parseOccupiedPopulation(farmCell.textContent) : null;
       if (!Number.isFinite(pop)) return;
 
       result.set(String(villageId), {
@@ -368,6 +404,11 @@
 
     var results = [];
     for (var index = 0; index < uniqueTargets.length; index += 1) {
+      if (isStopRequested()) {
+        console.warn(LOG_PREFIX, "[fallback stop]", "stopped before", index + 1, "of", uniqueTargets.length);
+        break;
+      }
+
       var target = uniqueTargets[index];
       await sleep(CONFIG.requestDelayMs);
 
@@ -408,7 +449,10 @@
           "groups[]": nextIds,
         };
         var saveResponse = await tribalPost("groups", { ajaxaction: "village" }, data);
-        var ok = Boolean(saveResponse && saveResponse.result);
+        var ok =
+          saveResponse !== false &&
+          !(saveResponse && saveResponse.error) &&
+          !(saveResponse && saveResponse.status === false);
         results.push({
           ok: ok,
           villageId: target.villageId,
@@ -448,18 +492,18 @@
       subtype: CONFIG.incomingSubtype,
       page: -1,
     });
-    var combinedUrl = buildGameUrl("overview_villages", {
-      mode: "combined",
+    var productionUrl = buildGameUrl("overview_villages", {
+      mode: "prod",
       group: 0,
       page: -1,
     });
 
     var incomingDoc = await fetchDocument(incomingsUrl);
-    var combinedDoc = await fetchDocument(combinedUrl);
+    var productionDoc = await fetchDocument(productionUrl);
     var groups = await fetchGroups();
 
     var nobleTargets = parseIncomingTargets(incomingDoc);
-    var populationByVillageId = parseVillagePopulation(combinedDoc);
+    var populationByVillageId = parseVillagePopulation(productionDoc);
 
     var targets = nobleTargets.map(function (target) {
       var popInfo = populationByVillageId.get(String(target.villageId));
@@ -489,12 +533,16 @@
       interceptTargets: interceptTargets,
       urls: {
         incomings: incomingsUrl,
-        combined: combinedUrl,
+        production: productionUrl,
       },
     };
   }
 
   async function run(options) {
+    if (isStopRequested()) {
+      throw new Error("ScriptMMGroups is stopped. Set ScriptMMGroupsStop=false and config.stopRequested=false to run again.");
+    }
+
     var opts = Object.assign({ dryRun: CONFIG.dryRun }, options || {});
     var report = await collect();
     window.ScriptMMGroups.lastReport = report;
@@ -592,9 +640,29 @@
       return run({ dryRun: true });
     },
     apply: function () {
+      CONFIG.stopRequested = false;
+      window.ScriptMMGroupsStop = false;
       return run({ dryRun: false });
+    },
+    stop: function () {
+      CONFIG.stopRequested = true;
+      window.ScriptMMGroupsStop = true;
+      console.warn(LOG_PREFIX, "stop requested");
     },
   };
 
-  console.log(LOG_PREFIX, "loaded. Run: ScriptMMGroups.dryRun(); then ScriptMMGroups.apply();");
+  console.log(
+    LOG_PREFIX,
+    "loaded.",
+    CONFIG.autoRun ? "Auto-run is enabled." : "Run ScriptMMGroups.apply();",
+  );
+
+  if (CONFIG.autoRun) {
+    setTimeout(function () {
+      if (isStopRequested()) return;
+      run({ dryRun: CONFIG.dryRun }).catch(function (error) {
+        console.error(LOG_PREFIX, "auto-run failed", error);
+      });
+    }, CONFIG.autoRunDelayMs);
+  }
 })();
