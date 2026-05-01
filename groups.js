@@ -5,7 +5,7 @@
   "use strict";
 
   var CONFIG = {
-    autoRun: true,
+    autoRun: false,
     autoRunDelayMs: 1000,
     dryRun: false,
     showProgressWindow: true,
@@ -35,6 +35,10 @@
     bar: null,
     meta: null,
     detail: null,
+    thresholdInput: null,
+    startButton: null,
+    stopButton: null,
+    isRunning: false,
 
     ensure: function () {
       if (!CONFIG.showProgressWindow || !document.body) return;
@@ -93,6 +97,56 @@
       var body = document.createElement("div");
       setStyles(body, { padding: "9px" });
 
+      var controls = document.createElement("div");
+      setStyles(controls, {
+        display: "grid",
+        gridTemplateColumns: "1fr 86px",
+        gap: "6px",
+        alignItems: "end",
+        marginBottom: "8px",
+      });
+
+      var thresholdWrap = document.createElement("label");
+      thresholdWrap.textContent = "Перехват если занято <";
+      setStyles(thresholdWrap, {
+        display: "grid",
+        gap: "3px",
+        fontWeight: "700",
+      });
+      var thresholdInput = document.createElement("input");
+      thresholdInput.type = "number";
+      thresholdInput.min = "0";
+      thresholdInput.step = "100";
+      thresholdInput.value = String(CONFIG.populationThreshold);
+      setStyles(thresholdInput, {
+        boxSizing: "border-box",
+        width: "100%",
+        padding: "4px 5px",
+        border: "1px solid #7d510f",
+        background: "#fff8e8",
+        color: "#2f210f",
+        font: "12px Verdana, Arial, sans-serif",
+      });
+      thresholdWrap.appendChild(thresholdInput);
+
+      var startButton = document.createElement("button");
+      startButton.type = "button";
+      startButton.textContent = "Старт";
+      setStyles(startButton, {
+        cursor: "pointer",
+        padding: "5px 8px",
+        border: "1px solid #315f26",
+        background: "#3f8f37",
+        color: "#fff",
+        font: "700 12px Verdana, Arial, sans-serif",
+      });
+      startButton.addEventListener("click", function () {
+        ProgressUI.startFromButton();
+      });
+
+      controls.appendChild(thresholdWrap);
+      controls.appendChild(startButton);
+
       var status = document.createElement("div");
       setStyles(status, { marginBottom: "7px", fontWeight: "700" });
 
@@ -122,6 +176,7 @@
         color: "#533915",
       });
 
+      body.appendChild(controls);
       body.appendChild(status);
       body.appendChild(barBox);
       body.appendChild(meta);
@@ -135,6 +190,49 @@
       this.bar = bar;
       this.meta = meta;
       this.detail = detail;
+      this.thresholdInput = thresholdInput;
+      this.startButton = startButton;
+      this.stopButton = stopButton;
+    },
+
+    readThreshold: function () {
+      this.ensure();
+      var raw = this.thresholdInput ? this.thresholdInput.value : CONFIG.populationThreshold;
+      var value = Number(raw);
+      if (!Number.isFinite(value) || value < 0) {
+        throw new Error("Некорректный порог для Перехвата: " + raw);
+      }
+      CONFIG.populationThreshold = Math.floor(value);
+      if (this.thresholdInput) this.thresholdInput.value = String(CONFIG.populationThreshold);
+      return CONFIG.populationThreshold;
+    },
+
+    setRunning: function (running) {
+      this.isRunning = Boolean(running);
+      this.ensure();
+      if (this.startButton) {
+        this.startButton.disabled = this.isRunning;
+        this.startButton.textContent = this.isRunning ? "Идет..." : "Старт";
+        this.startButton.style.opacity = this.isRunning ? "0.65" : "1";
+        this.startButton.style.cursor = this.isRunning ? "default" : "pointer";
+      }
+      if (this.thresholdInput) this.thresholdInput.disabled = this.isRunning;
+    },
+
+    startFromButton: function () {
+      if (this.isRunning) return;
+      try {
+        this.readThreshold();
+      } catch (error) {
+        this.error(error);
+        return;
+      }
+
+      CONFIG.stopRequested = false;
+      window.ScriptMMGroupsStop = false;
+      run({ dryRun: false }).catch(function (error) {
+        console.error(LOG_PREFIX, "manual run failed", error);
+      });
     },
 
     setStatus: function (text) {
@@ -736,11 +834,31 @@
       ProgressUI.error(stoppedError);
       throw stoppedError;
     }
+    if (ProgressUI.isRunning) {
+      var runningError = new Error("groups.js уже выполняется");
+      ProgressUI.error(runningError);
+      throw runningError;
+    }
 
     ProgressUI.ensure();
+    try {
+      if (options && options.populationThreshold != null) {
+        CONFIG.populationThreshold = Math.floor(Number(options.populationThreshold));
+      } else {
+        ProgressUI.readThreshold();
+      }
+      if (!Number.isFinite(CONFIG.populationThreshold) || CONFIG.populationThreshold < 0) {
+        throw new Error("Некорректный порог для Перехвата: " + CONFIG.populationThreshold);
+      }
+    } catch (error) {
+      ProgressUI.error(error);
+      throw error;
+    }
+
+    ProgressUI.setRunning(true);
     ProgressUI.setStatus("Старт");
     ProgressUI.setProgress(0, 1, "Подготовка");
-    ProgressUI.setDetail("Ищу входящие с дворянами и группы");
+    ProgressUI.setDetail("Порог Перехват: " + CONFIG.populationThreshold);
 
     try {
     var opts = Object.assign({ dryRun: CONFIG.dryRun }, options || {});
@@ -852,9 +970,11 @@
         " " +
         report.interceptTargets.length,
     );
+    ProgressUI.setRunning(false);
     return { report: report, results: results };
     } catch (error) {
       ProgressUI.error(error);
+      ProgressUI.setRunning(false);
       throw error;
     }
   }
@@ -882,8 +1002,13 @@
   console.log(
     LOG_PREFIX,
     "loaded.",
-    CONFIG.autoRun ? "Auto-run is enabled." : "Run ScriptMMGroups.apply();",
+    CONFIG.autoRun ? "Auto-run is enabled." : "Use the Start button or run ScriptMMGroups.apply();",
   );
+
+  ProgressUI.ensure();
+  ProgressUI.setStatus("Готов к запуску");
+  ProgressUI.setProgress(0, 1, "Ожидание");
+  ProgressUI.setDetail("Порог Перехват: " + CONFIG.populationThreshold);
 
   if (CONFIG.autoRun) {
     setTimeout(function () {
