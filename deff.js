@@ -2055,6 +2055,16 @@
                 if (!Number.isFinite(Guard.get_unit_speed(unit_name))) continue;
                 result.push(unit_name);
             }
+            if (
+                user_input &&
+                user_input.mode_full_deff &&
+                !result.includes('knight') &&
+                Guard.deff_units.includes('knight') &&
+                Math.max(0, Helper.to_int((available || {}).knight)) > 0 &&
+                Number.isFinite(Guard.get_unit_speed('knight'))
+            ) {
+                result.push('knight');
+            }
             return result;
         },
 

@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.40";
+  const VERSION = "0.10.43";
   const LOG_PREFIX = "[ScriptMM]";
   const MULTI_TAB_PRESENCE_KEY = "scriptmm.active_instances.v1";
   const MULTI_TAB_HEARTBEAT_INTERVAL_MS = 3000;
@@ -2341,6 +2341,35 @@
     return Number.isFinite(epochMs) ? epochMs : null;
   };
 
+  const getDirectServerUtcOffsetMs = () => {
+    const directOffsetCandidates = [
+      safe(() => window.server_utc_diff, null),
+      safe(() => window.game_data.server_utc_diff, null),
+      safe(() => window.game_data.market === "ru" ? 10800 : null, null),
+      safe(() => window.game_data.locale === "ru_RU" ? 10800 : null, null),
+      safe(() => window.TribalWars.getGameData().server_utc_diff, null),
+      safe(
+        () => (window.TribalWars.getGameData().market === "ru" ? 10800 : null),
+        null,
+      ),
+      safe(
+        () =>
+          window.TribalWars.getGameData().locale === "ru_RU" ? 10800 : null,
+        null,
+      ),
+    ];
+    for (let index = 0; index < directOffsetCandidates.length; index += 1) {
+      const rawSeconds = Number(directOffsetCandidates[index]);
+      if (!Number.isFinite(rawSeconds)) continue;
+      return Math.round(rawSeconds * 1000);
+    }
+    const hostname = cleanText(safe(() => location.hostname, ""));
+    if (/(^|\.)voynaplemyon\.com$/i.test(hostname)) {
+      return 3 * 60 * 60 * 1000;
+    }
+    return null;
+  };
+
   const parseTimingServerDate = (rawValue) => {
     if (rawValue === null || rawValue === undefined) return null;
     if (rawValue instanceof Date) {
@@ -2356,31 +2385,7 @@
       return null;
     };
 
-    const normalizeTimingEpochByLocalClock = (epochMs) => {
-      if (!Number.isFinite(epochMs)) return epochMs;
-      const offsetMs = [
-        safe(() => window.server_utc_diff, null),
-        safe(() => window.game_data.server_utc_diff, null),
-        safe(() => window.TribalWars.getGameData().server_utc_diff, null),
-      ]
-        .map((value) => Number(value))
-        .find((value) => Number.isFinite(value));
-      if (!Number.isFinite(offsetMs)) return epochMs;
-      const serverOffsetMs = Math.round(offsetMs * 1000);
-      if (!serverOffsetMs) return epochMs;
-      const localNow = Date.now();
-      const candidates = [epochMs, epochMs - serverOffsetMs, epochMs + serverOffsetMs];
-      return candidates
-        .map((value) => ({
-          value,
-          diff: Math.abs(value - localNow),
-        }))
-        .sort((left, right) => left.diff - right.diff)[0].value;
-    };
-
-    const numericEpochMs = normalizeTimingEpochByLocalClock(
-      normalizeEpochMs(rawValue),
-    );
+    const numericEpochMs = normalizeEpochMs(rawValue);
     if (Number.isFinite(numericEpochMs)) {
       const dt = new Date(numericEpochMs);
       if (Number.isFinite(dt.getTime())) return dt;
@@ -2389,9 +2394,7 @@
     const textValue = cleanText(rawValue);
     if (!textValue) return null;
 
-    const textEpochMs = normalizeTimingEpochByLocalClock(
-      normalizeEpochMs(textValue),
-    );
+    const textEpochMs = normalizeEpochMs(textValue);
     if (Number.isFinite(textEpochMs)) {
       const dt = new Date(textEpochMs);
       if (Number.isFinite(dt.getTime())) return dt;
@@ -2444,15 +2447,9 @@
   };
 
   const getServerUtcOffsetMs = () => {
-    const directOffsetCandidates = [
-      safe(() => window.server_utc_diff, null),
-      safe(() => window.game_data.server_utc_diff, null),
-      safe(() => window.TribalWars.getGameData().server_utc_diff, null),
-    ];
-    for (let index = 0; index < directOffsetCandidates.length; index += 1) {
-      const rawSeconds = Number(directOffsetCandidates[index]);
-      if (!Number.isFinite(rawSeconds)) continue;
-      const offsetMs = Math.round(rawSeconds * 1000);
+    const directOffsetMs = getDirectServerUtcOffsetMs();
+    if (Number.isFinite(directOffsetMs)) {
+      const offsetMs = Math.round(directOffsetMs);
       cachedServerUtcOffsetMs = offsetMs;
       return offsetMs;
     }
@@ -3238,13 +3235,190 @@
     const etaMs = toFiniteEpochMs(incoming.etaEpochMs || incoming.arrivalEpochMs);
     return ["src", sourceIncomingId, originKey, targetKey, Number.isFinite(etaMs) ? String(Math.round(etaMs)) : "?"].join("|");
   };
+  function repairMessageFavoriteEtaMs(source, etaMs) {
+    if (!source || typeof source !== "object" || !Number.isFinite(etaMs)) {
+      return { etaMs, repaired: false };
+    }
+    const sourceKind = cleanText(source.arrivalEpochSource);
+    const nowParts = getServerWallClockParts(getServerNowMs());
+    if (!nowParts) return { etaMs, repaired: false };
+
+    const monthIndexToNumber = (tokenRaw) => {
+      const token = String(tokenRaw || "")
+        .toLowerCase()
+        .replace(/\./g, "")
+        .trim();
+      if (!token) return null;
+      const months = {
+        jan: 1,
+        feb: 2,
+        mar: 3,
+        apr: 4,
+        may: 5,
+        jun: 6,
+        jul: 7,
+        aug: 8,
+        sep: 9,
+        sept: 9,
+        oct: 10,
+        nov: 11,
+        dec: 12,
+        янв: 1,
+        фев: 2,
+        мар: 3,
+        апр: 4,
+        май: 5,
+        мая: 5,
+        июн: 6,
+        июл: 7,
+        авг: 8,
+        сен: 9,
+        сент: 9,
+        окт: 10,
+        ноя: 11,
+        дек: 12,
+      };
+      return months[token] || months[token.slice(0, 3)] || null;
+    };
+
+    const parseCandidateText = (textRaw) => {
+      const text = cleanText(textRaw);
+      if (!text) return null;
+      const currentParts = getServerWallClockParts(etaMs) || nowParts;
+      const monthMatch = text.match(
+        /([A-Za-zА-Яа-яёЁ]{3,}\.?)\s*(\d{1,2})\s*,?\s*(\d{4})\s+(\d{1,2}):(\d{2}):(\d{2})(?:[:.](\d{1,3}))?/i,
+      );
+      if (monthMatch) {
+        const month = monthIndexToNumber(monthMatch[1]);
+        const day = toInt(monthMatch[2]);
+        const year = toInt(monthMatch[3]);
+        const hour = toInt(monthMatch[4]);
+        const minute = toInt(monthMatch[5]);
+        const second = toInt(monthMatch[6]);
+        const ms = Math.max(
+          0,
+          toInt(monthMatch[7]) || toInt(source.arrivalMs) || 0,
+        );
+        if (
+          Number.isFinite(month) &&
+          Number.isFinite(day) &&
+          Number.isFinite(year) &&
+          Number.isFinite(hour) &&
+          Number.isFinite(minute) &&
+          Number.isFinite(second)
+        ) {
+          const parsedMs = buildServerEpochMs(
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            ms,
+          );
+          if (Number.isFinite(parsedMs)) {
+            return { parsedMs, hour, minute, second, ms, text };
+          }
+        }
+      }
+
+      const numericMatch = text.match(
+        /(?:(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?\s*(?:в)?\s*)?(\d{1,2}):(\d{2}):(\d{2})(?:[:.](\d{1,3}))?/,
+      );
+      if (!numericMatch) return null;
+      const hasDate =
+        Number.isFinite(toInt(numericMatch[1])) &&
+        Number.isFinite(toInt(numericMatch[2]));
+      const day = hasDate ? toInt(numericMatch[1]) : currentParts.day;
+      const month = hasDate ? toInt(numericMatch[2]) : currentParts.month;
+      const yearRaw = toInt(numericMatch[3]);
+      const year = Number.isFinite(yearRaw)
+        ? yearRaw < 100
+          ? 2000 + yearRaw
+          : yearRaw
+        : currentParts.year || nowParts.year;
+      const hour = toInt(numericMatch[4]);
+      const minute = toInt(numericMatch[5]);
+      const second = toInt(numericMatch[6]);
+      const ms = Math.max(
+        0,
+        toInt(numericMatch[7]) || toInt(source.arrivalMs) || 0,
+      );
+      if (
+        !Number.isFinite(day) ||
+        !Number.isFinite(month) ||
+        !Number.isFinite(year) ||
+        !Number.isFinite(hour) ||
+        !Number.isFinite(minute) ||
+        !Number.isFinite(second)
+      ) {
+        return null;
+      }
+      const parsedMs = buildServerEpochMs(
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+        ms,
+      );
+      return Number.isFinite(parsedMs)
+        ? { parsedMs, hour, minute, second, ms, text }
+        : null;
+    };
+
+    const rawCandidates = [
+      cleanText(source.commandLabel),
+      cleanText(source.rawText),
+      cleanText(source.arrivalServerText),
+      cleanText(source.arrivalText),
+    ].filter(Boolean);
+    const candidates = [];
+    rawCandidates.forEach((candidate) => {
+      if (!candidates.includes(candidate)) candidates.push(candidate);
+    });
+    for (let index = 0; index < candidates.length; index += 1) {
+      const parsed = parseCandidateText(candidates[index]);
+      if (!parsed) continue;
+      const currentParts = getServerWallClockParts(etaMs);
+      const sameDisplayedTime =
+        currentParts &&
+        currentParts.hour === parsed.hour &&
+        currentParts.minute === parsed.minute &&
+        currentParts.second === parsed.second;
+      const diffMs = Math.abs(parsed.parsedMs - etaMs);
+      if (sameDisplayedTime || diffMs < 1000) {
+        return { etaMs, repaired: false };
+      }
+      const serverOffsetMs = Math.abs(getServerUtcOffsetMs());
+      const offsetShift =
+        Number.isFinite(serverOffsetMs) &&
+        serverOffsetMs > 0 &&
+        Math.abs(diffMs - serverOffsetMs) <= 60 * 1000;
+      if (!offsetShift) continue;
+      console.warn(`${LOG_PREFIX} [favorite-time-repair]`, {
+        version: VERSION,
+        sourceKind: sourceKind || null,
+        from: formatTimeWithMs(etaMs),
+        to: formatTimeWithMs(parsed.parsedMs),
+        text: parsed.text,
+      });
+      return { etaMs: parsed.parsedMs, repaired: true };
+    }
+    return { etaMs, repaired: false };
+  }
   const normalizeFavoriteIncoming = (incomingRaw, favoriteId) => {
     const source =
       incomingRaw && typeof incomingRaw === "object"
         ? cloneSerializable(incomingRaw, null)
         : null;
     if (!source || typeof source !== "object") return null;
-    const etaMs = toFiniteEpochMs(source.etaEpochMs || source.arrivalEpochMs);
+    const rawEtaMs = toFiniteEpochMs(source.etaEpochMs || source.arrivalEpochMs);
+    const repairResult = repairMessageFavoriteEtaMs(source, rawEtaMs);
+    const etaMs = Number.isFinite(repairResult.etaMs)
+      ? repairResult.etaMs
+      : rawEtaMs;
     if (!Number.isFinite(etaMs)) return null;
     const sourceIncomingId =
       cleanText(source.sourceIncomingId) || cleanText(source.id) || null;
@@ -3252,6 +3426,10 @@
     source.sourceIncomingId = sourceIncomingId;
     source.etaEpochMs = etaMs;
     source.arrivalEpochMs = etaMs;
+    if (repairResult.repaired) {
+      source.arrivalText = formatArrivalTextFromEpochMs(etaMs) || source.arrivalText;
+    }
+    source.serverTimeRepaired = Boolean(repairResult.repaired);
     source.isFavoriteEntry = true;
     source.isHubIncoming = false;
     source.isHubMass = false;
@@ -3325,7 +3503,9 @@
     }
     const etaMs = toFiniteEpochMs(incoming.etaEpochMs || incoming.arrivalEpochMs);
     if (!Number.isFinite(etaMs)) return null;
-    const sourceKey = cleanText(raw.sourceKey) || buildFavoriteSourceKey(incoming);
+    const sourceKey = incoming.serverTimeRepaired
+      ? buildFavoriteSourceKey(incoming)
+      : cleanText(raw.sourceKey) || buildFavoriteSourceKey(incoming);
     incoming.favoriteComment = comment;
     return {
       id,
@@ -7759,6 +7939,10 @@
           targetCoord,
           originCoord: cleanText(originCoord) || null,
           etaEpochMs: Number(parsedDate.etaEpochMs),
+          arrivalText: afterMarker,
+          arrivalMs: Number.isFinite(parsedDate.arrivalMs)
+            ? parsedDate.arrivalMs
+            : null,
           comment,
           sigilPercent: Number.isFinite(nearestSigilPercent)
             ? normalizeSigilPercent(nearestSigilPercent)
@@ -7911,9 +8095,30 @@
         return;
       }
       matched += 1;
+      const hintEtaMs = toFiniteEpochMs(hint && hint.etaEpochMs);
+      const incomingForFavorite =
+        Number.isFinite(hintEtaMs) && incoming && typeof incoming === "object"
+          ? {
+              ...incoming,
+              etaEpochMs: hintEtaMs,
+              arrivalEpochMs: hintEtaMs,
+              arrivalText: formatArrivalTextFromEpochMs(hintEtaMs),
+              arrivalServerText: cleanText(hint && hint.arrivalText) || null,
+              arrivalMs: Number.isFinite(toInt(hint && hint.arrivalMs))
+                ? toInt(hint && hint.arrivalMs)
+                : incoming.arrivalMs,
+              arrivalEpochSource: "forum_auto_favorite",
+              originCoord:
+                cleanText(hint && hint.originCoord) ||
+                cleanText(incoming.originCoord) ||
+                null,
+            }
+          : incoming;
       const key = buildCoordEtaKey(
-        incoming && (incoming.targetCoord || incoming.target),
-        incoming && (incoming.arrivalEpochMs || incoming.etaEpochMs),
+        incomingForFavorite &&
+          (incomingForFavorite.targetCoord || incomingForFavorite.target),
+        incomingForFavorite &&
+          (incomingForFavorite.arrivalEpochMs || incomingForFavorite.etaEpochMs),
       );
       if (key && existingCoordEtaKeys.has(key)) {
         const updatedResult = updateFavoriteByCoordEtaKey({
@@ -7931,7 +8136,7 @@
         return;
       }
       const result = addIncomingToFavorites({
-        incoming,
+        incoming: incomingForFavorite,
         comment: cleanText(hint && hint.comment) || null,
         sigilPercent: Number.isFinite(toNumber(hint && hint.sigilPercent))
           ? normalizeSigilPercent(toNumber(hint && hint.sigilPercent))
@@ -11433,6 +11638,9 @@
     const commandArrivalsByTarget = buildNearestSliceCommandArrivalsByTarget(
       state.overviewCommandsDump,
     );
+    if (source === "favorites") {
+      loadFavoriteEntries();
+    }
     const sourceItemsRaw =
       source === "tribe"
         ? Array.isArray(state.hubTribeIncomings)
