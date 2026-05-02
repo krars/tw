@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.38";
+  const VERSION = "0.10.39";
   const LOG_PREFIX = "[ScriptMM]";
   const MULTI_TAB_PRESENCE_KEY = "scriptmm.active_instances.v1";
   const MULTI_TAB_HEARTBEAT_INTERVAL_MS = 3000;
@@ -4736,6 +4736,39 @@
 
   const mergeScheduledCommandListsForStorage = (...lists) => {
     const map = new Map();
+    const mergeFallbackScheduledCommand = (existing, fallback) => {
+      if (!existing) return fallback;
+      if (!fallback) return existing;
+      let merged = existing;
+      const fallbackComment = cleanText(fallback.comment);
+      if (!cleanText(merged.comment) && fallbackComment) {
+        merged = {
+          ...merged,
+          comment: fallbackComment,
+        };
+      }
+      const fallbackTimingLabel = cleanText(fallback.timingLabel);
+      if (!cleanText(merged.timingLabel) && fallbackTimingLabel) {
+        merged = {
+          ...merged,
+          timingType: fallback.timingType,
+          timingLabel: fallback.timingLabel,
+          timingGapMs: fallback.timingGapMs,
+          timingStartMs: fallback.timingStartMs,
+          timingEndMs: fallback.timingEndMs,
+          timingPointMs: fallback.timingPointMs,
+        };
+      }
+      if (!cleanText(merged.goUrl) && cleanText(fallback.goUrl)) {
+        merged = {
+          ...merged,
+          goUrl: fallback.goUrl,
+        };
+      }
+      return merged === existing
+        ? existing
+        : normalizeScheduledCommand(merged) || merged;
+    };
     lists.forEach((list) => {
       (Array.isArray(list) ? list : [])
         .map((item) => normalizeScheduledCommand(item))
@@ -4743,7 +4776,15 @@
         .forEach((item) => {
           const key = cleanText(item && item.id);
           if (!key) return;
-          map.set(String(key), item);
+          const storageKey = String(key);
+          if (map.has(storageKey)) {
+            map.set(
+              storageKey,
+              mergeFallbackScheduledCommand(map.get(storageKey), item),
+            );
+            return;
+          }
+          map.set(storageKey, item);
         });
     });
     return Array.from(map.values()).sort(
@@ -13324,7 +13365,7 @@
         const rowHtml = safe(() => {
           const unitsHtml = formatPlanUnitsIconsHtml(command.units);
           const resolvedGoUrl =
-            cleanText(command.goUrl) || resolveScheduledCommandGoUrl(command) || "";
+            resolveScheduledCommandGoUrl(command) || cleanText(command.goUrl) || "";
           const departureMs = Number(command.departureMs);
           const timing = safeResolveTimingForScheduledCommand(command);
           const timingCenter = safeComputeTimingCenterCopyValue(timing);
@@ -14330,7 +14371,14 @@
         if (
           localTimingType === "manual" &&
           localTimingLabel &&
-          existingTimingType !== "manual"
+          (existingTimingType !== "manual" ||
+            existingTimingLabel !== localTimingLabel ||
+            Number(existing && existing.timingStartMs) !==
+              Number(item && item.timingStartMs) ||
+            Number(existing && existing.timingEndMs) !==
+              Number(item && item.timingEndMs) ||
+            Number(existing && existing.timingPointMs) !==
+              Number(item && item.timingPointMs))
         ) {
           merged = {
             ...merged,
@@ -23667,12 +23715,11 @@ ${panelHtml}`;
               command &&
               String(cleanText(command.id) || "") === String(commandId || ""),
           );
-        if (!url) {
-          if (scheduledCommand) {
-            url = cleanText(resolveScheduledCommandGoUrl(scheduledCommand));
-            if (url) {
-              planGoButton.setAttribute("data-url", url);
-            }
+        if (scheduledCommand) {
+          const freshUrl = cleanText(resolveScheduledCommandGoUrl(scheduledCommand));
+          if (freshUrl) {
+            url = freshUrl;
+            planGoButton.setAttribute("data-url", freshUrl);
           }
         }
         if (!url) {
@@ -23736,9 +23783,29 @@ ${panelHtml}`;
             return;
           }
         }
-        const timingCenter = cleanText(
-          planGoButton.getAttribute("data-copy-time"),
-        );
+        const freshTiming = scheduledCommand
+          ? safeResolveTimingForScheduledCommand(scheduledCommand)
+          : null;
+        const timingCenter =
+          safeComputeTimingCenterCopyValue(freshTiming) ||
+          cleanText(planGoButton.getAttribute("data-copy-time"));
+        if (timingCenter) {
+          planGoButton.setAttribute("data-copy-time", timingCenter);
+        }
+        console.info(`${LOG_PREFIX} [plan-go][fresh-timing]`, {
+          version: VERSION,
+          commandId: commandId || null,
+          timingCenter: timingCenter || null,
+          timingType: cleanText(freshTiming && freshTiming.timingType) || null,
+          timingLabel: cleanText(freshTiming && freshTiming.timingLabel) || null,
+          timingStartMs: toFiniteMs(freshTiming && freshTiming.timingStartMs),
+          timingEndMs: toFiniteMs(freshTiming && freshTiming.timingEndMs),
+          timingPointMs: toFiniteMs(freshTiming && freshTiming.timingPointMs),
+          hasScheduledCommand: Boolean(scheduledCommand),
+          hasFreshUrl: Boolean(
+            scheduledCommand && resolveScheduledCommandGoUrl(scheduledCommand),
+          ),
+        });
         if (timingCenter) {
           appendTimingCopyHistory({
             timingCenter,
