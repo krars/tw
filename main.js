@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.43";
+  const VERSION = "0.10.44";
   const LOG_PREFIX = "[ScriptMM]";
   const MULTI_TAB_PRESENCE_KEY = "scriptmm.active_instances.v1";
   const MULTI_TAB_HEARTBEAT_INTERVAL_MS = 3000;
@@ -2341,6 +2341,40 @@
     return Number.isFinite(epochMs) ? epochMs : null;
   };
 
+  const buildServerEpochMsWithOffset = (
+    year,
+    month,
+    day,
+    hour,
+    minute,
+    second = 0,
+    millisecond = 0,
+    offsetMsRaw = 0,
+  ) => {
+    const y = Number(year);
+    const m = Number(month);
+    const d = Number(day);
+    const hh = Number(hour);
+    const mm = Number(minute);
+    const ss = Number(second || 0);
+    const ms = Number(millisecond || 0);
+    const offsetMs = Number(offsetMsRaw || 0);
+    if (
+      !Number.isFinite(y) ||
+      !Number.isFinite(m) ||
+      !Number.isFinite(d) ||
+      !Number.isFinite(hh) ||
+      !Number.isFinite(mm) ||
+      !Number.isFinite(ss) ||
+      !Number.isFinite(ms) ||
+      !Number.isFinite(offsetMs)
+    ) {
+      return null;
+    }
+    const epochMs = Date.UTC(y, m - 1, d, hh, mm, ss, ms) - offsetMs;
+    return Number.isFinite(epochMs) ? epochMs : null;
+  };
+
   const getDirectServerUtcOffsetMs = () => {
     const directOffsetCandidates = [
       safe(() => window.server_utc_diff, null),
@@ -2364,7 +2398,7 @@
       return Math.round(rawSeconds * 1000);
     }
     const hostname = cleanText(safe(() => location.hostname, ""));
-    if (/(^|\.)voynaplemyon\.com$/i.test(hostname)) {
+    if (/(^|\.)voynaplemyon\.(?:com|ru)$/i.test(hostname) || /voynaplemyon/i.test(hostname)) {
       return 3 * 60 * 60 * 1000;
     }
     return null;
@@ -3242,6 +3276,39 @@
     const sourceKind = cleanText(source.arrivalEpochSource);
     const nowParts = getServerWallClockParts(getServerNowMs());
     if (!nowParts) return { etaMs, repaired: false };
+    const getFavoriteTextServerUtcOffsetMs = () => {
+      const directOffsetMs = getDirectServerUtcOffsetMs();
+      if (Number.isFinite(directOffsetMs) && Math.abs(directOffsetMs) > 0) {
+        return Math.round(directOffsetMs);
+      }
+      const hostname = cleanText(safe(() => location.hostname, ""));
+      if (/voynaplemyon/i.test(hostname)) return 3 * 60 * 60 * 1000;
+      const market = cleanText(safe(() => window.game_data.market, ""));
+      const locale = cleanText(safe(() => window.game_data.locale, ""));
+      if (market === "ru" || locale === "ru_RU") return 3 * 60 * 60 * 1000;
+      const fallbackOffsetMs = getServerUtcOffsetMs();
+      return Number.isFinite(fallbackOffsetMs) ? Math.round(fallbackOffsetMs) : 0;
+    };
+    const favoriteTextOffsetMs = getFavoriteTextServerUtcOffsetMs();
+    const buildFavoriteTextEpochMs = (
+      year,
+      month,
+      day,
+      hour,
+      minute,
+      second = 0,
+      millisecond = 0,
+    ) =>
+      buildServerEpochMsWithOffset(
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+        millisecond,
+        favoriteTextOffsetMs,
+      );
 
     const monthIndexToNumber = (tokenRaw) => {
       const token = String(tokenRaw || "")
@@ -3307,7 +3374,7 @@
           Number.isFinite(minute) &&
           Number.isFinite(second)
         ) {
-          const parsedMs = buildServerEpochMs(
+          const parsedMs = buildFavoriteTextEpochMs(
             year,
             month,
             day,
@@ -3354,7 +3421,7 @@
       ) {
         return null;
       }
-      const parsedMs = buildServerEpochMs(
+      const parsedMs = buildFavoriteTextEpochMs(
         year,
         month,
         day,
@@ -3388,21 +3455,30 @@
         currentParts.minute === parsed.minute &&
         currentParts.second === parsed.second;
       const diffMs = Math.abs(parsed.parsedMs - etaMs);
-      if (sameDisplayedTime || diffMs < 1000) {
+      if (diffMs < 1000) {
         return { etaMs, repaired: false };
       }
-      const serverOffsetMs = Math.abs(getServerUtcOffsetMs());
+      const serverOffsetMs = Math.abs(
+        favoriteTextOffsetMs || getServerUtcOffsetMs(),
+      );
       const offsetShift =
         Number.isFinite(serverOffsetMs) &&
         serverOffsetMs > 0 &&
         Math.abs(diffMs - serverOffsetMs) <= 60 * 1000;
-      if (!offsetShift) continue;
+      const trustedTextSource =
+        !sourceKind ||
+        /(message|forum|mail|info_village|overview_incomings|forum_auto_favorite)/i.test(
+          sourceKind,
+        );
+      const plausibleTextShift = trustedTextSource && diffMs <= 12 * 60 * 60 * 1000;
+      if (!offsetShift && (!plausibleTextShift || sameDisplayedTime)) continue;
       console.warn(`${LOG_PREFIX} [favorite-time-repair]`, {
         version: VERSION,
         sourceKind: sourceKind || null,
         from: formatTimeWithMs(etaMs),
         to: formatTimeWithMs(parsed.parsedMs),
         text: parsed.text,
+        offsetMs: favoriteTextOffsetMs,
       });
       return { etaMs: parsed.parsedMs, repaired: true };
     }
@@ -3610,6 +3686,20 @@
     if (Number.isFinite(resolvedSigil)) {
       normalizedIncoming.sigilPercent = normalizeSigilPercent(resolvedSigil);
     }
+    console.info(`${LOG_PREFIX} [favorite-add]`, {
+      version: VERSION,
+      sourceKind: cleanText(normalizedIncoming.arrivalEpochSource) || null,
+      targetCoord:
+        cleanText(normalizedIncoming.targetCoord || normalizedIncoming.target) ||
+        null,
+      originCoord:
+        cleanText(normalizedIncoming.originCoord || normalizedIncoming.origin) ||
+        null,
+      arrivalText: cleanText(normalizedIncoming.arrivalText) || null,
+      etaEpochMs: Number(normalizedIncoming.etaEpochMs) || null,
+      etaServerTime: formatTimeWithMs(normalizedIncoming.etaEpochMs),
+      repaired: Boolean(normalizedIncoming.serverTimeRepaired),
+    });
     const sourceEntries = purgeStaleFavoriteEntries(
       readJson(STORAGE_KEYS.favorites),
       getServerNowMs(),
@@ -18977,14 +19067,8 @@
     const before = Array.isArray(state.favoritesEntries)
       ? state.favoritesEntries.length
       : 0;
-    const normalized = purgeStaleFavoriteEntries(
-      state.favoritesEntries,
-      getServerNowMs(),
-    );
-    state.favoritesEntries = normalized;
-    if (normalized.length !== before) {
-      saveFavoriteEntries();
-    }
+    const normalized = loadFavoriteEntries();
+    if (normalized.length !== before) saveFavoriteEntries();
     const favoriteItems = getFavoriteIncomingItems();
     renderIncomings(
       ui,
