@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.39";
+  const VERSION = "0.10.40";
   const LOG_PREFIX = "[ScriptMM]";
   const MULTI_TAB_PRESENCE_KEY = "scriptmm.active_instances.v1";
   const MULTI_TAB_HEARTBEAT_INTERVAL_MS = 3000;
@@ -2356,7 +2356,31 @@
       return null;
     };
 
-    const numericEpochMs = normalizeEpochMs(rawValue);
+    const normalizeTimingEpochByLocalClock = (epochMs) => {
+      if (!Number.isFinite(epochMs)) return epochMs;
+      const offsetMs = [
+        safe(() => window.server_utc_diff, null),
+        safe(() => window.game_data.server_utc_diff, null),
+        safe(() => window.TribalWars.getGameData().server_utc_diff, null),
+      ]
+        .map((value) => Number(value))
+        .find((value) => Number.isFinite(value));
+      if (!Number.isFinite(offsetMs)) return epochMs;
+      const serverOffsetMs = Math.round(offsetMs * 1000);
+      if (!serverOffsetMs) return epochMs;
+      const localNow = Date.now();
+      const candidates = [epochMs, epochMs - serverOffsetMs, epochMs + serverOffsetMs];
+      return candidates
+        .map((value) => ({
+          value,
+          diff: Math.abs(value - localNow),
+        }))
+        .sort((left, right) => left.diff - right.diff)[0].value;
+    };
+
+    const numericEpochMs = normalizeTimingEpochByLocalClock(
+      normalizeEpochMs(rawValue),
+    );
     if (Number.isFinite(numericEpochMs)) {
       const dt = new Date(numericEpochMs);
       if (Number.isFinite(dt.getTime())) return dt;
@@ -2365,7 +2389,9 @@
     const textValue = cleanText(rawValue);
     if (!textValue) return null;
 
-    const textEpochMs = normalizeEpochMs(textValue);
+    const textEpochMs = normalizeTimingEpochByLocalClock(
+      normalizeEpochMs(textValue),
+    );
     if (Number.isFinite(textEpochMs)) {
       const dt = new Date(textEpochMs);
       if (Number.isFinite(dt.getTime())) return dt;
