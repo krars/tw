@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.44";
+  const VERSION = "0.10.46";
   const LOG_PREFIX = "[ScriptMM]";
   const MULTI_TAB_PRESENCE_KEY = "scriptmm.active_instances.v1";
   const MULTI_TAB_HEARTBEAT_INTERVAL_MS = 3000;
@@ -1661,6 +1661,16 @@
     return 0;
   };
 
+  const selectPreferredPositiveSigilPercent = (...candidates) => {
+    for (let index = 0; index < candidates.length; index += 1) {
+      const raw = candidates[index];
+      if (raw === null || raw === undefined || raw === "") continue;
+      const normalized = normalizeSigilPercent(raw);
+      if (normalized > 0) return normalized;
+    }
+    return null;
+  };
+
   const extractSigilPercentsFromText = (text) => {
     const source = String(text || "");
     if (!source) return [];
@@ -1937,6 +1947,30 @@
     if (!matches.length) return null;
     matches.sort((a, b) => a.index - b.index);
     return normalizeSigilPercent(matches[matches.length - 1].value);
+  };
+
+  const getForumPostBodies = (root = document) => {
+    const scope =
+      root.querySelector("#forum_post_list") ||
+      root.querySelector("#content_value") ||
+      root.body ||
+      null;
+    if (!scope) return [];
+    return Array.from(
+      scope.querySelectorAll(".post .text, #forum_post_list .text"),
+    ).filter((node) => node && node.isConnected);
+  };
+
+  const getForumThreadFirstPostSigilPercent = (root = document) => {
+    if (!isForumThreadPlanningScreen()) return null;
+    const firstPostBody = getForumPostBodies(root)[0] || null;
+    if (!firstPostBody) return null;
+    const text = `${safe(() => firstPostBody.innerText, "") || ""}\n${
+      safe(() => firstPostBody.textContent, "") || ""
+    }`;
+    return selectPreferredPositiveSigilPercent(
+      ...extractSigilPercentsFromText(text),
+    );
   };
 
   const collectSigilCandidatesFromDocument = (doc) => {
@@ -2511,6 +2545,44 @@
     }
 
     return 0;
+  };
+
+  const getReliableServerTextUtcOffsetMs = () => {
+    const directOffsetMs = getDirectServerUtcOffsetMs();
+    if (Number.isFinite(directOffsetMs) && Math.abs(directOffsetMs) > 0) {
+      return Math.round(directOffsetMs);
+    }
+    const hostname = cleanText(safe(() => location.hostname, ""));
+    const world = cleanText(safe(() => window.game_data.world, ""));
+    const market = cleanText(safe(() => window.game_data.market, ""));
+    const locale = cleanText(safe(() => window.game_data.locale, ""));
+    if (
+      /^ru\d+$/i.test(world) ||
+      market === "ru" ||
+      locale === "ru_RU" ||
+      /voynaplemyon/i.test(hostname)
+    ) {
+      return 3 * 60 * 60 * 1000;
+    }
+    const fallbackOffsetMs = getServerUtcOffsetMs();
+    return Number.isFinite(fallbackOffsetMs) ? Math.round(fallbackOffsetMs) : 0;
+  };
+
+  const getServerWallClockPartsWithOffset = (dateLike, offsetMsRaw) => {
+    const epochMs = Number(new Date(dateLike).getTime());
+    const offsetMs = Number(offsetMsRaw || 0);
+    if (!Number.isFinite(epochMs) || !Number.isFinite(offsetMs)) return null;
+    const shifted = new Date(epochMs + offsetMs);
+    if (!Number.isFinite(shifted.getTime())) return null;
+    return {
+      year: shifted.getUTCFullYear(),
+      month: shifted.getUTCMonth() + 1,
+      day: shifted.getUTCDate(),
+      hour: shifted.getUTCHours(),
+      minute: shifted.getUTCMinutes(),
+      second: shifted.getUTCSeconds(),
+      millisecond: shifted.getUTCMilliseconds(),
+    };
   };
 
   const getServerWallClockDate = (dateLike) => {
@@ -3269,6 +3341,56 @@
     const etaMs = toFiniteEpochMs(incoming.etaEpochMs || incoming.arrivalEpochMs);
     return ["src", sourceIncomingId, originKey, targetKey, Number.isFinite(etaMs) ? String(Math.round(etaMs)) : "?"].join("|");
   };
+  const isServerOffsetShift = (leftMsRaw, rightMsRaw, toleranceMs = 60 * 1000) => {
+    const leftMs = toFiniteEpochMs(leftMsRaw);
+    const rightMs = toFiniteEpochMs(rightMsRaw);
+    if (!Number.isFinite(leftMs) || !Number.isFinite(rightMs)) return false;
+    const serverOffsetMs = Math.abs(getReliableServerTextUtcOffsetMs());
+    if (!Number.isFinite(serverOffsetMs) || serverOffsetMs <= 0) return false;
+    return Math.abs(Math.abs(leftMs - rightMs) - serverOffsetMs) <= toleranceMs;
+  };
+  const isSameFavoriteAttackWindow = (entryRaw, incomingRaw) => {
+    const entry =
+      entryRaw && typeof entryRaw === "object"
+        ? entryRaw.incoming || entryRaw.item || entryRaw.payload || entryRaw
+        : null;
+    const incoming =
+      incomingRaw && typeof incomingRaw === "object" ? incomingRaw : null;
+    if (!entry || !incoming) return false;
+    const entrySourceId =
+      cleanText(entryRaw && entryRaw.sourceIncomingId) ||
+      cleanText(entry.sourceIncomingId) ||
+      cleanText(entry.id);
+    const incomingSourceId =
+      cleanText(incoming.sourceIncomingId) || cleanText(incoming.id);
+    const sameSourceId =
+      entrySourceId && incomingSourceId && entrySourceId === incomingSourceId;
+    const entryTarget = normalizeCoordIdentity(entry.targetCoord || entry.target);
+    const incomingTarget = normalizeCoordIdentity(
+      incoming.targetCoord || incoming.target,
+    );
+    const entryOrigin = normalizeCoordIdentity(entry.originCoord || entry.origin);
+    const incomingOrigin = normalizeCoordIdentity(
+      incoming.originCoord || incoming.origin,
+    );
+    const sameRoute =
+      entryTarget &&
+      incomingTarget &&
+      entryTarget === incomingTarget &&
+      (!entryOrigin || !incomingOrigin || entryOrigin === incomingOrigin);
+    if (!sameSourceId && !sameRoute) return false;
+    const entryEtaMs = toFiniteEpochMs(entry.etaEpochMs || entry.arrivalEpochMs);
+    const incomingEtaMs = toFiniteEpochMs(
+      incoming.etaEpochMs || incoming.arrivalEpochMs,
+    );
+    if (!Number.isFinite(entryEtaMs) || !Number.isFinite(incomingEtaMs)) {
+      return sameSourceId;
+    }
+    return (
+      Math.abs(entryEtaMs - incomingEtaMs) <= 3000 ||
+      isServerOffsetShift(entryEtaMs, incomingEtaMs)
+    );
+  };
   function repairMessageFavoriteEtaMs(source, etaMs) {
     if (!source || typeof source !== "object" || !Number.isFinite(etaMs)) {
       return { etaMs, repaired: false };
@@ -3276,20 +3398,7 @@
     const sourceKind = cleanText(source.arrivalEpochSource);
     const nowParts = getServerWallClockParts(getServerNowMs());
     if (!nowParts) return { etaMs, repaired: false };
-    const getFavoriteTextServerUtcOffsetMs = () => {
-      const directOffsetMs = getDirectServerUtcOffsetMs();
-      if (Number.isFinite(directOffsetMs) && Math.abs(directOffsetMs) > 0) {
-        return Math.round(directOffsetMs);
-      }
-      const hostname = cleanText(safe(() => location.hostname, ""));
-      if (/voynaplemyon/i.test(hostname)) return 3 * 60 * 60 * 1000;
-      const market = cleanText(safe(() => window.game_data.market, ""));
-      const locale = cleanText(safe(() => window.game_data.locale, ""));
-      if (market === "ru" || locale === "ru_RU") return 3 * 60 * 60 * 1000;
-      const fallbackOffsetMs = getServerUtcOffsetMs();
-      return Number.isFinite(fallbackOffsetMs) ? Math.round(fallbackOffsetMs) : 0;
-    };
-    const favoriteTextOffsetMs = getFavoriteTextServerUtcOffsetMs();
+    const favoriteTextOffsetMs = getReliableServerTextUtcOffsetMs();
     const buildFavoriteTextEpochMs = (
       year,
       month,
@@ -3707,7 +3816,9 @@
     state.favoritesEntries = sourceEntries;
     const existingIndex = sourceEntries.findIndex(
       (entry) =>
-        String(cleanText(entry && entry.sourceKey) || "") === String(sourceKey || ""),
+        String(cleanText(entry && entry.sourceKey) || "") ===
+          String(sourceKey || "") ||
+        isSameFavoriteAttackWindow(entry, normalizedIncoming),
     );
     const addedAtMs = getServerNowMs();
     if (existingIndex >= 0) {
@@ -3715,9 +3826,27 @@
       if (!existing) {
         sourceEntries.splice(existingIndex, 1);
       } else {
+        const existingId = cleanText(existing.id);
+        const existingSourceIncomingId =
+          cleanText(existing.sourceIncomingId) ||
+          cleanText(existing.incoming && existing.incoming.sourceIncomingId) ||
+          cleanText(normalizedIncoming.sourceIncomingId) ||
+          cleanText(normalizedIncoming.id) ||
+          null;
+        const replacementIncoming = {
+          ...normalizedIncoming,
+          id: existingId || cleanText(normalizedIncoming.id),
+          sourceIncomingId: existingSourceIncomingId,
+          favoriteComment: safeComment,
+        };
         existing.comment = safeComment;
         existing.addedAtMs = addedAtMs;
-        existing.incoming.favoriteComment = safeComment;
+        existing.sourceKey = sourceKey;
+        existing.sourceIncomingId = existingSourceIncomingId;
+        existing.etaEpochMs = toFiniteEpochMs(
+          replacementIncoming.etaEpochMs || replacementIncoming.arrivalEpochMs,
+        );
+        existing.incoming = replacementIncoming;
         if (Number.isFinite(resolvedSigil)) {
           existing.incoming.sigilPercent = normalizeSigilPercent(resolvedSigil);
           existing.sigilPercent = normalizeSigilPercent(resolvedSigil);
@@ -7500,6 +7629,152 @@
       timeToken,
     };
   };
+  const parseForumArrivalDatePayloadReliable = (rawText) => {
+    const fallbackPayload = parseMessageArrivalDatePayload(rawText);
+    const source = String(rawText || "").replace(/\u00a0/g, " ");
+    if (!cleanText(source)) return fallbackPayload;
+
+    const offsetMs = getReliableServerTextUtcOffsetMs();
+    const makePayload = ({
+      etaEpochMs,
+      arrivalMs = null,
+      attackerName = null,
+      hour,
+      minute,
+      second,
+      millisecond = 0,
+    }) => {
+      if (!Number.isFinite(etaEpochMs)) return fallbackPayload;
+      const safeMs = Math.max(0, toInt(millisecond) || toInt(arrivalMs) || 0);
+      return {
+        ...(fallbackPayload || {}),
+        etaEpochMs,
+        arrivalMs: safeMs,
+        attackerName:
+          cleanText(attackerName) ||
+          cleanText(fallbackPayload && fallbackPayload.attackerName) ||
+          null,
+        timeToken: `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:${String(
+          second,
+        ).padStart(2, "0")}:${String(safeMs).padStart(3, "0")}`,
+      };
+    };
+
+    const monthDateMatch = source.match(
+      /([A-Za-zА-Яа-яёЁ]{3,}\.?)\s*(\d{1,2})\s*,?\s*(\d{4})\s+(\d{1,2}):(\d{2}):(\d{2})(?:[:.](\d{1,3}))?/i,
+    );
+    if (monthDateMatch) {
+      const monthIndex = parseMessageMonthIndex(monthDateMatch[1]);
+      const day = toInt(monthDateMatch[2]);
+      const year = toInt(monthDateMatch[3]);
+      const hour = toInt(monthDateMatch[4]);
+      const minute = toInt(monthDateMatch[5]);
+      const second = toInt(monthDateMatch[6]);
+      const ms = Math.max(0, toInt(monthDateMatch[7]) || 0);
+      if (
+        Number.isInteger(monthIndex) &&
+        Number.isFinite(day) &&
+        Number.isFinite(year) &&
+        Number.isFinite(hour) &&
+        Number.isFinite(minute) &&
+        Number.isFinite(second)
+      ) {
+        const etaEpochMs = buildServerEpochMsWithOffset(
+          year,
+          monthIndex + 1,
+          day,
+          hour,
+          minute,
+          second,
+          ms,
+          offsetMs,
+        );
+        const tail = cleanText(
+          source.slice(monthDateMatch.index + monthDateMatch[0].length),
+        );
+        return makePayload({
+          etaEpochMs,
+          arrivalMs: ms,
+          attackerName: tail || null,
+          hour,
+          minute,
+          second,
+          millisecond: ms,
+        });
+      }
+    }
+
+    const numericDateMatch = source.match(
+      /(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?\s*(?:в)?\s*(\d{1,2}):(\d{2}):(\d{2})(?:[:.](\d{1,3}))?/i,
+    );
+    if (numericDateMatch) {
+      const day = toInt(numericDateMatch[1]);
+      const month = toInt(numericDateMatch[2]);
+      const yearRaw = toInt(numericDateMatch[3]);
+      const nowParts = getServerWallClockPartsWithOffset(
+        getServerNowMs(),
+        offsetMs,
+      );
+      const year = Number.isFinite(yearRaw)
+        ? yearRaw < 100
+          ? 2000 + yearRaw
+          : yearRaw
+        : nowParts && nowParts.year;
+      const hour = toInt(numericDateMatch[4]);
+      const minute = toInt(numericDateMatch[5]);
+      const second = toInt(numericDateMatch[6]);
+      const ms = Math.max(0, toInt(numericDateMatch[7]) || 0);
+      if (
+        Number.isFinite(day) &&
+        Number.isFinite(month) &&
+        Number.isFinite(year) &&
+        Number.isFinite(hour) &&
+        Number.isFinite(minute) &&
+        Number.isFinite(second)
+      ) {
+        let etaEpochMs = buildServerEpochMsWithOffset(
+          year,
+          month,
+          day,
+          hour,
+          minute,
+          second,
+          ms,
+          offsetMs,
+        );
+        if (
+          Number.isFinite(etaEpochMs) &&
+          !Number.isFinite(yearRaw) &&
+          etaEpochMs < getServerNowMs() - 183 * 24 * 60 * 60 * 1000
+        ) {
+          etaEpochMs = buildServerEpochMsWithOffset(
+            year + 1,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            ms,
+            offsetMs,
+          );
+        }
+        const tail = cleanText(
+          source.slice(numericDateMatch.index + numericDateMatch[0].length),
+        );
+        return makePayload({
+          etaEpochMs,
+          arrivalMs: ms,
+          attackerName: tail || null,
+          hour,
+          minute,
+          second,
+          millisecond: ms,
+        });
+      }
+    }
+
+    return fallbackPayload;
+  };
   const formatManualDateTimeInputValue = (epochMs) => {
     const parts = getServerWallClockParts(epochMs);
     if (!parts) return "";
@@ -7947,9 +8222,8 @@
       null;
     if (!scope) return [];
 
-    const postBodies = Array.from(
-      scope.querySelectorAll(".post .text, #forum_post_list .text"),
-    ).filter((node) => node && node.isConnected);
+    const postBodies = getForumPostBodies(root);
+    const threadSigilPercent = getForumThreadFirstPostSigilPercent(root);
     const hints = [];
     const parseDebug = {
       posts: postBodies.length,
@@ -7957,8 +8231,12 @@
       plainLines: 0,
       triggerHost: 0,
       triggerPlain: 0,
+      threadSigilPercent: Number.isFinite(threadSigilPercent)
+        ? threadSigilPercent
+        : null,
+      threadSigilFallbackUsed: 0,
     };
-    const parseHintsFromLines = (lines, mode = "host") => {
+    const parseHintsFromLines = (lines, mode = "host", fallbackSigil = null) => {
       const sourceLines = Array.isArray(lines) ? lines : [];
       const localHints = [];
       if (mode === "host") parseDebug.hostLines += sourceLines.length;
@@ -8004,7 +8282,7 @@
         const beforeMarker = cleanText(arrivalLine.slice(0, markerIndex)) || null;
         const afterMarker =
           cleanText(arrivalLine.slice(markerIndex + markerMatch[0].length)) || "";
-        const parsedDate = parseMessageArrivalDatePayload(afterMarker);
+        const parsedDate = parseForumArrivalDatePayloadReliable(afterMarker);
         if (!parsedDate || !Number.isFinite(parsedDate.etaEpochMs)) continue;
 
         const nearestTarget = findNearestMessageTargetAbove(
@@ -8024,6 +8302,17 @@
           sourceLines,
           arrivalIndex,
         );
+        const resolvedSigilPercent = selectPreferredPositiveSigilPercent(
+          nearestSigilPercent,
+          fallbackSigil,
+          threadSigilPercent,
+        );
+        if (
+          !Number.isFinite(nearestSigilPercent) &&
+          Number.isFinite(resolvedSigilPercent)
+        ) {
+          parseDebug.threadSigilFallbackUsed += 1;
+        }
         const comment = normalizeForumSliceComment(triggerLineRaw || triggerLine);
         localHints.push({
           targetCoord,
@@ -8034,8 +8323,8 @@
             ? parsedDate.arrivalMs
             : null,
           comment,
-          sigilPercent: Number.isFinite(nearestSigilPercent)
-            ? normalizeSigilPercent(nearestSigilPercent)
+          sigilPercent: Number.isFinite(resolvedSigilPercent)
+            ? normalizeSigilPercent(resolvedSigilPercent)
             : null,
         });
       }
@@ -8043,7 +8332,10 @@
     };
     postBodies.forEach((postBody) => {
       const hostLines = extractMessageLinesWithHosts(postBody);
-      let postHints = parseHintsFromLines(hostLines, "host");
+      const postSigilPercent = selectPreferredPositiveSigilPercent(
+        findNearestMessageSigilPercentAbove(hostLines, hostLines.length - 1),
+      );
+      let postHints = parseHintsFromLines(hostLines, "host", postSigilPercent);
       if (!postHints.length) {
         const plainLines = extractMessagePlainLines(postBody).filter(
           (entry) =>
@@ -8051,7 +8343,11 @@
               allowSliceKeyword: true,
             }),
         );
-        postHints = parseHintsFromLines(plainLines, "plain");
+        const plainPostSigilPercent = selectPreferredPositiveSigilPercent(
+          findNearestMessageSigilPercentAbove(plainLines, plainLines.length - 1),
+          postSigilPercent,
+        );
+        postHints = parseHintsFromLines(plainLines, "plain", plainPostSigilPercent);
       }
       if (postHints.length) hints.push(...postHints);
     });
@@ -8073,7 +8369,92 @@
         byKey.set(key, hint);
       }
     });
-    return Array.from(byKey.values());
+	    return Array.from(byKey.values());
+	  };
+  const parseArrivalClockFromText = (textRaw, arrivalMsRaw = null) => {
+    const text = cleanText(textRaw);
+    if (!text) return null;
+    const matches = Array.from(
+      text.matchAll(/(\d{1,2}):(\d{2}):(\d{2})(?:[:.](\d{1,3}))?/g),
+    );
+    if (!matches.length) return null;
+    const match = matches[matches.length - 1];
+    const hour = toInt(match[1]);
+    const minute = toInt(match[2]);
+    const second = toInt(match[3]);
+    const msRaw = toInt(match[4]);
+    const fallbackMs = toInt(arrivalMsRaw);
+    const millisecond = Number.isFinite(msRaw)
+      ? Math.max(0, msRaw)
+      : Number.isFinite(fallbackMs)
+        ? Math.max(0, fallbackMs)
+        : null;
+    if (
+      !Number.isFinite(hour) ||
+      !Number.isFinite(minute) ||
+      !Number.isFinite(second)
+    ) {
+      return null;
+    }
+    return { hour, minute, second, millisecond };
+  };
+  const epochMatchesArrivalClockText = (epochMsRaw, textRaw, arrivalMsRaw = null) => {
+    const epochMs = toFiniteEpochMs(epochMsRaw);
+    if (!Number.isFinite(epochMs)) return false;
+    const clock = parseArrivalClockFromText(textRaw, arrivalMsRaw);
+    if (!clock) return false;
+    const parts = getServerWallClockPartsWithOffset(
+      epochMs,
+      getReliableServerTextUtcOffsetMs(),
+    );
+    if (!parts) return false;
+    const msMatches =
+      !Number.isFinite(clock.millisecond) ||
+      Math.abs(parts.millisecond - clock.millisecond) <= 1;
+    return (
+      parts.hour === clock.hour &&
+      parts.minute === clock.minute &&
+      parts.second === clock.second &&
+      msMatches
+    );
+  };
+  const chooseForumFavoriteEtaMs = ({ hint, incoming }) => {
+    const hintEtaMs = toFiniteEpochMs(hint && hint.etaEpochMs);
+    const incomingEtaMs = toFiniteEpochMs(
+      incoming && (incoming.arrivalEpochMs || incoming.etaEpochMs),
+    );
+    if (!Number.isFinite(hintEtaMs)) return incomingEtaMs;
+    if (!Number.isFinite(incomingEtaMs)) return hintEtaMs;
+    const diffMs = Math.abs(hintEtaMs - incomingEtaMs);
+    if (diffMs <= 3000) return hintEtaMs;
+    if (!isServerOffsetShift(hintEtaMs, incomingEtaMs)) return hintEtaMs;
+
+    const arrivalText = cleanText(hint && hint.arrivalText);
+    const arrivalMs = Number.isFinite(toInt(hint && hint.arrivalMs))
+      ? toInt(hint && hint.arrivalMs)
+      : null;
+    const hintMatches = epochMatchesArrivalClockText(
+      hintEtaMs,
+      arrivalText,
+      arrivalMs,
+    );
+    const incomingMatches = epochMatchesArrivalClockText(
+      incomingEtaMs,
+      arrivalText,
+      arrivalMs,
+    );
+    const selectedEtaMs =
+      incomingMatches || !hintMatches ? incomingEtaMs : hintEtaMs;
+    console.warn(`${LOG_PREFIX} [forum-favorite-eta-repair]`, {
+      version: VERSION,
+      hint: formatTimeWithMs(hintEtaMs),
+      incoming: formatTimeWithMs(incomingEtaMs),
+      selected: formatTimeWithMs(selectedEtaMs),
+      arrivalText,
+      hintMatches,
+      incomingMatches,
+    });
+    return selectedEtaMs;
   };
   const matchForumSliceHintToIncoming = (hint, incomingItems) => {
     const sourceItems = Array.isArray(incomingItems) ? incomingItems : [];
@@ -8110,9 +8491,13 @@
       );
       if (!Number.isFinite(itemEtaMs)) return;
       const deltaMs = Math.abs(itemEtaMs - hintEtaMs);
-      if (deltaMs > 3000) return;
-      if (deltaMs < bestDelta) {
-        bestDelta = deltaMs;
+      const adjustedDeltaMs = isServerOffsetShift(itemEtaMs, hintEtaMs)
+        ? 3000 +
+          Math.abs(deltaMs - Math.abs(getReliableServerTextUtcOffsetMs()))
+        : deltaMs;
+      if (deltaMs > 3000 && !isServerOffsetShift(itemEtaMs, hintEtaMs)) return;
+      if (adjustedDeltaMs < bestDelta) {
+        bestDelta = adjustedDeltaMs;
         best = item;
       }
     });
@@ -8185,14 +8570,14 @@
         return;
       }
       matched += 1;
-      const hintEtaMs = toFiniteEpochMs(hint && hint.etaEpochMs);
+      const favoriteEtaMs = chooseForumFavoriteEtaMs({ hint, incoming });
       const incomingForFavorite =
-        Number.isFinite(hintEtaMs) && incoming && typeof incoming === "object"
+        Number.isFinite(favoriteEtaMs) && incoming && typeof incoming === "object"
           ? {
               ...incoming,
-              etaEpochMs: hintEtaMs,
-              arrivalEpochMs: hintEtaMs,
-              arrivalText: formatArrivalTextFromEpochMs(hintEtaMs),
+              etaEpochMs: favoriteEtaMs,
+              arrivalEpochMs: favoriteEtaMs,
+              arrivalText: formatArrivalTextFromEpochMs(favoriteEtaMs),
               arrivalServerText: cleanText(hint && hint.arrivalText) || null,
               arrivalMs: Number.isFinite(toInt(hint && hint.arrivalMs))
                 ? toInt(hint && hint.arrivalMs)
@@ -9661,6 +10046,7 @@
 
     const lines = extractMessagePlainLines(root);
     const anchorCandidates = extractMessageTimeAnchorCandidates(root);
+    const threadSigilPercent = getForumThreadFirstPostSigilPercent(doc);
     const items = [];
     const parsedEntries = [];
 
@@ -9690,9 +10076,9 @@
       const fallbackOriginCoord = originCoord
         ? originCoord
         : findNearestMessageOriginAbove(lines, index - 1, currentTargetCoord);
-      const nearestSigilPercent = findNearestMessageSigilPercentAbove(
-        lines,
-        index,
+      const nearestSigilPercent = selectPreferredPositiveSigilPercent(
+        findNearestMessageSigilPercentAbove(lines, index),
+        threadSigilPercent,
       );
       const unit = detectUnitFromText(beforeMarker) || detectUnitFromText(line);
       const targetCoordObj = parseCoord(currentTargetCoord);
@@ -20286,7 +20672,10 @@ ${panelHtml}`;
     const unresolved = [];
     const createInlineActionsNode = (entry, incomingId) => {
       const incoming = getIncomingById(incomingId);
-      const incomingSigil = getIncomingSigilPercent(incoming);
+      const incomingSigil = selectPreferredPositiveSigilPercent(
+        getIncomingSigilPercent(incoming),
+        getForumThreadFirstPostSigilPercent(document),
+      );
       const actions = document.createElement("span");
       actions.className = "smm-msg-inline-actions";
       if (Number.isFinite(incomingSigil)) {
@@ -20413,7 +20802,10 @@ ${panelHtml}`;
         const incomingId = cleanText(entry && entry.incomingId);
         if (!incomingId) return "";
         const incoming = getIncomingById(incomingId);
-        const incomingSigil = getIncomingSigilPercent(incoming);
+        const incomingSigil = selectPreferredPositiveSigilPercent(
+          getIncomingSigilPercent(incoming),
+          getForumThreadFirstPostSigilPercent(document),
+        );
         const label = `${entry.originCoord || "?"} → ${entry.targetCoord || "?"} · ${
           entry.timeToken || "ETA"
         }`;
@@ -20492,11 +20884,12 @@ ${panelHtml}`;
     }
     const authoritativeMessageSigilPercent =
       getCurrentPageAuthoritativeSigilPercent();
-    const messageSigilPercent = Number.isFinite(
-      authoritativeMessageSigilPercent,
-    )
-      ? authoritativeMessageSigilPercent
-      : normalizeSigilPercent(detectActiveSigilPercent());
+    const messageSigilPercent =
+      selectPreferredPositiveSigilPercent(
+        authoritativeMessageSigilPercent,
+        getForumThreadFirstPostSigilPercent(document),
+        detectActiveSigilPercent(),
+      ) || 0;
     if (
       Number.isFinite(authoritativeMessageSigilPercent) ||
       messageSigilPercent > 0
@@ -21149,18 +21542,14 @@ ${panelHtml}`;
       return false;
     }
 
-    const nearestSigilPercent = normalizeSigilPercent(
-      detectNearestSigilPercentAboveNode(actionsNode),
+    const nearestSigilPercent = detectNearestSigilPercentAboveNode(actionsNode);
+    const threadSigilPercent = getForumThreadFirstPostSigilPercent(document);
+    const fallbackSigilPercent = getDefaultSigilForAction("slice");
+    const messageSigilPercent = selectPreferredPositiveSigilPercent(
+      nearestSigilPercent,
+      threadSigilPercent,
+      fallbackSigilPercent,
     );
-    const fallbackSigilPercent = normalizeSigilPercent(
-      getDefaultSigilForAction("slice"),
-    );
-    const messageSigilPercent =
-      nearestSigilPercent > 0
-        ? nearestSigilPercent
-        : fallbackSigilPercent > 0
-          ? fallbackSigilPercent
-          : null;
     if (Number.isFinite(messageSigilPercent) && messageSigilPercent > 0) {
       state.detectedSigilPercent = normalizeSigilPercent(messageSigilPercent);
       incoming.sigilPercent = normalizeSigilPercent(messageSigilPercent);
@@ -21911,17 +22300,19 @@ ${panelHtml}`;
           ) || messageFavoriteButton,
         );
         const sigilFromIncoming = getIncomingSigilPercent(incoming);
-        const resolvedSigilForFavorite = [
+        const sigilFromForumThread = getForumThreadFirstPostSigilPercent(document);
+        const resolvedSigilForFavorite = selectPreferredPositiveSigilPercent(
           sigilFromButton,
           sigilFromActionsNode,
           sigilFromMessage,
           sigilFromIncoming,
-        ].find((value) => Number.isFinite(Number(value)));
+          sigilFromForumThread,
+        );
         const result = addIncomingToFavorites({
           incoming,
           comment,
-          sigilPercent: Number.isFinite(Number(resolvedSigilForFavorite))
-            ? Number(resolvedSigilForFavorite)
+          sigilPercent: Number.isFinite(resolvedSigilForFavorite)
+            ? resolvedSigilForFavorite
             : undefined,
         });
         if (!result || !result.ok) {
