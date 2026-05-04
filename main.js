@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.46";
+  const VERSION = "0.10.47";
   const LOG_PREFIX = "[ScriptMM]";
   const MULTI_TAB_PRESENCE_KEY = "scriptmm.active_instances.v1";
   const MULTI_TAB_HEARTBEAT_INTERVAL_MS = 3000;
@@ -293,6 +293,10 @@
     selectedVillageGroupId: "0",
     villageGroupOptions: [{ id: "0", label: "все" }],
     villageGroupReloadPromise: null,
+    forumThreadSigilCacheKey: null,
+    forumThreadSigilPercent: null,
+    forumThreadSigilLoadedAtMs: 0,
+    forumThreadSigilLoadingPromise: null,
     hiddenIncomings: {},
     hiddenVillageGroups: {},
     favoritesEntries: [],
@@ -1949,6 +1953,56 @@
     return normalizeSigilPercent(matches[matches.length - 1].value);
   };
 
+  const getCurrentForumThreadCacheKey = () => {
+    if (!isForumThreadPlanningScreen()) return null;
+    const threadId = cleanText(getUrlParam(location.href, "thread_id"));
+    if (!threadId) return null;
+    const world =
+      cleanText(safe(() => window.game_data.world, null)) ||
+      cleanText(location.host) ||
+      "world";
+    return `${world}:${threadId}`;
+  };
+
+  const isCurrentForumThreadFirstPage = () => {
+    if (!isForumThreadPlanningScreen()) return false;
+    const pageRaw = cleanText(getUrlParam(location.href, "page"));
+    if (!pageRaw) return true;
+    const page = toInt(pageRaw);
+    return Number.isFinite(page) && page <= 0;
+  };
+
+  const buildForumThreadFirstPageUrl = () => {
+    if (!isForumThreadPlanningScreen()) return null;
+    return safe(() => {
+      const url = new URL(location.href, location.origin);
+      url.searchParams.set("page", "0");
+      url.searchParams.delete("answer");
+      url.searchParams.delete("quote_id");
+      url.searchParams.delete("edit_post_id");
+      url.hash = "";
+      return url.toString();
+    }, null);
+  };
+
+  const getCachedForumThreadSigilPercent = () => {
+    const key = getCurrentForumThreadCacheKey();
+    if (!key || state.forumThreadSigilCacheKey !== key) return null;
+    const value = normalizeSigilPercent(state.forumThreadSigilPercent);
+    return value > 0 ? value : null;
+  };
+
+  const setCachedForumThreadSigilPercent = (value) => {
+    const normalized = normalizeSigilPercent(value);
+    const key = getCurrentForumThreadCacheKey();
+    if (!key || normalized <= 0) return null;
+    state.forumThreadSigilCacheKey = key;
+    state.forumThreadSigilPercent = normalized;
+    state.forumThreadSigilLoadedAtMs = getServerNowMs();
+    state.detectedSigilPercent = normalized;
+    return normalized;
+  };
+
   const getForumPostBodies = (root = document) => {
     const scope =
       root.querySelector("#forum_post_list") ||
@@ -1961,8 +2015,7 @@
     ).filter((node) => node && node.isConnected);
   };
 
-  const getForumThreadFirstPostSigilPercent = (root = document) => {
-    if (!isForumThreadPlanningScreen()) return null;
+  const extractForumFirstPostSigilPercent = (root = document) => {
     const firstPostBody = getForumPostBodies(root)[0] || null;
     if (!firstPostBody) return null;
     const text = `${safe(() => firstPostBody.innerText, "") || ""}\n${
@@ -1971,6 +2024,80 @@
     return selectPreferredPositiveSigilPercent(
       ...extractSigilPercentsFromText(text),
     );
+  };
+
+  const getForumThreadFirstPostSigilPercent = (root = document) => {
+    if (!isForumThreadPlanningScreen()) return null;
+
+    if (root !== document) {
+      return extractForumFirstPostSigilPercent(root);
+    }
+
+    const cached = getCachedForumThreadSigilPercent();
+    if (Number.isFinite(cached) && cached > 0) return cached;
+
+    if (!isCurrentForumThreadFirstPage()) return null;
+
+    const local = extractForumFirstPostSigilPercent(root);
+    if (Number.isFinite(local) && local > 0) {
+      return setCachedForumThreadSigilPercent(local);
+    }
+    return null;
+  };
+
+  const loadForumThreadFirstPostSigilPercent = async ({ force = false } = {}) => {
+    if (!isForumThreadPlanningScreen()) return null;
+
+    const cached = getCachedForumThreadSigilPercent();
+    if (!force && Number.isFinite(cached) && cached > 0) return cached;
+
+    const local = getForumThreadFirstPostSigilPercent(document);
+    if (!force && Number.isFinite(local) && local > 0) return local;
+
+    if (state.forumThreadSigilLoadingPromise && !force) {
+      return state.forumThreadSigilLoadingPromise;
+    }
+
+    const firstPageUrl = buildForumThreadFirstPageUrl();
+    if (!firstPageUrl) return null;
+
+    state.forumThreadSigilLoadingPromise = (async () => {
+      try {
+        const response = await fetch(firstPageUrl, {
+          credentials: "include",
+          cache: "no-store",
+        });
+        if (!response || !response.ok) return null;
+        const html = await response.text();
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(html, "text/html");
+        const parsed = extractForumFirstPostSigilPercent(doc);
+        if (Number.isFinite(parsed) && parsed > 0) {
+          console.info(`${LOG_PREFIX} [forum-sigil][loaded-first-post]`, {
+            version: VERSION,
+            sigilPercent: parsed,
+            url: firstPageUrl,
+          });
+          return setCachedForumThreadSigilPercent(parsed);
+        }
+        console.info(`${LOG_PREFIX} [forum-sigil][not-found-first-post]`, {
+          version: VERSION,
+          url: firstPageUrl,
+        });
+        return null;
+      } catch (error) {
+        console.warn(`${LOG_PREFIX} [forum-sigil][load-failed]`, {
+          version: VERSION,
+          url: firstPageUrl,
+          error: formatErrorText(error),
+        });
+        return null;
+      } finally {
+        state.forumThreadSigilLoadingPromise = null;
+      }
+    })();
+
+    return state.forumThreadSigilLoadingPromise;
   };
 
   const collectSigilCandidatesFromDocument = (doc) => {
@@ -2212,6 +2339,13 @@
       return normalizeSigilPercent(explicitSigil);
     const defaultSigil = normalizeSigilPercent(getDefaultSigilForAction(action));
     const incomingSigil = getIncomingSigilPercent(incoming);
+    const incomingSigilSource = cleanText(
+      incoming &&
+        (incoming.arrivalEpochSource ||
+          incoming.source ||
+          incoming.sourceKind ||
+          incoming.sourceUrl),
+    );
     const shouldPreferIncomingSigil = Boolean(
       incoming &&
         (incoming.isHubIncoming ||
@@ -2219,12 +2353,17 @@
           incoming.isTribeIncoming ||
           incoming.isTribeAllyCommand ||
           incoming.isTribeAllyPlanned ||
-          incoming.isFavoriteEntry),
+          incoming.isFavoriteEntry ||
+          /^msg_/i.test(cleanText(incoming.id)) ||
+          /(?:message|forum|mail|favorite|info_village_note|forum_auto_favorite)/i.test(
+            incomingSigilSource,
+          )),
     );
-    if (Number.isFinite(incomingSigil)) {
+    if (Number.isFinite(incomingSigil) && incomingSigil > 0) {
       if (shouldPreferIncomingSigil) {
         return normalizeSigilPercent(incomingSigil);
       }
+      if (defaultSigil <= 0) return normalizeSigilPercent(incomingSigil);
     }
     return defaultSigil;
   };
@@ -4366,6 +4505,10 @@
     const timingStartMs = toFiniteMs(raw.timingStartMs);
     const timingEndMs = toFiniteMs(raw.timingEndMs);
     const timingPointMs = toFiniteMs(raw.timingPointMs);
+    const sigilPercentRaw = toNumber(raw.sigilPercent);
+    const sigilPercent = Number.isFinite(sigilPercentRaw)
+      ? normalizeSigilPercent(sigilPercentRaw)
+      : null;
     const statusUpdatedAtMs = toFiniteMs(raw.statusUpdatedAtMs);
     const checkedAtMs = toFiniteMs(raw.checkedAtMs);
     const resolvedAtMs = toFiniteMs(raw.resolvedAtMs);
@@ -4441,6 +4584,7 @@
       timingStartMs: Number.isFinite(timingStartMs) ? timingStartMs : null,
       timingEndMs: Number.isFinite(timingEndMs) ? timingEndMs : null,
       timingPointMs: Number.isFinite(timingPointMs) ? timingPointMs : null,
+      sigilPercent,
       units: normalizedUnits,
       goUrl: resolvedGoUrl,
       matchedCommandId: matchedCommandId || null,
@@ -13276,6 +13420,8 @@
     const villageId = cleanText(rowElement.getAttribute("data-village-id"));
     const targetCoord = cleanText(rowElement.getAttribute("data-target-coord"));
     const action = cleanText(rowElement.getAttribute("data-action")) || "slice";
+    const incomingId = cleanText(rowElement.getAttribute("data-incoming-id"));
+    const incoming = incomingId ? getIncomingById(incomingId) : null;
     const etaEpochMs = Number(rowElement.getAttribute("data-eta-ms"));
     const nowMs = getServerNow().getTime();
 
@@ -13283,13 +13429,17 @@
       cleanText(rowElement.getAttribute("data-default-sigil")),
     );
     let sigilPercent = actionUsesSigil(action)
-      ? resolveSigilPercentForAction(action, null, rowDefaultSigil)
+      ? selectPreferredPositiveSigilPercent(
+          rowDefaultSigil,
+          getIncomingSigilPercent(incoming),
+          getForumThreadFirstPostSigilPercent(document),
+          resolveSigilPercentForAction(action, incoming, rowDefaultSigil),
+        ) || 0
       : 0;
     if (actionUsesSigil(action) && sigilInput) {
       const parsedSigil = toNumber(sigilInput.value);
-      sigilPercent = normalizeSigilPercent(
-        Number.isFinite(parsedSigil) ? parsedSigil : sigilPercent,
-      );
+      sigilPercent =
+        selectPreferredPositiveSigilPercent(parsedSigil, sigilPercent) || 0;
       sigilInput.value = String(sigilPercent);
     } else if (sigilInput) {
       sigilInput.value = "0";
@@ -13461,11 +13611,18 @@
     const sigilInput = rowElement.querySelector(".smm-sigil-input");
     const action = cleanText(rowElement.getAttribute("data-action")) || "slice";
     if (sigilInput && !cleanText(sigilInput.value)) {
+      const incomingId = cleanText(rowElement.getAttribute("data-incoming-id"));
+      const incoming = incomingId ? getIncomingById(incomingId) : null;
       const rowDefaultSigil = toNumber(
         cleanText(rowElement.getAttribute("data-default-sigil")),
       );
       const defaultSigil = actionUsesSigil(action)
-        ? resolveSigilPercentForAction(action, null, rowDefaultSigil)
+        ? selectPreferredPositiveSigilPercent(
+            rowDefaultSigil,
+            getIncomingSigilPercent(incoming),
+            getForumThreadFirstPostSigilPercent(document),
+            resolveSigilPercentForAction(action, incoming, rowDefaultSigil),
+          ) || 0
         : 0;
       sigilInput.value = String(normalizeSigilPercent(defaultSigil));
     }
@@ -13665,11 +13822,15 @@
 </section>`;
     }
 
-    const defaultSigilPercent = resolveSigilPercentForAction(
-      action,
-      incoming,
-      options && options.sigilPercent,
-    );
+    const explicitOptionSigil = toNumber(options && options.sigilPercent);
+    const defaultSigilPercent = actionUsesSigil(action)
+      ? selectPreferredPositiveSigilPercent(
+          explicitOptionSigil,
+          getIncomingSigilPercent(incoming),
+          getForumThreadFirstPostSigilPercent(document),
+          resolveSigilPercentForAction(action, incoming, explicitOptionSigil),
+        ) || 0
+      : 0;
     const villagePlan = buildIncomingVillagePlans(incoming, {
       action,
       sigilPercent: defaultSigilPercent,
@@ -20896,6 +21057,35 @@ ${panelHtml}`;
     ) {
       state.detectedSigilPercent = messageSigilPercent;
     }
+    if (isForumThreadPlanningScreen()) {
+      void loadForumThreadFirstPostSigilPercent().then((threadSigilPercent) => {
+        if (!Number.isFinite(threadSigilPercent) || threadSigilPercent <= 0) return;
+        if (!isForumThreadPlanningScreen()) return;
+        if (
+          state.incomings &&
+          Array.isArray(state.incomings.items) &&
+          state.incomings.items.length
+        ) {
+          state.incomings.items = state.incomings.items.map((item) => {
+            if (!item || typeof item !== "object") return item;
+            const existingSigil = getIncomingSigilPercent(item);
+            if (Number.isFinite(existingSigil) && existingSigil > 0) return item;
+            const source = cleanText(item.arrivalEpochSource || item.source || item.id);
+            if (!/(?:message|forum|msg_)/i.test(source)) return item;
+            return {
+              ...item,
+              sigilPercent: normalizeSigilPercent(threadSigilPercent),
+            };
+          });
+        }
+        runForumAutoFavoriteImport({
+          payload: parseMessagePlanningPayload(document),
+          phase: "thread_sigil_loaded",
+          notifyOnAdd: true,
+        });
+        rerenderAllMessageInlinePanels("Сигил темы загружен из первого сообщения.");
+      });
+    }
     renderMessageInlineActionButtons(
       payload && Array.isArray(payload.anchors) ? payload.anchors : [],
     );
@@ -21543,7 +21733,14 @@ ${panelHtml}`;
     }
 
     const nearestSigilPercent = detectNearestSigilPercentAboveNode(actionsNode);
-    const threadSigilPercent = getForumThreadFirstPostSigilPercent(document);
+    let threadSigilPercent = getForumThreadFirstPostSigilPercent(document);
+    if (
+      actionUsesSigil(action) &&
+      !Number.isFinite(threadSigilPercent) &&
+      isForumThreadPlanningScreen()
+    ) {
+      threadSigilPercent = await loadForumThreadFirstPostSigilPercent();
+    }
     const fallbackSigilPercent = getDefaultSigilForAction("slice");
     const messageSigilPercent = selectPreferredPositiveSigilPercent(
       nearestSigilPercent,
@@ -21725,11 +21922,14 @@ ${panelHtml}`;
       (spotlightPanel && cleanText(panelNode.getAttribute("data-smm-action-label"))) ||
       PLAN_ACTION_LABELS[action] ||
       action;
-    const resolvedSigil = Number.isFinite(currentSigil)
-      ? currentSigil
-      : Number.isFinite(panelSigil)
-        ? panelSigil
-        : undefined;
+    const resolvedSigil = actionUsesSigil(action)
+      ? selectPreferredPositiveSigilPercent(
+          currentSigil,
+          panelSigil,
+          getIncomingSigilPercent(incoming),
+          getForumThreadFirstPostSigilPercent(document),
+        )
+      : null;
     if (Number.isFinite(resolvedSigil)) {
       panelNode.setAttribute(
         "data-smm-explicit-sigil",
@@ -21895,6 +22095,7 @@ ${panelHtml}`;
       const row = scheduleButton.closest(".smm-slice-row");
       if (!row) return true;
       syncScheduledCommandsFromStorage();
+      updateSliceRowState(row);
       const selection = collectSliceRowSelection(row);
       const units = selection.units || {};
       const unitKeys = Object.keys(units);
@@ -21918,6 +22119,14 @@ ${panelHtml}`;
       const fallbackIncoming = getIncomingById(incomingId);
       const incomingEtaMs = Number(row.getAttribute("data-eta-ms"));
       const action = cleanText(row.getAttribute("data-action")) || "slice";
+      const sigilPercent = actionUsesSigil(action)
+        ? selectPreferredPositiveSigilPercent(
+            toNumber(row.querySelector(".smm-sigil-input")?.value),
+            toNumber(cleanText(row.getAttribute("data-default-sigil"))),
+            getIncomingSigilPercent(fallbackIncoming),
+            getForumThreadFirstPostSigilPercent(document),
+          ) || 0
+        : null;
       console.info(`${LOG_PREFIX} [plan-schedule][click]`, {
         version: VERSION,
         source: "message_inline",
@@ -21932,6 +22141,7 @@ ${panelHtml}`;
         departureMs: Number.isFinite(departureMs)
           ? Math.round(departureMs)
           : null,
+        sigilPercent,
         units,
       });
       let plannerComment = null;
@@ -21970,6 +22180,7 @@ ${panelHtml}`;
         timingStartMs: timing.timingStartMs,
         timingEndMs: timing.timingEndMs,
         timingPointMs: timing.timingPointMs,
+        sigilPercent,
         departureMs,
         units,
         comment: plannerComment,
@@ -22300,7 +22511,10 @@ ${panelHtml}`;
           ) || messageFavoriteButton,
         );
         const sigilFromIncoming = getIncomingSigilPercent(incoming);
-        const sigilFromForumThread = getForumThreadFirstPostSigilPercent(document);
+        let sigilFromForumThread = getForumThreadFirstPostSigilPercent(document);
+        if (!Number.isFinite(sigilFromForumThread) && isForumThreadPlanningScreen()) {
+          sigilFromForumThread = await loadForumThreadFirstPostSigilPercent();
+        }
         const resolvedSigilForFavorite = selectPreferredPositiveSigilPercent(
           sigilFromButton,
           sigilFromActionsNode,
@@ -24687,6 +24901,7 @@ ${panelHtml}`;
           const row = scheduleButton.closest(".smm-slice-row");
           if (!row) return;
           syncScheduledCommandsFromStorage();
+          updateSliceRowState(row);
           const selection = collectSliceRowSelection(row);
           const units = selection.units || {};
           const unitKeys = Object.keys(units);
@@ -24707,8 +24922,17 @@ ${panelHtml}`;
           );
           const targetCoord = cleanText(row.getAttribute("data-target-coord"));
           const incomingId = cleanText(row.getAttribute("data-incoming-id"));
+          const fallbackIncoming = getIncomingById(incomingId);
           const incomingEtaMs = Number(row.getAttribute("data-eta-ms"));
           const action = cleanText(row.getAttribute("data-action")) || "slice";
+          const sigilPercent = actionUsesSigil(action)
+            ? selectPreferredPositiveSigilPercent(
+                toNumber(row.querySelector(".smm-sigil-input")?.value),
+                toNumber(cleanText(row.getAttribute("data-default-sigil"))),
+                getIncomingSigilPercent(fallbackIncoming),
+                getForumThreadFirstPostSigilPercent(document),
+              ) || 0
+            : null;
           console.info(`${LOG_PREFIX} [plan-schedule][click]`, {
             version: VERSION,
             source: "overlay",
@@ -24723,6 +24947,7 @@ ${panelHtml}`;
             departureMs: Number.isFinite(departureMs)
               ? Math.round(departureMs)
               : null,
+            sigilPercent,
             units,
           });
           let plannerComment = null;
@@ -24761,6 +24986,7 @@ ${panelHtml}`;
             timingStartMs: timing.timingStartMs,
             timingEndMs: timing.timingEndMs,
             timingPointMs: timing.timingPointMs,
+            sigilPercent,
             departureMs,
             units,
             comment: plannerComment,
