@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.48";
+  const VERSION = "0.10.50";
   const LOG_PREFIX = "[ScriptMM]";
   const DEBUG_VERBOSE_LOGS = false;
   const MULTI_TAB_PRESENCE_KEY = "scriptmm.active_instances.v1";
@@ -4504,13 +4504,28 @@
     if (!Number.isFinite(departureMs)) return null;
     const fromVillageId = cleanText(raw.fromVillageId);
     const fromVillageCoord = cleanText(raw.fromVillageCoord);
+    const targetVillageId = cleanText(raw.targetVillageId);
     const targetCoord = cleanText(raw.targetCoord);
     const normalizedUnits = normalizeUnitsMap(raw.units);
     if (!Object.keys(normalizedUnits).length) return null;
     const action = normalizePlanAction(raw.action);
     let status = normalizeManeuverStatus(raw.status);
     const incomingEtaMs = toFiniteMs(raw.incomingEtaMs);
+    const sourceIncomingId =
+      cleanText(raw.sourceIncomingId) || cleanText(raw.incomingId) || null;
+    const sourceIncomingEtaMs =
+      toFiniteMs(raw.sourceIncomingEtaMs) ||
+      (Number.isFinite(incomingEtaMs) ? incomingEtaMs : null);
     const createdAtMs = toFiniteMs(raw.createdAtMs) || getServerNowMs();
+    const travelDurationMsRaw = toFiniteMs(raw.travelDurationMs);
+    const travelDurationMs =
+      Number.isFinite(travelDurationMsRaw) && travelDurationMsRaw >= 0
+        ? travelDurationMsRaw
+        : Number.isFinite(sourceIncomingEtaMs)
+          ? Math.max(0, sourceIncomingEtaMs - departureMs)
+          : Number.isFinite(incomingEtaMs)
+            ? Math.max(0, incomingEtaMs - departureMs)
+            : null;
     const timingGapMs = toFiniteMs(raw.timingGapMs);
     const timingStartMs = toFiniteMs(raw.timingStartMs);
     const timingEndMs = toFiniteMs(raw.timingEndMs);
@@ -4572,6 +4587,7 @@
     return {
       id: cleanText(raw.id) || `cmd_${Math.random().toString(36).slice(2)}`,
       incomingId: cleanText(raw.incomingId) || null,
+      sourceIncomingId,
       action,
       actionLabel:
         cleanText(raw.actionLabel) || getPlanActionLabelByKey(action),
@@ -4585,9 +4601,16 @@
       resolvedAtMs: Number.isFinite(resolvedAtMs) ? resolvedAtMs : null,
       fromVillageId: resolvedFromVillageId || fromVillageId || null,
       fromVillageCoord: fromVillageCoord || null,
+      targetVillageId: targetVillageId || null,
       targetCoord: targetCoord || null,
       departureMs,
       incomingEtaMs: Number.isFinite(incomingEtaMs) ? incomingEtaMs : null,
+      sourceIncomingEtaMs: Number.isFinite(sourceIncomingEtaMs)
+        ? sourceIncomingEtaMs
+        : null,
+      travelDurationMs: Number.isFinite(travelDurationMs)
+        ? Math.round(travelDurationMs)
+        : null,
       timingType: cleanText(raw.timingType) || null,
       timingLabel: cleanText(raw.timingLabel) || null,
       timingGapMs: Number.isFinite(timingGapMs) ? timingGapMs : null,
@@ -5967,6 +5990,33 @@
       x: String(coord.x),
       y: String(coord.y),
     });
+  };
+
+  const buildVillageOverviewUrlById = (villageIdRaw) => {
+    const villageId = toInt(villageIdRaw);
+    if (!Number.isFinite(villageId) || villageId <= 0) return null;
+    const url = new URL("/game.php", location.origin);
+    addSitterParams(url);
+    url.searchParams.set("village", String(villageId));
+    url.searchParams.set("screen", "overview");
+    return url.toString();
+  };
+
+  const renderVillageCoordLinkHtml = ({
+    coordRaw,
+    villageIdRaw = null,
+    preferOverview = false,
+  } = {}) => {
+    const coordText = cleanText(coordRaw) || "?";
+    const villageId =
+      cleanText(villageIdRaw) || resolveVillageIdByCoord(coordText) || null;
+    const href =
+      (preferOverview ? buildVillageOverviewUrlById(villageId) : null) ||
+      buildVillageInfoUrlByCoordOrId(coordText, villageId);
+    if (!href) return escapeHtml(coordText);
+    return `<a class="smm-route-link" href="${escapeHtml(
+      href,
+    )}" target="_blank" rel="noopener noreferrer">${escapeHtml(coordText)}</a>`;
   };
 
   const buildPlaceCommandUrl = ({ fromVillageId, targetCoord, units }) => {
@@ -14324,6 +14374,15 @@
           const unitsHtml = formatPlanUnitsIconsHtml(command.units);
           const resolvedGoUrl =
             resolveScheduledCommandGoUrl(command) || cleanText(command.goUrl) || "";
+          const fromVillageHtml = renderVillageCoordLinkHtml({
+            coordRaw: command.fromVillageCoord || command.fromVillageId || "?",
+            villageIdRaw: command.fromVillageId,
+            preferOverview: true,
+          });
+          const targetVillageHtml = renderVillageCoordLinkHtml({
+            coordRaw: command.targetCoord || "?",
+            villageIdRaw: command.targetVillageId,
+          });
           const departureMs = Number(command.departureMs);
           const timing = safeResolveTimingForScheduledCommand(command);
           const timingCenter = safeComputeTimingCenterCopyValue(timing);
@@ -14355,8 +14414,8 @@
           )}">
   <td>${escapeHtml(typeLabel)}</td>
   <td>${unitsHtml}</td>
-  <td>${escapeHtml(command.fromVillageCoord || command.fromVillageId || "?")}</td>
-  <td>${escapeHtml(command.targetCoord || "?")}</td>
+  <td>${fromVillageHtml}</td>
+  <td>${targetVillageHtml}</td>
   <td>${escapeHtml(departureText)}</td>
   <td class="smm-plan-timing-cell"><div class="smm-plan-comment-wrap"><span${timingTextAttrs}>${escapeHtml(
     timingText,
@@ -15238,6 +15297,9 @@
             : getServerNowMs(),
           fromVillageCoord:
             cleanText(row.fromCoord || row.fromVillageCoord) || null,
+          targetVillageId:
+            cleanText(row.targetVillageId || row.villageId || row.targetId) ||
+            null,
           targetCoord: cleanText(row.targetCoord) || null,
           departureMs: Math.round(departureMs),
           incomingEtaMs: Number.isFinite(Number(row.arrivalAtMs))
@@ -15348,6 +15410,12 @@
             timingStartMs: item.timingStartMs,
             timingEndMs: item.timingEndMs,
             timingPointMs: item.timingPointMs,
+            departureMs: item.departureMs,
+            incomingId: item.incomingId,
+            incomingEtaMs: item.incomingEtaMs,
+            sourceIncomingId: item.sourceIncomingId,
+            sourceIncomingEtaMs: item.sourceIncomingEtaMs,
+            travelDurationMs: item.travelDurationMs,
           };
         } else if (!existingTimingLabel && localTimingLabel) {
           merged = {
@@ -15358,6 +15426,12 @@
             timingStartMs: item.timingStartMs,
             timingEndMs: item.timingEndMs,
             timingPointMs: item.timingPointMs,
+            departureMs: item.departureMs,
+            incomingId: item.incomingId,
+            incomingEtaMs: item.incomingEtaMs,
+            sourceIncomingId: item.sourceIncomingId,
+            sourceIncomingEtaMs: item.sourceIncomingEtaMs,
+            travelDurationMs: item.travelDurationMs,
           };
         }
         if (merged !== existing) {
@@ -15464,6 +15538,83 @@
     saveScheduledCommands("comment");
     return updatedCommand;
   };
+  const getScheduledCommandTravelDurationMs = (command) => {
+    const stored = toFiniteMs(command && command.travelDurationMs);
+    if (Number.isFinite(stored) && stored >= 0) return Math.round(stored);
+    const sourceEta =
+      toFiniteEpochMs(command && command.sourceIncomingEtaMs) ||
+      toFiniteEpochMs(command && command.incomingEtaMs);
+    const departureMs = toFiniteEpochMs(command && command.departureMs);
+    if (Number.isFinite(sourceEta) && Number.isFinite(departureMs)) {
+      return Math.max(0, Math.round(sourceEta - departureMs));
+    }
+    return null;
+  };
+  const getManualTimingTargetMs = (timing) => {
+    const pointMs = toFiniteEpochMs(timing && timing.timingPointMs);
+    if (Number.isFinite(pointMs)) return Math.round(pointMs);
+    const startMs = toFiniteEpochMs(timing && timing.timingStartMs);
+    const endMs = toFiniteEpochMs(timing && timing.timingEndMs);
+    if (Number.isFinite(startMs) && Number.isFinite(endMs)) {
+      return Math.round((startMs + endMs) / 2);
+    }
+    return null;
+  };
+  const buildScheduledCommandTimingUpdate = (command, timing) => {
+    const timingType = cleanText(timing && timing.timingType);
+    const sourceIncomingId =
+      cleanText(command && command.sourceIncomingId) ||
+      cleanText(command && command.incomingId) ||
+      null;
+    const sourceIncomingEtaMs =
+      toFiniteEpochMs(command && command.sourceIncomingEtaMs) ||
+      toFiniteEpochMs(command && command.incomingEtaMs);
+    const travelDurationMs = getScheduledCommandTravelDurationMs(command);
+    const base = {
+      timingType: timingType || null,
+      timingLabel: cleanText(timing && timing.timingLabel) || null,
+      timingGapMs: toFiniteMs(timing && timing.timingGapMs),
+      timingStartMs: toFiniteEpochMs(timing && timing.timingStartMs),
+      timingEndMs: toFiniteEpochMs(timing && timing.timingEndMs),
+      timingPointMs: toFiniteEpochMs(timing && timing.timingPointMs),
+      sourceIncomingId,
+      sourceIncomingEtaMs: Number.isFinite(sourceIncomingEtaMs)
+        ? Math.round(sourceIncomingEtaMs)
+        : null,
+      travelDurationMs: Number.isFinite(travelDurationMs)
+        ? Math.round(travelDurationMs)
+        : null,
+    };
+    if (timingType !== "manual") {
+      const restoredEtaMs = Number.isFinite(sourceIncomingEtaMs)
+        ? Math.round(sourceIncomingEtaMs)
+        : toFiniteEpochMs(command && command.incomingEtaMs);
+      const restoredDepartureMs =
+        Number.isFinite(restoredEtaMs) && Number.isFinite(travelDurationMs)
+          ? Math.round(restoredEtaMs - travelDurationMs)
+          : toFiniteEpochMs(command && command.departureMs);
+      return {
+        ...base,
+        incomingId: sourceIncomingId || cleanText(command && command.incomingId) || null,
+        incomingEtaMs: Number.isFinite(restoredEtaMs) ? restoredEtaMs : null,
+        departureMs: Number.isFinite(restoredDepartureMs)
+          ? restoredDepartureMs
+          : command.departureMs,
+      };
+    }
+    const manualTargetMs = getManualTimingTargetMs(timing);
+    if (!Number.isFinite(manualTargetMs) || !Number.isFinite(travelDurationMs)) {
+      return base;
+    }
+    return {
+      ...base,
+      // Force external userscripts to use manual timing fields instead of
+      // recalculating from the original incoming command.
+      incomingId: null,
+      incomingEtaMs: null,
+      departureMs: Math.round(manualTargetMs - travelDurationMs),
+    };
+  };
   const updateScheduledCommandTimingById = (commandId, timingInput) => {
     const safeId = cleanText(commandId);
     if (!safeId) return null;
@@ -15479,12 +15630,7 @@
         const timing = normalizeManualTimingInput(timingInput, command);
         updatedCommand = normalizeScheduledCommand({
           ...command,
-          timingType: timing.timingType,
-          timingLabel: timing.timingLabel,
-          timingGapMs: timing.timingGapMs,
-          timingStartMs: timing.timingStartMs,
-          timingEndMs: timing.timingEndMs,
-          timingPointMs: timing.timingPointMs,
+          ...buildScheduledCommandTimingUpdate(command, timing),
         });
         return updatedCommand;
       })
@@ -22283,6 +22429,8 @@ ${panelHtml}`;
         createdAtMs: getServerNowMs(),
         fromVillageId,
         fromVillageCoord,
+        targetVillageId:
+          cleanText(fallbackIncoming && fallbackIncoming.targetVillageId) || null,
         targetCoord,
         incomingId,
         incomingEtaMs,
@@ -25095,6 +25243,9 @@ ${panelHtml}`;
             createdAtMs: getServerNowMs(),
             fromVillageId,
             fromVillageCoord,
+            targetVillageId:
+              cleanText(fallbackIncoming && fallbackIncoming.targetVillageId) ||
+              null,
             targetCoord,
             incomingId,
             incomingEtaMs,
