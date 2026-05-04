@@ -1113,6 +1113,7 @@ javascript:(function(){
         let activeTabIndex = 0;
         let tabStates = [];
         let templates = []; // runtime templates for active tab only
+        let importEditMode = false;
 
         function getDefaultTabName(idx = 0) {
             return `вкладка ${idx + 1}`;
@@ -1819,6 +1820,10 @@ javascript:(function(){
                     showNotice(`Притайм: найдено ${entries.length} кор`, 'success', 2600);
                 }
                 const groupId = cleanText(document.getElementById('ts-group')?.value) || cleanText(getCurrentTabState()?.groupId) || '0';
+                if (importEditMode) {
+                    setNoblePretimeProgress(true, 1, 1, `Готово: найдено ${entries.length} кор. Для запуска нажмите "Сохранить"`);
+                    return;
+                }
                 setNoblePretimeProgress(true, 1, 1, `Найдено ${entries.length} кор. Пересчёт отправок...`);
                 const calc = await runWithGroup(groupId);
                 if (calc?.status === 'ok') {
@@ -2037,7 +2042,14 @@ javascript:(function(){
             applyActiveTabToUI();
             saveConfig();
             const groupSel = document.getElementById('ts-group');
-            if (groupSel) runWithGroup(groupSel.value || '0');
+            if (groupSel) runWithGroupUnlessImportEdit(groupSel.value || '0');
+        }
+
+        function runWithGroupUnlessImportEdit(groupId) {
+            if (importEditMode) {
+                return Promise.resolve({ status: 'deferred_import_edit' });
+            }
+            return runWithGroup(groupId);
         }
 
         function fetchGasData() {
@@ -2450,6 +2462,7 @@ javascript:(function(){
                 const ok = applyImportPayloadToTab(tabIdx, payload);
                 if (!ok) return;
                 saveConfig();
+                closeImportWindow();
                 showNotice(`Импортировано во вкладку ${tabIdx + 1}`, 'success', 2800);
             });
 
@@ -4358,13 +4371,8 @@ javascript:(function(){
             runSupportButtonCycle();
             if (document.getElementById('ts-panel')) return;
             loadConfig();
-            if (isForumOrMailPage()) {
-                const importPayloads = parseTsImportPayloadsFromPage();
-                if (importPayloads.length > 0) {
-                    showImportWindow(importPayloads);
-                    return;
-                }
-            }
+            const importPayloads = isForumOrMailPage() ? parseTsImportPayloadsFromPage() : [];
+            importEditMode = importPayloads.length > 0;
             const savedPos = loadPosition();
             const container = document.getElementById('ds_body') || document.body;
             const panel = document.createElement('div');
@@ -4473,6 +4481,7 @@ javascript:(function(){
 
             document.getElementById('ts-help-btn').onclick = () => { showHelpWindow(); };
             document.getElementById('ts-close-btn').onclick = () => {
+                importEditMode = false;
                 noblePretimeRunToken++;
                 setNoblePretimeProgress(false);
                 closeNearestWindow();
@@ -4498,6 +4507,12 @@ javascript:(function(){
                 }
                 saveConfig();
                 savePosition(panel);
+                const launchAfterImportEdit = importEditMode;
+                importEditMode = false;
+                if (launchAfterImportEdit) {
+                    const groupId = cleanText(document.getElementById('ts-group')?.value) || cleanText(getCurrentTabState()?.groupId) || '0';
+                    runWithGroup(groupId);
+                }
                 noblePretimeRunToken++;
                 setNoblePretimeProgress(false);
                 panel.remove();
@@ -4596,7 +4611,7 @@ javascript:(function(){
                 }
                 saveConfig();
                 const gSel = document.getElementById('ts-group');
-                if (gSel) runWithGroup(gSel.value || '0');
+                if (gSel) runWithGroupUnlessImportEdit(gSel.value || '0');
             });
 
             if (dateCb) {
@@ -4609,7 +4624,7 @@ javascript:(function(){
                     if (dateInput) targetDateYmd = normalizeDateYmd(dateInput.value, formatServerDateYmd());
                     saveConfig();
                     const gSel = document.getElementById('ts-group');
-                    if (gSel) runWithGroup(gSel.value || '0');
+                    if (gSel) runWithGroupUnlessImportEdit(gSel.value || '0');
                 });
             }
 
@@ -4620,7 +4635,7 @@ javascript:(function(){
                     targetDateYmd = normalized;
                     saveConfig();
                     const gSel = document.getElementById('ts-group');
-                    if (gSel) runWithGroup(gSel.value || '0');
+                    if (gSel) runWithGroupUnlessImportEdit(gSel.value || '0');
                 });
             }
 
@@ -4635,7 +4650,7 @@ javascript:(function(){
                         setNoblePretimeProgress(false);
                         saveConfig();
                         const gSel = document.getElementById('ts-group');
-                        if (gSel) runWithGroup(gSel.value || '0');
+                        if (gSel) runWithGroupUnlessImportEdit(gSel.value || '0');
                         return;
                     }
                     await runNoblePretimeNow();
@@ -4650,7 +4665,7 @@ javascript:(function(){
                     }
                     saveConfig();
                     const gSel = document.getElementById('ts-group');
-                    if (gSel) runWithGroup(gSel.value || '0');
+                    if (gSel) runWithGroupUnlessImportEdit(gSel.value || '0');
                 });
             }
             if (nobleRunBtn) {
@@ -4702,7 +4717,7 @@ javascript:(function(){
                 const tab = getCurrentTabState();
                 tab.groupId = String(this.value || '0');
                 saveConfig();
-                runWithGroup(this.value || '0');
+                runWithGroupUnlessImportEdit(this.value || '0');
             });
 
             const applyGroupsToSelect = (groupsList) => {
@@ -4722,7 +4737,7 @@ javascript:(function(){
                 groupSelect.value = hasInitial ? initialGroup : '0';
                 getCurrentTabState().groupId = String(groupSelect.value || '0');
                 saveConfig();
-                runWithGroup(groupSelect.value || '0');
+                runWithGroupUnlessImportEdit(groupSelect.value || '0');
             };
 
             fetchGroups().then(groups => {
@@ -4735,6 +4750,10 @@ javascript:(function(){
                 const localGroups = parseGroups();
                 applyGroupsToSelect(localGroups);
             });
+
+            if (importPayloads.length > 0) {
+                showImportWindow(importPayloads);
+            }
         }
 
         injectStyles();
