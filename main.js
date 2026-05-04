@@ -1,8 +1,9 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.47";
+  const VERSION = "0.10.48";
   const LOG_PREFIX = "[ScriptMM]";
+  const DEBUG_VERBOSE_LOGS = false;
   const MULTI_TAB_PRESENCE_KEY = "scriptmm.active_instances.v1";
   const MULTI_TAB_HEARTBEAT_INTERVAL_MS = 3000;
   const MULTI_TAB_STALE_MS = 12000;
@@ -59,6 +60,7 @@
   const ARCHIVE_MAX_ITEMS = 100;
   const COMMAND_UNITS_TOLERANCE_RATIO = 0.2;
   const COMMAND_CHECK_GRACE_MS = 15000;
+  const PLAN_DEPARTED_VISIBLE_GRACE_MS = 60 * 1000;
   const TIMING_POINT_TOLERANCE_MS = 400;
   const HUB_SYNC_INTERVAL_LEGACY_DEFAULT_MS = 10000;
   const HUB_SYNC_INTERVAL_DEFAULT_MS = 70000;
@@ -2073,17 +2075,21 @@
         const doc = parser.parseFromString(html, "text/html");
         const parsed = extractForumFirstPostSigilPercent(doc);
         if (Number.isFinite(parsed) && parsed > 0) {
-          console.info(`${LOG_PREFIX} [forum-sigil][loaded-first-post]`, {
-            version: VERSION,
-            sigilPercent: parsed,
-            url: firstPageUrl,
-          });
+          if (DEBUG_VERBOSE_LOGS) {
+            console.info(`${LOG_PREFIX} [forum-sigil][loaded-first-post]`, {
+              version: VERSION,
+              sigilPercent: parsed,
+              url: firstPageUrl,
+            });
+          }
           return setCachedForumThreadSigilPercent(parsed);
         }
-        console.info(`${LOG_PREFIX} [forum-sigil][not-found-first-post]`, {
-          version: VERSION,
-          url: firstPageUrl,
-        });
+        if (DEBUG_VERBOSE_LOGS) {
+          console.info(`${LOG_PREFIX} [forum-sigil][not-found-first-post]`, {
+            version: VERSION,
+            url: firstPageUrl,
+          });
+        }
         return null;
       } catch (error) {
         console.warn(`${LOG_PREFIX} [forum-sigil][load-failed]`, {
@@ -3934,20 +3940,22 @@
     if (Number.isFinite(resolvedSigil)) {
       normalizedIncoming.sigilPercent = normalizeSigilPercent(resolvedSigil);
     }
-    console.info(`${LOG_PREFIX} [favorite-add]`, {
-      version: VERSION,
-      sourceKind: cleanText(normalizedIncoming.arrivalEpochSource) || null,
-      targetCoord:
-        cleanText(normalizedIncoming.targetCoord || normalizedIncoming.target) ||
-        null,
-      originCoord:
-        cleanText(normalizedIncoming.originCoord || normalizedIncoming.origin) ||
-        null,
-      arrivalText: cleanText(normalizedIncoming.arrivalText) || null,
-      etaEpochMs: Number(normalizedIncoming.etaEpochMs) || null,
-      etaServerTime: formatTimeWithMs(normalizedIncoming.etaEpochMs),
-      repaired: Boolean(normalizedIncoming.serverTimeRepaired),
-    });
+    if (DEBUG_VERBOSE_LOGS) {
+      console.info(`${LOG_PREFIX} [favorite-add]`, {
+        version: VERSION,
+        sourceKind: cleanText(normalizedIncoming.arrivalEpochSource) || null,
+        targetCoord:
+          cleanText(normalizedIncoming.targetCoord || normalizedIncoming.target) ||
+          null,
+        originCoord:
+          cleanText(normalizedIncoming.originCoord || normalizedIncoming.origin) ||
+          null,
+        arrivalText: cleanText(normalizedIncoming.arrivalText) || null,
+        etaEpochMs: Number(normalizedIncoming.etaEpochMs) || null,
+        etaServerTime: formatTimeWithMs(normalizedIncoming.etaEpochMs),
+        repaired: Boolean(normalizedIncoming.serverTimeRepaired),
+      });
+    }
     const sourceEntries = purgeStaleFavoriteEntries(
       readJson(STORAGE_KEYS.favorites),
       getServerNowMs(),
@@ -4477,14 +4485,16 @@
       createdAtMs: Math.round(getServerNowMs()),
     };
     const saved = saveJson(STORAGE_KEYS.autoDispatchBridge, payload);
-    console.info(`${LOG_PREFIX} [auto-dispatch-bridge]`, {
-      version: VERSION,
-      saved,
-      commandId: payload.commandId,
-      route: payload.route,
-      departureMs: payload.departureMs,
-      timingCenter: payload.timingCenter,
-    });
+    if (DEBUG_VERBOSE_LOGS) {
+      console.info(`${LOG_PREFIX} [auto-dispatch-bridge]`, {
+        version: VERSION,
+        saved,
+        commandId: payload.commandId,
+        route: payload.route,
+        departureMs: payload.departureMs,
+        timingCenter: payload.timingCenter,
+      });
+    }
     return { ok: Boolean(saved), payload };
   };
 
@@ -5261,7 +5271,7 @@
     if (archiveEntries.length) {
       appendArchivedManeuvers(archiveEntries);
     }
-    if (archiveEntries.length) {
+    if (archiveEntries.length && DEBUG_VERBOSE_LOGS) {
       console.warn(`${LOG_PREFIX} [plan-reconcile][finalized]`, {
         version: VERSION,
         nowMs: Math.round(nowMs),
@@ -5274,11 +5284,13 @@
       });
     }
     if (!scheduled.length && !archiveEntries.length) {
-      console.info(`${LOG_PREFIX} [plan-reconcile][skip-empty-save]`, {
-        version: VERSION,
-        nowMs: Math.round(nowMs),
-        reason: "no_scheduled_commands",
-      });
+      if (DEBUG_VERBOSE_LOGS) {
+        console.info(`${LOG_PREFIX} [plan-reconcile][skip-empty-save]`, {
+          version: VERSION,
+          nowMs: Math.round(nowMs),
+          reason: "no_scheduled_commands",
+        });
+      }
     } else {
       saveScheduledCommands("reconcile");
     }
@@ -5298,10 +5310,15 @@
     };
   };
 
-  const purgeStaleScheduledCommands = (commands) =>
+  const purgeStaleScheduledCommands = (commands, nowMs = getServerNowMs()) =>
     (Array.isArray(commands) ? commands : [])
       .map((item) => normalizeScheduledCommand(item))
-      .filter((item) => item && !isFinalManeuverStatus(item.status));
+      .filter((item) => {
+        if (!item || isFinalManeuverStatus(item.status)) return false;
+        const departureMs = toFiniteMs(item.departureMs);
+        if (!Number.isFinite(departureMs)) return false;
+        return departureMs >= nowMs - PLAN_DEPARTED_VISIBLE_GRACE_MS;
+      });
 
   const mergeScheduledCommandListsForStorage = (...lists) => {
     const map = new Map();
@@ -5369,9 +5386,10 @@
     const primaryArray = Array.isArray(primaryRaw) ? primaryRaw : [];
     const backupArray = Array.isArray(backupRaw) ? backupRaw : [];
     const sessionArray = Array.isArray(sessionRaw) ? sessionRaw : [];
-    const primaryCommands = purgeStaleScheduledCommands(primaryArray);
-    const backupCommands = purgeStaleScheduledCommands(backupArray);
-    const sessionCommands = purgeStaleScheduledCommands(sessionArray);
+    const nowMs = getServerNowMs();
+    const primaryCommands = purgeStaleScheduledCommands(primaryArray, nowMs);
+    const backupCommands = purgeStaleScheduledCommands(backupArray, nowMs);
+    const sessionCommands = purgeStaleScheduledCommands(sessionArray, nowMs);
     const commands = mergeScheduledCommandListsForStorage(
       primaryCommands,
       backupCommands,
@@ -5562,43 +5580,64 @@
     const backupVerified = containsExpected(backupStored);
     const sessionVerified = containsExpected(sessionStored);
     const ok = primaryVerified || backupVerified || sessionVerified;
-    const logPayload = {
-      version: VERSION,
-      context,
-      expectedCount: normalized.length,
-      primaryWriteOk,
-      backupWriteOk,
-      sessionWriteOk,
-      primaryVerified,
-      backupVerified,
-      sessionVerified,
-      primaryStoredCount: primaryStored.length,
-      backupStoredCount: backupStored.length,
-      sessionStoredCount: sessionStored.length,
-      payloadChars: payload.length,
-      payloadApproxBytes: payload.length * 2,
-      writeErrors,
-      sessionWriteErrors,
-      writeRetries,
-      storageCleanup,
-      localStorageUsage: ok ? null : getLocalStorageUsageSummary(),
-      expectedIds: Array.from(expectedIds).slice(0, 50),
-      primaryIds: primaryStored
-        .slice(0, 50)
-        .map((item) => cleanText(item && item.id) || "?"),
-      backupIds: backupStored
-        .slice(0, 50)
-        .map((item) => cleanText(item && item.id) || "?"),
-      sessionIds: sessionStored
-        .slice(0, 50)
-        .map((item) => cleanText(item && item.id) || "?"),
-      normalizedSample: normalized
-        .slice(0, 10)
-        .map((item, index) => diagnoseScheduledCommandForPlan(item, index)),
-    };
-    if (ok) {
+    if (ok && DEBUG_VERBOSE_LOGS) {
+      const logPayload = {
+        version: VERSION,
+        context,
+        expectedCount: normalized.length,
+        primaryWriteOk,
+        backupWriteOk,
+        sessionWriteOk,
+        primaryVerified,
+        backupVerified,
+        sessionVerified,
+        primaryStoredCount: primaryStored.length,
+        backupStoredCount: backupStored.length,
+        sessionStoredCount: sessionStored.length,
+        payloadChars: payload.length,
+        payloadApproxBytes: payload.length * 2,
+        writeErrors,
+        sessionWriteErrors,
+        writeRetries,
+        storageCleanup,
+        localStorageUsage: null,
+      };
       console.info(`${LOG_PREFIX} [plan-save]`, logPayload);
-    } else {
+    } else if (!ok) {
+      const logPayload = {
+        version: VERSION,
+        context,
+        expectedCount: normalized.length,
+        primaryWriteOk,
+        backupWriteOk,
+        sessionWriteOk,
+        primaryVerified,
+        backupVerified,
+        sessionVerified,
+        primaryStoredCount: primaryStored.length,
+        backupStoredCount: backupStored.length,
+        sessionStoredCount: sessionStored.length,
+        payloadChars: payload.length,
+        payloadApproxBytes: payload.length * 2,
+        writeErrors,
+        sessionWriteErrors,
+        writeRetries,
+        storageCleanup,
+        localStorageUsage: getLocalStorageUsageSummary(),
+        expectedIds: Array.from(expectedIds).slice(0, 50),
+        primaryIds: primaryStored
+          .slice(0, 50)
+          .map((item) => cleanText(item && item.id) || "?"),
+        backupIds: backupStored
+          .slice(0, 50)
+          .map((item) => cleanText(item && item.id) || "?"),
+        sessionIds: sessionStored
+          .slice(0, 50)
+          .map((item) => cleanText(item && item.id) || "?"),
+        normalizedSample: normalized
+          .slice(0, 10)
+          .map((item, index) => diagnoseScheduledCommandForPlan(item, index)),
+      };
       console.error(`${LOG_PREFIX} [plan-save][failed]`, logPayload);
     }
     return ok;
@@ -5616,6 +5655,10 @@
     const rawArray = snapshot.primaryArray;
     const backupArray = snapshot.backupArray;
     const sessionArray = snapshot.sessionArray;
+    const stalePurged =
+      rawArray.length !== snapshot.primaryCommands.length ||
+      backupArray.length !== snapshot.backupCommands.length ||
+      sessionArray.length !== snapshot.sessionCommands.length;
     const normalized = mergeScheduledCommandListsForStorage(
       snapshot.primaryCommands,
       snapshot.backupCommands,
@@ -5639,39 +5682,45 @@
         appendArchivedManeuvers(migratedArchiveEntries);
       }
     }
-    if (snapshot.backupUsed || finalized.length) {
+    if (snapshot.backupUsed || finalized.length || stalePurged) {
       writeScheduledCommandsStorage(state.scheduledCommands, "load_restore");
     }
-    console.info(`${LOG_PREFIX} [plan-load]`, {
-      version: VERSION,
-      storageKey: STORAGE_KEYS.scheduledCommands,
-      backupStorageKey: STORAGE_KEYS.scheduledCommandsBackup,
-      sessionStorageKey: STORAGE_KEYS.scheduledCommandsSession,
-      rawType: snapshot.primaryRawType,
-      backupRawType: snapshot.backupRawType,
-      sessionRawType: snapshot.sessionRawType,
-      rawCount: rawArray.length,
-      backupRawCount: backupArray.length,
-      sessionRawCount: sessionArray.length,
-      normalizedCount: normalized.length,
-      activeCount: active.length,
-      finalizedCount: finalized.length,
-      droppedCount: Math.max(
-        0,
-        rawArray.length + backupArray.length + sessionArray.length - normalized.length,
-      ),
-      backupUsed: snapshot.backupUsed,
-      storagePreserved: !snapshot.backupUsed && !finalized.length,
-      diagnostics: rawArray
-        .slice(0, 30)
-        .map((item, index) => diagnoseScheduledCommandForPlan(item, index)),
-      backupDiagnostics: backupArray
-        .slice(0, 30)
-        .map((item, index) => diagnoseScheduledCommandForPlan(item, index)),
-      sessionDiagnostics: sessionArray
-        .slice(0, 30)
-        .map((item, index) => diagnoseScheduledCommandForPlan(item, index)),
-    });
+    if (DEBUG_VERBOSE_LOGS) {
+      console.info(`${LOG_PREFIX} [plan-load]`, {
+        version: VERSION,
+        storageKey: STORAGE_KEYS.scheduledCommands,
+        backupStorageKey: STORAGE_KEYS.scheduledCommandsBackup,
+        sessionStorageKey: STORAGE_KEYS.scheduledCommandsSession,
+        rawType: snapshot.primaryRawType,
+        backupRawType: snapshot.backupRawType,
+        sessionRawType: snapshot.sessionRawType,
+        rawCount: rawArray.length,
+        backupRawCount: backupArray.length,
+        sessionRawCount: sessionArray.length,
+        normalizedCount: normalized.length,
+        activeCount: active.length,
+        finalizedCount: finalized.length,
+        stalePurged,
+        droppedCount: Math.max(
+          0,
+          rawArray.length +
+            backupArray.length +
+            sessionArray.length -
+            normalized.length,
+        ),
+        backupUsed: snapshot.backupUsed,
+        storagePreserved: !snapshot.backupUsed && !finalized.length && !stalePurged,
+        diagnostics: rawArray
+          .slice(0, 30)
+          .map((item, index) => diagnoseScheduledCommandForPlan(item, index)),
+        backupDiagnostics: backupArray
+          .slice(0, 30)
+          .map((item, index) => diagnoseScheduledCommandForPlan(item, index)),
+        sessionDiagnostics: sessionArray
+          .slice(0, 30)
+          .map((item, index) => diagnoseScheduledCommandForPlan(item, index)),
+      });
+    }
     return state.scheduledCommands;
   };
   const syncScheduledCommandsFromStorage = () => loadScheduledCommands();
@@ -5771,25 +5820,32 @@
       return;
     }
     const nowMs = getServerNow().getTime();
+    let hasCountdownNodes = false;
     roots.forEach((root) => {
       root
         .querySelectorAll(".smm-plan-countdown[data-departure-ms]")
         .forEach((node) => {
+          hasCountdownNodes = true;
           const departureMs = Number(node.getAttribute("data-departure-ms"));
           if (!Number.isFinite(departureMs)) {
-            node.textContent = "n/a";
+            if (node.textContent !== "n/a") node.textContent = "n/a";
             return;
           }
           const diffSeconds = (departureMs - nowMs) / 1000;
-          if (diffSeconds >= 0) {
-            node.textContent = formatCountdown(diffSeconds);
-            node.classList.remove("late");
-          } else {
-            node.textContent = `-${formatCountdown(Math.abs(diffSeconds))}`;
-            node.classList.add("late");
+          const isLate = diffSeconds < 0;
+          const nextText = isLate
+            ? `-${formatCountdown(Math.abs(diffSeconds))}`
+            : formatCountdown(diffSeconds);
+          if (node.textContent !== nextText) node.textContent = nextText;
+          if (node.classList.contains("late") !== isLate) {
+            node.classList.toggle("late", isLate);
           }
         });
     });
+    if (!hasCountdownNodes && state.countdownTimerId) {
+      clearInterval(state.countdownTimerId);
+      state.countdownTimerId = null;
+    }
   };
 
   const applySliceScrollLimits = (rootNode = null) => {
@@ -5865,8 +5921,9 @@
   };
 
   const startCountdownTicker = () => {
-    if (state.countdownTimerId) clearInterval(state.countdownTimerId);
-    state.countdownTimerId = setInterval(updateCountdownNodes, 1000);
+    if (!state.countdownTimerId) {
+      state.countdownTimerId = setInterval(updateCountdownNodes, 1000);
+    }
     updateCountdownNodes();
   };
 
@@ -8783,7 +8840,7 @@
     notifyOnAdd = false,
   } = {}) => {
     const result = autoAddForumSliceFavorites(payload);
-    if (isForumThreadPlanningScreen()) {
+    if (DEBUG_VERBOSE_LOGS && isForumThreadPlanningScreen()) {
       console.info("[ScriptMM][forum-auto-favorites]", {
         phase,
         ...(result || {}),
@@ -14157,22 +14214,42 @@
     stopCountdownTicker();
     ui.list.innerHTML = "";
     maybeShowMultiTabWarning({ force: false, statusTarget: ui });
-    const storageSnapshotBeforeSync = readScheduledCommandsStorageSnapshot();
-    const rawScheduledArray = storageSnapshotBeforeSync.primaryArray;
-    const rawBackupScheduledArray = storageSnapshotBeforeSync.backupArray;
-    const rawSessionScheduledArray = storageSnapshotBeforeSync.sessionArray;
-    const rawStorageType = storageSnapshotBeforeSync.primaryRawType;
-    const rawBackupStorageType = storageSnapshotBeforeSync.backupRawType;
-    const rawSessionStorageType = storageSnapshotBeforeSync.sessionRawType;
-    const rawDiagnosticsBeforeSync = rawScheduledArray
-      .slice(0, 30)
-      .map((item, index) => diagnoseScheduledCommandForPlan(item, index));
-    const rawBackupDiagnosticsBeforeSync = rawBackupScheduledArray
-      .slice(0, 30)
-      .map((item, index) => diagnoseScheduledCommandForPlan(item, index));
-    const rawSessionDiagnosticsBeforeSync = rawSessionScheduledArray
-      .slice(0, 30)
-      .map((item, index) => diagnoseScheduledCommandForPlan(item, index));
+    const storageSnapshotBeforeSync = DEBUG_VERBOSE_LOGS
+      ? readScheduledCommandsStorageSnapshot()
+      : null;
+    const rawScheduledArray = storageSnapshotBeforeSync
+      ? storageSnapshotBeforeSync.primaryArray
+      : [];
+    const rawBackupScheduledArray = storageSnapshotBeforeSync
+      ? storageSnapshotBeforeSync.backupArray
+      : [];
+    const rawSessionScheduledArray = storageSnapshotBeforeSync
+      ? storageSnapshotBeforeSync.sessionArray
+      : [];
+    const rawStorageType = storageSnapshotBeforeSync
+      ? storageSnapshotBeforeSync.primaryRawType
+      : null;
+    const rawBackupStorageType = storageSnapshotBeforeSync
+      ? storageSnapshotBeforeSync.backupRawType
+      : null;
+    const rawSessionStorageType = storageSnapshotBeforeSync
+      ? storageSnapshotBeforeSync.sessionRawType
+      : null;
+    const rawDiagnosticsBeforeSync = DEBUG_VERBOSE_LOGS
+      ? rawScheduledArray
+          .slice(0, 30)
+          .map((item, index) => diagnoseScheduledCommandForPlan(item, index))
+      : [];
+    const rawBackupDiagnosticsBeforeSync = DEBUG_VERBOSE_LOGS
+      ? rawBackupScheduledArray
+          .slice(0, 30)
+          .map((item, index) => diagnoseScheduledCommandForPlan(item, index))
+      : [];
+    const rawSessionDiagnosticsBeforeSync = DEBUG_VERBOSE_LOGS
+      ? rawSessionScheduledArray
+          .slice(0, 30)
+          .map((item, index) => diagnoseScheduledCommandForPlan(item, index))
+      : [];
     syncScheduledCommandsFromStorage();
     state.scheduledCommands = purgeStaleScheduledCommands(
       state.scheduledCommands,
@@ -14180,35 +14257,18 @@
     const scheduled = state.scheduledCommands
       .slice()
       .sort((a, b) => Number(a.departureMs || 0) - Number(b.departureMs || 0));
-    const stateDiagnosticsAfterSync = scheduled
-      .slice(0, 30)
-      .map((item, index) => diagnoseScheduledCommandForPlan(item, index));
-    console.info(`${LOG_PREFIX} [plan-render][input]`, {
-      version: VERSION,
-      activeTab: state.activeTab,
-      storageKey: STORAGE_KEYS.scheduledCommands,
-      backupStorageKey: STORAGE_KEYS.scheduledCommandsBackup,
-      sessionStorageKey: STORAGE_KEYS.scheduledCommandsSession,
-      rawStorageType,
-      rawBackupStorageType,
-      rawSessionStorageType,
-      rawStorageCount: rawScheduledArray.length,
-      rawBackupStorageCount: rawBackupScheduledArray.length,
-      rawSessionStorageCount: rawSessionScheduledArray.length,
-      rawStorageSample: rawDiagnosticsBeforeSync,
-      rawBackupStorageSample: rawBackupDiagnosticsBeforeSync,
-      rawSessionStorageSample: rawSessionDiagnosticsBeforeSync,
-      backupUsedBeforeSync: storageSnapshotBeforeSync.backupUsed,
-      scheduledCount: scheduled.length,
-      scheduledSample: stateDiagnosticsAfterSync,
-    });
-    const hasCommentColumn =
-      Boolean(getUiSetting("plannerCommentEnabled")) ||
-      scheduled.some((command) => cleanText(command && command.comment));
-
-    if (!scheduled.length) {
-      console.warn(`${LOG_PREFIX} [plan-render][empty]`, {
+    const stateDiagnosticsAfterSync = DEBUG_VERBOSE_LOGS
+      ? scheduled
+          .slice(0, 30)
+          .map((item, index) => diagnoseScheduledCommandForPlan(item, index))
+      : [];
+    if (DEBUG_VERBOSE_LOGS) {
+      console.info(`${LOG_PREFIX} [plan-render][input]`, {
         version: VERSION,
+        activeTab: state.activeTab,
+        storageKey: STORAGE_KEYS.scheduledCommands,
+        backupStorageKey: STORAGE_KEYS.scheduledCommandsBackup,
+        sessionStorageKey: STORAGE_KEYS.scheduledCommandsSession,
         rawStorageType,
         rawBackupStorageType,
         rawSessionStorageType,
@@ -14218,10 +14278,37 @@
         rawStorageSample: rawDiagnosticsBeforeSync,
         rawBackupStorageSample: rawBackupDiagnosticsBeforeSync,
         rawSessionStorageSample: rawSessionDiagnosticsBeforeSync,
-        backupUsedBeforeSync: storageSnapshotBeforeSync.backupUsed,
-        stateCountAfterSync: state.scheduledCommands.length,
-        stateSampleAfterSync: stateDiagnosticsAfterSync,
+        backupUsedBeforeSync: Boolean(
+          storageSnapshotBeforeSync && storageSnapshotBeforeSync.backupUsed,
+        ),
+        scheduledCount: scheduled.length,
+        scheduledSample: stateDiagnosticsAfterSync,
       });
+    }
+    const hasCommentColumn =
+      Boolean(getUiSetting("plannerCommentEnabled")) ||
+      scheduled.some((command) => cleanText(command && command.comment));
+
+    if (!scheduled.length) {
+      if (DEBUG_VERBOSE_LOGS) {
+        console.warn(`${LOG_PREFIX} [plan-render][empty]`, {
+          version: VERSION,
+          rawStorageType,
+          rawBackupStorageType,
+          rawSessionStorageType,
+          rawStorageCount: rawScheduledArray.length,
+          rawBackupStorageCount: rawBackupScheduledArray.length,
+          rawSessionStorageCount: rawSessionScheduledArray.length,
+          rawStorageSample: rawDiagnosticsBeforeSync,
+          rawBackupStorageSample: rawBackupDiagnosticsBeforeSync,
+          rawSessionStorageSample: rawSessionDiagnosticsBeforeSync,
+          backupUsedBeforeSync: Boolean(
+            storageSnapshotBeforeSync && storageSnapshotBeforeSync.backupUsed,
+          ),
+          stateCountAfterSync: state.scheduledCommands.length,
+          stateSampleAfterSync: stateDiagnosticsAfterSync,
+        });
+      }
       const empty = document.createElement("div");
       empty.className = "smm-empty";
       empty.textContent =
@@ -14315,16 +14402,18 @@
 </tr>`;
       })
       .join("");
-    console.info(`${LOG_PREFIX} [plan-render][output]`, {
-      version: VERSION,
-      scheduledCount: scheduled.length,
-      rowsHtmlLength: rowsHtml.length,
-      tableWillRender: Boolean(rowsHtml),
-      failedPlanRows: failedPlanRows.slice(),
-      renderedCommandIds: scheduled
-        .slice(0, 50)
-        .map((command) => cleanText(command && command.id) || "?"),
-    });
+    if (DEBUG_VERBOSE_LOGS) {
+      console.info(`${LOG_PREFIX} [plan-render][output]`, {
+        version: VERSION,
+        scheduledCount: scheduled.length,
+        rowsHtmlLength: rowsHtml.length,
+        tableWillRender: Boolean(rowsHtml),
+        failedPlanRows: failedPlanRows.slice(),
+        renderedCommandIds: scheduled
+          .slice(0, 50)
+          .map((command) => cleanText(command && command.id) || "?"),
+      });
+    }
 
     ui.list.innerHTML = `
 <section class="smm-plan-panel smm-slice-panel">
@@ -15288,10 +15377,12 @@
     if (!normalized) return null;
     const normalizedId = cleanText(normalized.id);
     if (!normalizedId) return null;
-    console.info(`${LOG_PREFIX} [plan-upsert][input]`, {
-      version: VERSION,
-      command: diagnoseScheduledCommandForPlan(normalized, 0),
-    });
+    if (DEBUG_VERBOSE_LOGS) {
+      console.info(`${LOG_PREFIX} [plan-upsert][input]`, {
+        version: VERSION,
+        command: diagnoseScheduledCommandForPlan(normalized, 0),
+      });
+    }
     const latestCommands = syncScheduledCommandsFromStorage();
     const mergedCommands = mergeScheduledCommandsById(latestCommands, [
       normalized,
@@ -15325,24 +15416,26 @@
           String(cleanText(command && command.id) || "") === String(normalizedId),
       );
     }
-    console.info(`${LOG_PREFIX} [plan-upsert][result]`, {
-      version: VERSION,
-      id: normalizedId,
-      saved: Boolean(persistedCommand),
-      writeOk,
-      latestCount: Array.isArray(latestCommands) ? latestCommands.length : 0,
-      mergedCount: Array.isArray(mergedCommands) ? mergedCommands.length : 0,
-      persistedCount: Array.isArray(persistedCommands)
-        ? persistedCommands.length
-        : 0,
-      primaryStoredCount: storageAfterWrite.primaryCommands.length,
-      backupStoredCount: storageAfterWrite.backupCommands.length,
-      sessionStoredCount: storageAfterWrite.sessionCommands.length,
-      backupUsed: storageAfterWrite.backupUsed,
-      persistedCommand: persistedCommand
-        ? diagnoseScheduledCommandForPlan(persistedCommand, 0)
-        : null,
-    });
+    if (DEBUG_VERBOSE_LOGS) {
+      console.info(`${LOG_PREFIX} [plan-upsert][result]`, {
+        version: VERSION,
+        id: normalizedId,
+        saved: Boolean(persistedCommand),
+        writeOk,
+        latestCount: Array.isArray(latestCommands) ? latestCommands.length : 0,
+        mergedCount: Array.isArray(mergedCommands) ? mergedCommands.length : 0,
+        persistedCount: Array.isArray(persistedCommands)
+          ? persistedCommands.length
+          : 0,
+        primaryStoredCount: storageAfterWrite.primaryCommands.length,
+        backupStoredCount: storageAfterWrite.backupCommands.length,
+        sessionStoredCount: storageAfterWrite.sessionCommands.length,
+        backupUsed: storageAfterWrite.backupUsed,
+        persistedCommand: persistedCommand
+          ? diagnoseScheduledCommandForPlan(persistedCommand, 0)
+          : null,
+      });
+    }
     return persistedCommand || null;
   };
   const updateScheduledCommandCommentById = (commandId, comment) => {
@@ -15551,6 +15644,7 @@
   };
 
   const logSliceConflictDebug = (stage, payload) => {
+    if (!DEBUG_VERBOSE_LOGS) return;
     safe(() => {
       console.info("[ScriptMM][slice-conflict]", stage, payload || {});
       return true;
@@ -17341,14 +17435,16 @@
       const originText = summary.originSamples.length
         ? summary.originSamples.join(", ")
         : null;
-      console.info(`${LOG_PREFIX} [plan-schedule][local-duplicate]`, {
-        version: VERSION,
-        targetCoord: targetText,
-        timingLabel: timingText,
-        duplicateCount,
-        summedUnits: normalizeUnitsMap(summary.summedUnits),
-        originSamples: summary.originSamples,
-      });
+      if (DEBUG_VERBOSE_LOGS) {
+        console.info(`${LOG_PREFIX} [plan-schedule][local-duplicate]`, {
+          version: VERSION,
+          targetCoord: targetText,
+          timingLabel: timingText,
+          duplicateCount,
+          summedUnits: normalizeUnitsMap(summary.summedUnits),
+          originSamples: summary.originSamples,
+        });
+      }
       const plainMessage = `На цель ${targetText} в окно ${timingText} уже запланировано отправок: ${duplicateCount}. Всё равно запланировать?`;
       const root =
         document.body || (state.ui && state.ui.root ? state.ui.root : null);
@@ -17478,7 +17574,7 @@
       row,
     );
     const matchedUnitsEq = Math.max(matchedUnitsEqRaw, matchedUnitsEqLocal);
-    if (matchedUnitsEqLocal > matchedUnitsEqRaw) {
+    if (DEBUG_VERBOSE_LOGS && matchedUnitsEqLocal > matchedUnitsEqRaw) {
       safe(() => {
         console.info("[ScriptMM][hub-query][local-fallback]", {
           rowKey: cleanText(row.rowKey) || null,
@@ -18283,19 +18379,21 @@
             String(cleanText(b && b.id) || ""),
           );
         });
-      safe(() => {
-        console.info("[ScriptMM][hub-tribe-sync]", {
-          rows: attackRows.length,
-          troops: troopRows.length,
-          commands: commandRows.length,
-          plans: planRows.length,
-          mappedIncomings: mappedAllList.length,
-          mappedCommands: mappedCommandsList.length,
-          mappedCommandsCache: mappedCommandsAllList.length,
-          mappedPlans: mappedPlansList.length,
-        });
-        return true;
-      }, false);
+      if (DEBUG_VERBOSE_LOGS) {
+        safe(() => {
+          console.info("[ScriptMM][hub-tribe-sync]", {
+            rows: attackRows.length,
+            troops: troopRows.length,
+            commands: commandRows.length,
+            plans: planRows.length,
+            mappedIncomings: mappedAllList.length,
+            mappedCommands: mappedCommandsList.length,
+            mappedCommandsCache: mappedCommandsAllList.length,
+            mappedPlans: mappedPlansList.length,
+          });
+          return true;
+        }, false);
+      }
       const nextFingerprint = buildHubTribeIncomingsFingerprint(
         mappedAllList,
         filteredTroopRows,
@@ -21135,7 +21233,9 @@ ${panelHtml}`;
         document.querySelector("#content_value") ||
         document.body;
       if (observeRoot) {
-        const observer = new MutationObserver(() => {
+        let observerRetryTimerId = null;
+        const runObservedInlineEnsure = () => {
+          observerRetryTimerId = null;
           const hasButtons = Boolean(
             document.querySelector(
               ".smm-msg-inline-actions, #smm-msg-inline-fallback, .smm-msg-manual-inline",
@@ -21153,9 +21253,19 @@ ${panelHtml}`;
           ) {
             observer.disconnect();
           }
+        };
+        const observer = new MutationObserver(() => {
+          if (observerRetryTimerId) return;
+          observerRetryTimerId = setTimeout(runObservedInlineEnsure, 80);
         });
         observer.observe(observeRoot, { childList: true, subtree: true });
-        setTimeout(() => observer.disconnect(), 12000);
+        setTimeout(() => {
+          if (observerRetryTimerId) {
+            clearTimeout(observerRetryTimerId);
+            observerRetryTimerId = null;
+          }
+          observer.disconnect();
+        }, 12000);
       }
     }
   };
@@ -21254,13 +21364,15 @@ ${panelHtml}`;
           error: cleanText(error && error.message),
         });
       }
-      console.info(`${LOG_PREFIX} [message-runtime][speed-refresh]`, {
-        version: VERSION,
-        beforeSource: cleanText(speedBefore && speedBefore.source) || null,
-        afterSource: cleanText(state.speedModel && state.speedModel.source) || null,
-        worldSpeed: toNumber(state.speedModel && state.speedModel.worldSpeed),
-        unitSpeed: toNumber(state.speedModel && state.speedModel.unitSpeed),
-      });
+      if (DEBUG_VERBOSE_LOGS) {
+        console.info(`${LOG_PREFIX} [message-runtime][speed-refresh]`, {
+          version: VERSION,
+          beforeSource: cleanText(speedBefore && speedBefore.source) || null,
+          afterSource: cleanText(state.speedModel && state.speedModel.source) || null,
+          worldSpeed: toNumber(state.speedModel && state.speedModel.worldSpeed),
+          unitSpeed: toNumber(state.speedModel && state.speedModel.unitSpeed),
+        });
+      }
     }
     if (
       state.incomings &&
@@ -22127,23 +22239,25 @@ ${panelHtml}`;
             getForumThreadFirstPostSigilPercent(document),
           ) || 0
         : null;
-      console.info(`${LOG_PREFIX} [plan-schedule][click]`, {
-        version: VERSION,
-        source: "message_inline",
-        fromVillageId,
-        fromVillageCoord,
-        targetCoord,
-        incomingId,
-        incomingEtaMs: Number.isFinite(incomingEtaMs)
-          ? Math.round(incomingEtaMs)
-          : null,
-        action,
-        departureMs: Number.isFinite(departureMs)
-          ? Math.round(departureMs)
-          : null,
-        sigilPercent,
-        units,
-      });
+      if (DEBUG_VERBOSE_LOGS) {
+        console.info(`${LOG_PREFIX} [plan-schedule][click]`, {
+          version: VERSION,
+          source: "message_inline",
+          fromVillageId,
+          fromVillageCoord,
+          targetCoord,
+          incomingId,
+          incomingEtaMs: Number.isFinite(incomingEtaMs)
+            ? Math.round(incomingEtaMs)
+            : null,
+          action,
+          departureMs: Number.isFinite(departureMs)
+            ? Math.round(departureMs)
+            : null,
+          sigilPercent,
+          units,
+        });
+      }
       let plannerComment = null;
       if (getUiSetting("plannerCommentEnabled")) {
         const commentResult = await askFavoriteCommentDialog({
@@ -23727,14 +23841,16 @@ ${panelHtml}`;
       if (state.ui && state.ui.refreshButton)
         state.ui.refreshButton.disabled = false;
 
-      console.log(`${LOG_PREFIX} refresh complete`, {
-        speedModel: state.speedModel,
-        incomings: state.incomings,
-        supportIncomings: state.supportIncomings,
-        troops: state.troops,
-        troopsDefense: state.troopsDefense,
-        snapshot: state.snapshot,
-      });
+      if (DEBUG_VERBOSE_LOGS) {
+        console.log(`${LOG_PREFIX} refresh complete`, {
+          speedModel: state.speedModel,
+          incomings: state.incomings,
+          supportIncomings: state.supportIncomings,
+          troops: state.troops,
+          troopsDefense: state.troopsDefense,
+          snapshot: state.snapshot,
+        });
+      }
     } catch (error) {
       state.errors.push(`refresh: ${errorText(error)}`);
       setStatus(state.ui, `Ошибка обновления: ${errorText(error)}`);
@@ -24715,20 +24831,22 @@ ${panelHtml}`;
         if (timingCenter) {
           planGoButton.setAttribute("data-copy-time", timingCenter);
         }
-        console.info(`${LOG_PREFIX} [plan-go][fresh-timing]`, {
-          version: VERSION,
-          commandId: commandId || null,
-          timingCenter: timingCenter || null,
-          timingType: cleanText(freshTiming && freshTiming.timingType) || null,
-          timingLabel: cleanText(freshTiming && freshTiming.timingLabel) || null,
-          timingStartMs: toFiniteMs(freshTiming && freshTiming.timingStartMs),
-          timingEndMs: toFiniteMs(freshTiming && freshTiming.timingEndMs),
-          timingPointMs: toFiniteMs(freshTiming && freshTiming.timingPointMs),
-          hasScheduledCommand: Boolean(scheduledCommand),
-          hasFreshUrl: Boolean(
-            scheduledCommand && resolveScheduledCommandGoUrl(scheduledCommand),
-          ),
-        });
+        if (DEBUG_VERBOSE_LOGS) {
+          console.info(`${LOG_PREFIX} [plan-go][fresh-timing]`, {
+            version: VERSION,
+            commandId: commandId || null,
+            timingCenter: timingCenter || null,
+            timingType: cleanText(freshTiming && freshTiming.timingType) || null,
+            timingLabel: cleanText(freshTiming && freshTiming.timingLabel) || null,
+            timingStartMs: toFiniteMs(freshTiming && freshTiming.timingStartMs),
+            timingEndMs: toFiniteMs(freshTiming && freshTiming.timingEndMs),
+            timingPointMs: toFiniteMs(freshTiming && freshTiming.timingPointMs),
+            hasScheduledCommand: Boolean(scheduledCommand),
+            hasFreshUrl: Boolean(
+              scheduledCommand && resolveScheduledCommandGoUrl(scheduledCommand),
+            ),
+          });
+        }
         if (timingCenter) {
           appendTimingCopyHistory({
             timingCenter,
@@ -24933,23 +25051,25 @@ ${panelHtml}`;
                 getForumThreadFirstPostSigilPercent(document),
               ) || 0
             : null;
-          console.info(`${LOG_PREFIX} [plan-schedule][click]`, {
-            version: VERSION,
-            source: "overlay",
-            fromVillageId,
-            fromVillageCoord,
-            targetCoord,
-            incomingId,
-            incomingEtaMs: Number.isFinite(incomingEtaMs)
-              ? Math.round(incomingEtaMs)
-              : null,
-            action,
-            departureMs: Number.isFinite(departureMs)
-              ? Math.round(departureMs)
-              : null,
-            sigilPercent,
-            units,
-          });
+          if (DEBUG_VERBOSE_LOGS) {
+            console.info(`${LOG_PREFIX} [plan-schedule][click]`, {
+              version: VERSION,
+              source: "overlay",
+              fromVillageId,
+              fromVillageCoord,
+              targetCoord,
+              incomingId,
+              incomingEtaMs: Number.isFinite(incomingEtaMs)
+                ? Math.round(incomingEtaMs)
+                : null,
+              action,
+              departureMs: Number.isFinite(departureMs)
+                ? Math.round(departureMs)
+                : null,
+              sigilPercent,
+              units,
+            });
+          }
           let plannerComment = null;
           if (getUiSetting("plannerCommentEnabled")) {
             const commentResult = await askFavoriteCommentDialog({
