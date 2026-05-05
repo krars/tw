@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.50";
+  const VERSION = "0.10.51";
   const LOG_PREFIX = "[ScriptMM]";
   const DEBUG_VERBOSE_LOGS = false;
   const MULTI_TAB_PRESENCE_KEY = "scriptmm.active_instances.v1";
@@ -4444,6 +4444,7 @@
       set("smm_from_village_id", payload.fromVillageId);
       set("smm_from_village_coord", payload.fromVillageCoord);
       set("smm_target_coord", payload.targetCoord);
+      set("smm_comment", payload.comment);
       return url.toString();
     }, cleanText(urlRaw));
 
@@ -4480,6 +4481,7 @@
         ? Math.round(Number(normalized.timingPointMs))
         : null,
       timingType: cleanText(normalized.timingType) || null,
+      comment: cleanText(normalized.comment) || null,
       goUrl,
       timingCenter: cleanText(timingCenter) || null,
       createdAtMs: Math.round(getServerNowMs()),
@@ -13059,7 +13061,7 @@
     if (actionKey === "intercept") {
       const timingPointMs = etaMs;
       const timingStartMs = timingPointMs;
-      const timingEndMs = timingPointMs + 50;
+      const timingEndMs = timingPointMs + 100;
       return {
         timingType: "intercept_window",
         timingStartMs,
