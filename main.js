@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.51";
+  const VERSION = "0.10.53";
   const LOG_PREFIX = "[ScriptMM]";
   const DEBUG_VERBOSE_LOGS = false;
   const MULTI_TAB_PRESENCE_KEY = "scriptmm.active_instances.v1";
@@ -4304,8 +4304,12 @@
     return Number.isFinite(ageMs) && ageMs <= maxAgeMs;
   };
   const normalizePlanAction = (action) => {
-    const value = cleanText(action);
-    return value && PLAN_ACTIONS.includes(value) ? value : "slice";
+    const value = cleanText(action).toLowerCase();
+    if (PLAN_ACTIONS.includes(value)) return value;
+    if (/^(attack|атака|intercept|перехват)$/.test(value)) return "intercept";
+    if (/^(support|подкреп|def|defence|defense|slice|срез)$/.test(value))
+      return "slice";
+    return "slice";
   };
   const getPlanActionLabelByKey = (action) =>
     PLAN_ACTION_LABELS[normalizePlanAction(action)] || PLAN_ACTION_LABELS.slice;
@@ -4387,6 +4391,11 @@
     });
     return normalized;
   };
+  const hasNobleUnits = (units) => {
+    const normalized = normalizeUnitsMap(units);
+    return Math.max(0, toInt(normalized.snob) || 0) > 0;
+  };
+  const getInterceptWindowAfterMs = (units) => (hasNobleUnits(units) ? 100 : 50);
   const toFiniteMs = (value) => {
     if (value === null || value === undefined) return null;
     if (typeof value === "boolean") return null;
@@ -4819,8 +4828,8 @@
         (!Number.isFinite(startMs) || !Number.isFinite(endMs)) &&
         Number.isFinite(incomingEtaMs)
       ) {
-        startMs = incomingEtaMs - 50;
-        endMs = incomingEtaMs + 50;
+        startMs = incomingEtaMs;
+        endMs = incomingEtaMs + getInterceptWindowAfterMs(maneuver.units);
       }
       if (Number.isFinite(startMs) && Number.isFinite(endMs)) {
         return {
@@ -11783,6 +11792,7 @@
     timingStartMs = null,
     timingEndMs = null,
     timingPointMs = null,
+    units = null,
   } = {}) => {
     const type = cleanText(timingType);
     const startMs = toFiniteMs(timingStartMs);
@@ -11797,7 +11807,7 @@
     }
     if (type === "intercept_window" && Number.isFinite(pointMs)) {
       const fromMs = pointMs;
-      const toMs = pointMs + 50;
+      const toMs = pointMs + getInterceptWindowAfterMs(units);
       return `${formatTimeWithMs(fromMs)}-${formatTimeWithMs(toMs)}`;
     }
     if (type === "intercept_point" && Number.isFinite(pointMs)) {
@@ -13032,6 +13042,7 @@
     incomingId,
     targetCoord,
     incomingEtaMs,
+    units = null,
   }) => {
     const actionKey = cleanText(action) || "slice";
     const incomingItems = getIncomingItems();
@@ -13061,7 +13072,7 @@
     if (actionKey === "intercept") {
       const timingPointMs = etaMs;
       const timingStartMs = timingPointMs;
-      const timingEndMs = timingPointMs + 100;
+      const timingEndMs = timingPointMs + getInterceptWindowAfterMs(units);
       return {
         timingType: "intercept_window",
         timingStartMs,
@@ -13131,11 +13142,13 @@
     const incomingId = cleanText(rowElement.getAttribute("data-incoming-id"));
     const targetCoord = cleanText(rowElement.getAttribute("data-target-coord"));
     const incomingEtaMs = Number(rowElement.getAttribute("data-eta-ms"));
+    const selection = collectSliceRowSelection(rowElement);
     const timing = buildTimingPayload({
       action,
       incomingId,
       targetCoord,
       incomingEtaMs,
+      units: selection.units,
     });
     return computeTimingCenterCopyValue(timing);
   };
@@ -13700,6 +13713,7 @@
         : null;
 
     if (goButton) {
+      const timingCenter = getSliceRowTimingCenterCopyValue(rowElement);
       if (url) {
         goButton.disabled = false;
         goButton.classList.remove("disabled");
@@ -13708,6 +13722,11 @@
         goButton.disabled = true;
         goButton.classList.add("disabled");
         goButton.removeAttribute("data-url");
+      }
+      if (timingCenter) {
+        goButton.setAttribute("data-copy-time", timingCenter);
+      } else {
+        goButton.removeAttribute("data-copy-time");
       }
     }
   };
@@ -13797,6 +13816,12 @@
         goButton.disabled = true;
         goButton.classList.add("disabled");
         goButton.removeAttribute("data-url");
+      }
+      const timingCenter = getSliceRowTimingCenterCopyValue(rowElement);
+      if (timingCenter) {
+        goButton.setAttribute("data-copy-time", timingCenter);
+      } else {
+        goButton.removeAttribute("data-copy-time");
       }
     }
   };
@@ -14206,6 +14231,7 @@
       incomingId: command.incomingId,
       targetCoord: command.targetCoord,
       incomingEtaMs: command.incomingEtaMs,
+      units: command.units,
     });
     if (
       recalculated &&
@@ -16271,6 +16297,7 @@
       timingStartMs: toFiniteEpochMs(row.timingStartMs),
       timingEndMs: toFiniteEpochMs(row.timingEndMs),
       timingPointMs: toFiniteEpochMs(row.timingPointMs),
+      units: row.units,
     });
     const localWindowInfo = {
       startMs: timingWindow.startMs,
@@ -17452,6 +17479,7 @@
           timingStartMs: fromMs,
           timingEndMs: toMs,
           timingPointMs: command.timingPointMs,
+          units: command.units,
         }),
       };
     }
@@ -17464,6 +17492,7 @@
           timingType: command.timingType,
           timingLabel: command.timingLabel,
           timingPointMs: pointMs,
+          units: command.units,
         }),
       };
     }
@@ -17558,6 +17587,7 @@
           timingStartMs: command.timingStartMs,
           timingEndMs: command.timingEndMs,
           timingPointMs: command.timingPointMs,
+          units: command.units,
         }),
       duplicateCount: matches.length,
       summedUnits,
@@ -17763,6 +17793,7 @@
       timingPointMs: Number.isFinite(Number(row.timingPointMs))
         ? Math.round(Number(row.timingPointMs))
         : null,
+      units: row.units,
     });
 
     return {
@@ -18640,6 +18671,7 @@
               timingStartMs,
               timingEndMs,
               timingPointMs,
+              units: row && row.units,
             }),
             timingStartMs,
             timingEndMs,
@@ -22422,6 +22454,7 @@ ${panelHtml}`;
         incomingId,
         targetCoord,
         incomingEtaMs,
+        units,
       });
       const goUrl = cleanText(
         row.querySelector(".smm-go-btn")?.getAttribute("data-url"),
@@ -22627,8 +22660,8 @@ ${panelHtml}`;
         }
       }
       const timingCenter =
-        cleanText(goButton.getAttribute("data-copy-time")) ||
-        getSliceRowTimingCenterCopyValue(row);
+        getSliceRowTimingCenterCopyValue(row) ||
+        cleanText(goButton.getAttribute("data-copy-time"));
       if (timingCenter) {
         appendTimingCopyHistory({
           timingCenter,
@@ -25236,6 +25269,7 @@ ${panelHtml}`;
             incomingId,
             targetCoord,
             incomingEtaMs,
+            units,
           });
           const goUrl = cleanText(
             row.querySelector(".smm-go-btn")?.getAttribute("data-url"),
@@ -25414,8 +25448,8 @@ ${panelHtml}`;
           }
         }
         const timingCenter =
-          cleanText(goButton.getAttribute("data-copy-time")) ||
-          getSliceRowTimingCenterCopyValue(row);
+          getSliceRowTimingCenterCopyValue(row) ||
+          cleanText(goButton.getAttribute("data-copy-time"));
         if (timingCenter) {
           appendTimingCopyHistory({
             timingCenter,
