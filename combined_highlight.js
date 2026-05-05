@@ -19,6 +19,7 @@
     noDefenseBelow: 5000,
     greenSmallNobleSupport: 5000,
     greenOrangeNobleSupport: 15000,
+    redOnUncoveredNoble: true,
   };
 
   const STATE = {
@@ -227,9 +228,26 @@
 
   function hasNobleIconOrHint(iconSrcs, hints, text) {
     return (
-      iconSrcs.some((src) => /(?:\/command\/snob|unit_snob|\/snob\.)/i.test(src)) ||
+      iconSrcs.some((src) => /(?:\/command\/snob|\/unit\/(?:tiny\/)?snob|unit_snob|\/snob\.)/i.test(src)) ||
       /(?:дворян|двор|snob|noble)/i.test(`${hints} ${text}`)
     );
+  }
+
+  function getIncomingFirstCellMarkerText(firstCell) {
+    return Array.from(
+      firstCell ? firstCell.querySelectorAll("[title], [data-icon-hint], [data-command-id], img[src]") : [],
+    )
+      .map((node) =>
+        [
+          node.getAttribute("title") || "",
+          node.getAttribute("alt") || "",
+          node.getAttribute("data-icon-hint") || "",
+          node.getAttribute("data-command-id") || "",
+          node.getAttribute("src") || "",
+          node.tooltipText || "",
+        ].join(" "),
+      )
+      .join(" ");
   }
 
   function planFlagsFromText(textRaw) {
@@ -580,6 +598,7 @@
           cleanText(img.getAttribute("src")),
         );
         const hints = getCommandHints(firstCell);
+        const markerText = getIncomingFirstCellMarkerText(firstCell);
         const label = cleanText(
           (firstCell.querySelector(".quickedit-label") || {}).textContent || firstCell.textContent,
         );
@@ -598,8 +617,8 @@
           originCoord: parseCoord(originCell ? originCell.textContent : ""),
           player: cleanText(playerCell ? playerCell.textContent : ""),
           label,
-          sizeClass: getCommandSizeFromIconAndHints(iconSrcs, hints),
-          isNoble: hasNobleIconOrHint(iconSrcs, hints, label),
+          sizeClass: getCommandSizeFromIconAndHints(iconSrcs, `${hints} ${markerText}`),
+          isNoble: hasNobleIconOrHint(iconSrcs, `${hints} ${markerText}`, label),
           arrivalMs: parseArrivalMsFromRow(row, 5, 6),
           planFlags: planFlagsFromText(label),
           rawText: cleanText(row.textContent),
@@ -776,12 +795,14 @@
     const largeAttacks = attacks.filter((attack) => attack.sizeClass === "large");
     const mediumAttacks = attacks.filter((attack) => attack.sizeClass === "medium");
     const nobleAttacks = attacks.filter((attack) => attack.isNoble);
+    const unknownNobleAttacks = nobleAttacks.filter((attack) => attack.sizeClass === "unknown");
     const threatAttacks = attacks.filter(
       (attack) => attack.isNoble || attack.sizeClass === "large" || attack.sizeClass === "medium",
     );
 
     const firstLargeMs = minArrival(largeAttacks);
     const firstNobleMs = minArrival(nobleAttacks);
+    const firstOffMs = minArrival(largeAttacks.concat(mediumAttacks));
     const firstCriticalMs = minArrival(largeAttacks.concat(nobleAttacks));
     const firstThreatMs = minArrival(threatAttacks);
     const lastThreatMs = maxArrival(threatAttacks);
@@ -805,9 +826,15 @@
         ? CONFIG.greenSmallNobleSupport
         : CONFIG.greenOrangeNobleSupport;
     const lowCurrentDefense = village.defenseScore < CONFIG.noDefenseBelow;
+    const nobleArrivesBeforeOff =
+      !!firstNoble &&
+      (!Number.isFinite(Number(firstOffMs)) ||
+        !Number.isFinite(Number(firstNobleMs)) ||
+        Number(firstNobleMs) <= Number(firstOffMs));
     const green =
       !blue &&
       !!firstNoble &&
+      nobleArrivesBeforeOff &&
       lowCurrentDefense &&
       supportBeforeFirstNoble >= nobleSupportRequired;
 
@@ -846,8 +873,8 @@
       !purple &&
       !blue &&
       !green &&
-      largeAttacks.length > 0 &&
       nobleAttacks.length > 0 &&
+      (largeAttacks.length > 0 || CONFIG.redOnUncoveredNoble) &&
       !hasExplicitCoverage;
 
     let color = "";
@@ -863,7 +890,9 @@
       reason = `нет основного деффа, но подкрепы до двора ${supportBeforeFirstNoble}/${nobleSupportRequired}`;
     } else if (red) {
       color = "red";
-      reason = "большой офф + дворяне без среза/задефа/перехвата";
+      reason = largeAttacks.length
+        ? "большой офф + дворяне без среза/задефа/перехвата"
+        : "дворяне без размера башни и без среза/задефа/перехвата";
     }
 
     return {
@@ -875,6 +904,7 @@
       large: largeAttacks.length,
       medium: mediumAttacks.length,
       nobles: nobleAttacks.length,
+      unknownNobles: unknownNobleAttacks.length,
       currentDefense: village.defenseScore,
       supportBeforeFirstThreat,
       supportCountBeforeFirstThreat,
@@ -882,6 +912,7 @@
       supportBeforeFirstNoble,
       supportBeforeCritical,
       supportCountBeforeCritical,
+      nobleArrivesBeforeOff,
       required,
       availableForCritical,
       ownNoblesAfterThreat,
@@ -907,6 +938,7 @@
       `больших: ${result.large}`,
       `средних: ${result.medium}`,
       `дворов: ${result.nobles}`,
+      `дворов без размера башни: ${result.unknownNobles}`,
       `дефф в деревне: ${result.currentDefense}`,
       `успевает до двора/большого: ${result.supportBeforeCritical} (${result.supportCountBeforeCritical} шт.)`,
       `сумма деффа: ${result.availableForCritical}/${result.required || 0}`,
@@ -1081,6 +1113,7 @@
             large: result.large,
             medium: result.medium,
             nobles: result.nobles,
+            unknown_nobles: result.unknownNobles,
             reason: result.reason,
           })),
       );
