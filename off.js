@@ -278,6 +278,10 @@
             const style = document.createElement('style');
             style.id = style_id;
             style.textContent = `
+.off-root{position:fixed!important;left:24px;top:72px;width:min(960px,calc(100vw - 24px));max-height:calc(100vh - 24px);overflow:auto;z-index:350000;box-sizing:border-box;box-shadow:0 10px 28px rgba(0,0,0,.35)}
+.off-root.off-dragging{opacity:.96}
+.off-root .off-drag-handle{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:6px 10px;background:#6f4524;color:#fff;font-weight:bold;cursor:move;user-select:none;touch-action:none;position:sticky;top:0;z-index:3;border-bottom:1px solid #3f2714}
+.off-root .off-drag-handle span:last-child{font-size:11px;font-weight:normal;opacity:.78}
 .off-root .off-main-panel{padding:8px}
 .off-root .off-label{display:block;font-weight:bold;margin:4px 0}
 .off-root .off-targets-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
@@ -315,6 +319,122 @@
 .off-root .off-summary{padding:0 6px 6px 6px;font-size:12px}
 `;
             document.head.append(style);
+        },
+
+        load_window_position: function () {
+            try {
+                const position = JSON.parse(localStorage.getItem(`${namespace}.window_position`));
+                if (!position || typeof position !== 'object') return null;
+                const left = Number(position.left);
+                const top = Number(position.top);
+                if (!Number.isFinite(left) || !Number.isFinite(top)) return null;
+                return { left, top };
+            } catch (ex) {
+                return null;
+            }
+        },
+
+        save_window_position: function (root) {
+            if (!root) return;
+            const rect = root.getBoundingClientRect();
+            try {
+                localStorage.setItem(`${namespace}.window_position`, JSON.stringify({
+                    left: Math.round(rect.left),
+                    top: Math.round(rect.top),
+                }));
+            } catch (ex) {
+                // Position persistence is optional; a full localStorage should not break the script.
+            }
+        },
+
+        clamp_window_position: function (root, position) {
+            const margin = 8;
+            const rect = root.getBoundingClientRect();
+            const width = rect.width || root.offsetWidth || 960;
+            const height = Math.min(rect.height || root.offsetHeight || 420, window.innerHeight - margin * 2);
+            const max_left = Math.max(margin, window.innerWidth - width - margin);
+            const max_top = Math.max(margin, window.innerHeight - height - margin);
+            const left = Number(position && position.left);
+            const top = Number(position && position.top);
+            return {
+                left: Math.round(Math.min(Math.max(margin, Number.isFinite(left) ? left : margin), max_left)),
+                top: Math.round(Math.min(Math.max(margin, Number.isFinite(top) ? top : 72), max_top)),
+            };
+        },
+
+        apply_window_position: function (root) {
+            if (!root) return;
+            const rect = root.getBoundingClientRect();
+            const fallback_left = Math.max(8, Math.round((window.innerWidth - (rect.width || root.offsetWidth || 960)) / 2));
+            const position = Off.clamp_window_position(root, Off.load_window_position() || {
+                left: fallback_left,
+                top: 72,
+            });
+            root.style.left = `${position.left}px`;
+            root.style.top = `${position.top}px`;
+        },
+
+        bind_window_drag: function (root) {
+            const handle = root && root.querySelector('.off-drag-handle');
+            if (!handle) return;
+            let dragging = false;
+            let start_x = 0;
+            let start_y = 0;
+            let start_left = 0;
+            let start_top = 0;
+
+            const on_pointer_move = event => {
+                if (!dragging) return;
+                event.preventDefault();
+                const position = Off.clamp_window_position(root, {
+                    left: start_left + event.clientX - start_x,
+                    top: start_top + event.clientY - start_y,
+                });
+                root.style.left = `${position.left}px`;
+                root.style.top = `${position.top}px`;
+            };
+
+            const on_pointer_up = event => {
+                if (!dragging) return;
+                dragging = false;
+                root.classList.remove('off-dragging');
+                document.removeEventListener('pointermove', on_pointer_move);
+                document.removeEventListener('pointerup', on_pointer_up);
+                try {
+                    handle.releasePointerCapture(event.pointerId);
+                } catch (ex) {
+                    // Some browsers release capture automatically.
+                }
+                Off.save_window_position(root);
+            };
+
+            handle.addEventListener('pointerdown', event => {
+                if (event.button !== undefined && event.button !== 0) return;
+                const rect = root.getBoundingClientRect();
+                dragging = true;
+                start_x = event.clientX;
+                start_y = event.clientY;
+                start_left = rect.left;
+                start_top = rect.top;
+                root.classList.add('off-dragging');
+                try {
+                    handle.setPointerCapture(event.pointerId);
+                } catch (ex) {
+                    // Pointer capture is a convenience, not a requirement.
+                }
+                document.addEventListener('pointermove', on_pointer_move);
+                document.addEventListener('pointerup', on_pointer_up);
+            });
+
+            const on_resize = () => {
+                if (!document.body.contains(root)) {
+                    window.removeEventListener('resize', on_resize);
+                    return;
+                }
+                Off.apply_window_position(root);
+                Off.save_window_position(root);
+            };
+            window.addEventListener('resize', on_resize);
         },
 
         create_main_panel: function () {
@@ -421,18 +541,29 @@
             return panel;
         },
 
+        create_drag_handle: function () {
+            const handle = document.createElement('div');
+            handle.classList.add('off-drag-handle');
+            handle.innerHTML = '<span>OFF</span><span>перетащи окно</span>';
+            return handle;
+        },
+
         create_gui: function () {
             const root = document.createElement('div');
             root.id = Helper.get_id();
             root.classList.add('vis', 'vis_item', 'off-root');
             root.style.padding = '0';
-            root.style.margin = '0 0 5px 0';
+            root.style.margin = '0';
+            root.append(Off.create_drag_handle());
             root.append(Off.create_main_panel());
             root.append(Off.create_output_panel());
             root.append(Off.create_bottom_panel());
 
-            const content = document.querySelector('#content_value') || document.body;
-            content.prepend(root);
+            document.body.append(root);
+            requestAnimationFrame(() => {
+                Off.apply_window_position(root);
+                Off.bind_window_drag(root);
+            });
         },
 
         set_summary: function (text) {

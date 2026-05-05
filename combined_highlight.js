@@ -782,17 +782,20 @@
 
     const firstLargeMs = minArrival(largeAttacks);
     const firstNobleMs = minArrival(nobleAttacks);
+    const firstCriticalMs = minArrival(largeAttacks.concat(nobleAttacks));
     const firstThreatMs = minArrival(threatAttacks);
     const lastThreatMs = maxArrival(threatAttacks);
     const supportItems = supports.concat(ownCommands.filter((command) => command.isSupport));
     const supportBeforeFirstThreat = supportDefenseBefore(supportItems, firstThreatMs);
     const supportBeforeFirstLarge = supportDefenseBefore(supportItems, firstLargeMs);
     const supportBeforeFirstNoble = supportDefenseBefore(supportItems, firstNobleMs);
+    const supportBeforeCritical = supportDefenseBefore(supportItems, firstCriticalMs);
     const supportCountBeforeFirstThreat = supportCountBefore(supportItems, firstThreatMs);
+    const supportCountBeforeCritical = supportCountBefore(supportItems, firstCriticalMs);
 
     const required = requiredDefenseForLargeCount(largeAttacks.length);
-    const availableForLarge = village.defenseScore + supportBeforeFirstLarge;
-    const blue = largeAttacks.length > 0 && required > 0 && availableForLarge >= required;
+    const availableForCritical = village.defenseScore + supportBeforeCritical;
+    const blue = largeAttacks.length > 0 && required > 0 && availableForCritical >= required;
 
     const firstNoble = nobleAttacks
       .slice()
@@ -854,7 +857,7 @@
       reason = `за угрозой идет свой/союзный офф + дворяне (${ownNoblesAfterThreat})`;
     } else if (blue) {
       color = "blue";
-      reason = `дефф ${availableForLarge}/${required} выдерживает ${largeAttacks.length} большой отряд`;
+      reason = `дефф ${availableForCritical}/${required} выдерживает ${largeAttacks.length} большой отряд`;
     } else if (green) {
       color = "green";
       reason = `нет основного деффа, но подкрепы до двора ${supportBeforeFirstNoble}/${nobleSupportRequired}`;
@@ -877,8 +880,10 @@
       supportCountBeforeFirstThreat,
       supportBeforeFirstLarge,
       supportBeforeFirstNoble,
+      supportBeforeCritical,
+      supportCountBeforeCritical,
       required,
-      availableForLarge,
+      availableForCritical,
       ownNoblesAfterThreat,
       planFlags,
     };
@@ -903,6 +908,8 @@
       `средних: ${result.medium}`,
       `дворов: ${result.nobles}`,
       `дефф в деревне: ${result.currentDefense}`,
+      `успевает до двора/большого: ${result.supportBeforeCritical} (${result.supportCountBeforeCritical} шт.)`,
+      `сумма деффа: ${result.availableForCritical}/${result.required || 0}`,
       `источник войск: ${result.village.troopsSource}`,
       `подкреп до первой угрозы: ${result.supportBeforeFirstThreat} (${result.supportCountBeforeFirstThreat} шт.)`,
     ].join(" | ");
@@ -937,7 +944,7 @@
 
   async function enrichSupportsWithUnits(supports) {
     for (let index = 0; index < supports.length; index += 1) {
-      UI.status(`Подкрепления: состав ${index + 1}/${supports.length}`);
+      UI.status(`Подкрепления: читаю размер ${index + 1}/${supports.length}`);
       UI.progress(index, supports.length);
       await enrichCommandUnits(supports[index]);
     }
@@ -1066,9 +1073,11 @@
           .map((result) => ({
             color: result.color,
             village: result.village.label,
-            def: result.currentDefense,
+            def_in_village: result.currentDefense,
             troopsSource: result.village.troopsSource,
-            support: result.supportBeforeFirstThreat,
+            support_before_noble_or_large: result.supportBeforeCritical,
+            total_def: result.availableForCritical,
+            required: result.required,
             large: result.large,
             medium: result.medium,
             nobles: result.nobles,
