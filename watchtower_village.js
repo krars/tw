@@ -283,10 +283,8 @@ javascript:(function () {
       }
 
       var timing = formatWatchtowerTiming(attack);
-      var details = formatAttackDetails(attack);
-      label.textContent =
-        "СБ: " + timing.text + (details ? " | " + details : "");
-      label.title = formatFullTitle(attack, timing.text);
+      label.textContent = timing.text;
+      label.title = timing.text;
       label.className = LABEL_CLASS + " " + timing.className;
     });
   }
@@ -440,9 +438,9 @@ javascript:(function () {
     var diffMs = endMs - getServerNowMs();
     var clock = formatServerClock(endMs);
     if (diffMs <= 0) {
-      var past = "в зоне покрытия";
+      var past = "распознано";
       if (clock) {
-        past += " с " + clock;
+        past += ", в " + clock;
       }
       return {
         text: past,
@@ -450,51 +448,14 @@ javascript:(function () {
       };
     }
 
-    var future = "будет распознано через " + formatDuration(diffMs);
+    var future = "через " + formatDuration(diffMs);
     if (clock) {
-      future += " (" + clock + ")";
+      future += ", в " + clock;
     }
     return {
       text: future,
       className: "is-future",
     };
-  }
-
-  function formatAttackDetails(attack) {
-    var parts = [];
-    if (attack.kind) {
-      parts.push(attack.kind);
-    } else if (attack.label) {
-      parts.push(attack.label);
-    }
-    if (attack.origin) {
-      parts.push("из " + attack.origin);
-    }
-    if (attack.player) {
-      parts.push(attack.player);
-    }
-    if (attack.distance) {
-      parts.push("дист. " + attack.distance);
-    }
-    if (attack.arrival) {
-      parts.push("прибытие " + attack.arrival);
-    }
-    return parts.join("; ");
-  }
-
-  function formatFullTitle(attack, timing) {
-    return [
-      "Сторожевая Башня: " + timing,
-      attack.target ? "Цель: " + attack.target : "",
-      attack.origin ? "Источник: " + attack.origin : "",
-      attack.player ? "Игрок: " + attack.player : "",
-      attack.distance ? "Расстояние: " + attack.distance : "",
-      attack.arrival ? "Прибытие: " + attack.arrival : "",
-      attack.arrivalIn ? "До прибытия: " + attack.arrivalIn : "",
-      attack.kind ? "Тип: " + attack.kind : "",
-    ]
-      .filter(Boolean)
-      .join("\n");
   }
 
   function countMatched(ids, attacksById) {
