@@ -412,8 +412,16 @@
             style.textContent = `
 .guard-root{position:fixed!important;left:24px;top:72px;width:min(960px,calc(100vw - 24px));max-height:calc(100vh - 24px);overflow:auto;z-index:350000;box-sizing:border-box;box-shadow:0 10px 28px rgba(0,0,0,.35)}
 .guard-root.guard-dragging{opacity:.96}
+.guard-root.guard-collapsed{width:auto;min-width:230px;max-width:calc(100vw - 16px);max-height:none;overflow:visible}
 .guard-root .guard-drag-handle{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:6px 10px;background:#6f4524;color:#fff;font-weight:bold;cursor:move;user-select:none;touch-action:none;position:sticky;top:0;z-index:3;border-bottom:1px solid #3f2714}
-.guard-root .guard-drag-handle span:last-child{font-size:11px;font-weight:normal;opacity:.78}
+.guard-root .guard-drag-title{white-space:nowrap}
+.guard-root .guard-drag-caption{font-size:11px;font-weight:normal;opacity:.78;white-space:nowrap}
+.guard-root .guard-window-controls{display:flex;align-items:center;gap:4px;margin-left:auto}
+.guard-root .guard-window-control{border:1px solid rgba(255,255,255,.35);background:#8b5a32;color:#fff;border-radius:3px;cursor:pointer;font-weight:bold;line-height:1;padding:4px 7px;margin:0}
+.guard-root .guard-window-control:hover{background:#a26a3b}
+.guard-root .guard-window-close{background:#9b2f24}
+.guard-root .guard-window-close:hover{background:#bd3a2b}
+.guard-root.guard-collapsed .guard-drag-caption,.guard-root.guard-collapsed .guard-main-panel,.guard-root.guard-collapsed .guard-output-wrap,.guard-root.guard-collapsed .guard-summary{display:none}
 .guard-root .guard-main-panel{padding:8px}
 .guard-root .guard-label{display:block;font-weight:bold;margin:4px 0}
 .guard-root .guard-targets-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
@@ -475,6 +483,45 @@
             } catch (ex) {
                 // Position persistence is optional; a full localStorage should not break the script.
             }
+        },
+
+        load_window_collapsed: function () {
+            try {
+                return localStorage.getItem(`${namespace}.window_collapsed`) === '1';
+            } catch (ex) {
+                return false;
+            }
+        },
+
+        save_window_collapsed: function (collapsed) {
+            try {
+                localStorage.setItem(`${namespace}.window_collapsed`, collapsed ? '1' : '0');
+            } catch (ex) {
+                // Collapse persistence is optional; a full localStorage should not break the script.
+            }
+        },
+
+        set_window_collapsed: function (root, collapsed, should_save = true) {
+            if (!root) return;
+            root.classList.toggle('guard-collapsed', !!collapsed);
+            const button = Helper.get_control('window_collapse');
+            if (button) {
+                button.textContent = collapsed ? 'Развернуть' : 'Свернуть';
+                button.title = collapsed ? 'Развернуть окно' : 'Свернуть окно';
+            }
+            requestAnimationFrame(() => {
+                Guard.apply_window_position(root);
+                if (should_save) {
+                    Guard.save_window_collapsed(!!collapsed);
+                    Guard.save_window_position(root);
+                }
+            });
+        },
+
+        close_window: function () {
+            const root = Helper.get_control();
+            if (root) root.remove();
+            Guard.unbind_external_arrival_picker();
         },
 
         clamp_window_position: function (root, position) {
@@ -539,6 +586,7 @@
             };
 
             handle.addEventListener('pointerdown', event => {
+                if (event.target.closest('button')) return;
                 if (event.button !== undefined && event.button !== 0) return;
                 const rect = root.getBoundingClientRect();
                 dragging = true;
@@ -555,6 +603,24 @@
                 document.addEventListener('pointermove', on_pointer_move);
                 document.addEventListener('pointerup', on_pointer_up);
             });
+
+            const collapse_button = Helper.get_control('window_collapse');
+            if (collapse_button) {
+                collapse_button.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    Guard.set_window_collapsed(root, !root.classList.contains('guard-collapsed'));
+                });
+            }
+
+            const close_button = Helper.get_control('window_close');
+            if (close_button) {
+                close_button.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    Guard.close_window();
+                });
+            }
 
             const on_resize = () => {
                 if (!document.body.contains(root)) {
@@ -929,7 +995,7 @@
 
         create_output_panel: function () {
             const panel = document.createElement('div');
-            panel.classList.add('vis', 'vis_item');
+            panel.classList.add('vis', 'vis_item', 'guard-output-wrap');
             panel.style.margin = '5px';
             panel.style.height = '280px';
             panel.style.overflowY = 'auto';
@@ -994,7 +1060,14 @@
         create_drag_handle: function () {
             const handle = document.createElement('div');
             handle.classList.add('guard-drag-handle');
-            handle.innerHTML = '<span>TD</span><span>перетащи окно</span>';
+            handle.innerHTML = `
+                <span class="guard-drag-title">TD</span>
+                <span class="guard-drag-caption">перетащи окно</span>
+                <span class="guard-window-controls">
+                    <button id="${Helper.get_id('window_collapse')}" class="guard-window-control" type="button" title="Свернуть окно">Свернуть</button>
+                    <button id="${Helper.get_id('window_close')}" class="guard-window-control guard-window-close" type="button" title="Закрыть">×</button>
+                </span>
+            `;
             return handle;
         },
 
@@ -1012,6 +1085,7 @@
             requestAnimationFrame(() => {
                 Guard.apply_window_position(root);
                 Guard.bind_window_drag(root);
+                Guard.set_window_collapsed(root, Guard.load_window_collapsed(), false);
             });
         },
 
