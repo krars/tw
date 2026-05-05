@@ -280,8 +280,16 @@
             style.textContent = `
 .off-root{position:fixed!important;left:24px;top:72px;width:min(960px,calc(100vw - 24px));max-height:calc(100vh - 24px);overflow:auto;z-index:350000;box-sizing:border-box;box-shadow:0 10px 28px rgba(0,0,0,.35)}
 .off-root.off-dragging{opacity:.96}
+.off-root.off-collapsed{width:auto;min-width:230px;max-width:calc(100vw - 16px);max-height:none;overflow:visible}
 .off-root .off-drag-handle{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:6px 10px;background:#6f4524;color:#fff;font-weight:bold;cursor:move;user-select:none;touch-action:none;position:sticky;top:0;z-index:3;border-bottom:1px solid #3f2714}
-.off-root .off-drag-handle span:last-child{font-size:11px;font-weight:normal;opacity:.78}
+.off-root .off-drag-title{white-space:nowrap}
+.off-root .off-drag-caption{font-size:11px;font-weight:normal;opacity:.78;white-space:nowrap}
+.off-root .off-window-controls{display:flex;align-items:center;gap:4px;margin-left:auto}
+.off-root .off-window-control{border:1px solid rgba(255,255,255,.35);background:#8b5a32;color:#fff;border-radius:3px;cursor:pointer;font-weight:bold;line-height:1;padding:4px 7px;margin:0}
+.off-root .off-window-control:hover{background:#a26a3b}
+.off-root .off-window-close{background:#9b2f24}
+.off-root .off-window-close:hover{background:#bd3a2b}
+.off-root.off-collapsed .off-drag-caption,.off-root.off-collapsed .off-main-panel,.off-root.off-collapsed .off-output-wrap,.off-root.off-collapsed .off-summary{display:none}
 .off-root .off-main-panel{padding:8px}
 .off-root .off-label{display:block;font-weight:bold;margin:4px 0}
 .off-root .off-targets-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
@@ -347,6 +355,46 @@
             }
         },
 
+        load_window_collapsed: function () {
+            try {
+                return localStorage.getItem(`${namespace}.window_collapsed`) === '1';
+            } catch (ex) {
+                return false;
+            }
+        },
+
+        save_window_collapsed: function (collapsed) {
+            try {
+                localStorage.setItem(`${namespace}.window_collapsed`, collapsed ? '1' : '0');
+            } catch (ex) {
+                // Collapse persistence is optional; a full localStorage should not break the script.
+            }
+        },
+
+        set_window_collapsed: function (root, collapsed, should_save = true) {
+            if (!root) return;
+            root.classList.toggle('off-collapsed', !!collapsed);
+            const button = Helper.get_control('window_collapse');
+            if (button) {
+                button.textContent = collapsed ? 'Развернуть' : 'Свернуть';
+                button.title = collapsed ? 'Развернуть окно' : 'Свернуть окно';
+            }
+            requestAnimationFrame(() => {
+                Off.apply_window_position(root);
+                if (should_save) {
+                    Off.save_window_collapsed(!!collapsed);
+                    Off.save_window_position(root);
+                }
+            });
+        },
+
+        close_window: function () {
+            const root = Helper.get_control();
+            if (root) root.remove();
+            Off.unbind_external_arrival_picker();
+            if (Off.countdown_timer_id) clearInterval(Off.countdown_timer_id);
+        },
+
         clamp_window_position: function (root, position) {
             const margin = 8;
             const rect = root.getBoundingClientRect();
@@ -409,6 +457,7 @@
             };
 
             handle.addEventListener('pointerdown', event => {
+                if (event.target.closest('button')) return;
                 if (event.button !== undefined && event.button !== 0) return;
                 const rect = root.getBoundingClientRect();
                 dragging = true;
@@ -425,6 +474,24 @@
                 document.addEventListener('pointermove', on_pointer_move);
                 document.addEventListener('pointerup', on_pointer_up);
             });
+
+            const collapse_button = Helper.get_control('window_collapse');
+            if (collapse_button) {
+                collapse_button.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    Off.set_window_collapsed(root, !root.classList.contains('off-collapsed'));
+                });
+            }
+
+            const close_button = Helper.get_control('window_close');
+            if (close_button) {
+                close_button.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    Off.close_window();
+                });
+            }
 
             const on_resize = () => {
                 if (!document.body.contains(root)) {
@@ -544,7 +611,14 @@
         create_drag_handle: function () {
             const handle = document.createElement('div');
             handle.classList.add('off-drag-handle');
-            handle.innerHTML = '<span>OFF</span><span>перетащи окно</span>';
+            handle.innerHTML = `
+                <span class="off-drag-title">OFF</span>
+                <span class="off-drag-caption">перетащи окно</span>
+                <span class="off-window-controls">
+                    <button id="${Helper.get_id('window_collapse')}" class="off-window-control" type="button" title="Свернуть окно">Свернуть</button>
+                    <button id="${Helper.get_id('window_close')}" class="off-window-control off-window-close" type="button" title="Закрыть">×</button>
+                </span>
+            `;
             return handle;
         },
 
@@ -563,6 +637,7 @@
             requestAnimationFrame(() => {
                 Off.apply_window_position(root);
                 Off.bind_window_drag(root);
+                Off.set_window_collapsed(root, Off.load_window_collapsed(), false);
             });
         },
 
