@@ -145,22 +145,24 @@ javascript:(function () {
     } catch (e) {}
 
     if (currentCount > storedCount) {
+      var newCount = currentCount - storedCount;
       setStatus(
-        "Новых атак: " + (currentCount - storedCount) + " (было " + storedCount + ", стало " + currentCount + "). Помечаю...",
+        "Новых атак: " + newCount + " (было " + storedCount + ", стало " + currentCount + "). Помечаю...",
         "loading",
       );
+      console.log(LOG_PREFIX, "autoLabel: new attacks detected", newCount);
 
       var selectAllCheckbox = document.querySelector("#select_all, input.selectAll");
-      if (selectAllCheckbox) {
-        selectAllCheckbox.checked = true;
+      if (selectAllCheckbox && !selectAllCheckbox.checked) {
         selectAllCheckbox.click();
       }
 
       var labelButton = document.querySelector('input[type="submit"][name="label"]');
       if (labelButton) {
         window.setTimeout(function () {
+          console.log(LOG_PREFIX, "autoLabel: clicking label button");
           labelButton.click();
-        }, 200);
+        }, 600);
       }
     } else {
       setStatus("Новых атак нет (всего " + currentCount + ")", "ok");
