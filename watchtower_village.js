@@ -138,12 +138,12 @@ javascript:(function () {
 
     setStatus("Проверяю новые атаки...", "loading");
 
-    fetchDocument(buildAttacksUrl())
-      .then(function (doc) {
-        var commandInputs = Array.from(
-          doc.querySelectorAll('input[name^="command_ids["]'),
-        );
+    fetchAllAttackCommandInputs()
+      .then(function (result) {
+        var commandInputs = result.inputs;
+        var formAction = result.formAction;
         var currentCount = commandInputs.length;
+
         if (currentCount <= 0) {
           setStatus("Атак не найдено", "muted");
           return;
@@ -160,12 +160,8 @@ javascript:(function () {
           "Новых атак: " + newCount + " (было " + storedCount + ", стало " + currentCount + "). Помечаю...",
           "loading",
         );
-        console.log(LOG_PREFIX, "autoLabel: new attacks", newCount);
+        console.log(LOG_PREFIX, "autoLabel: new attacks", newCount, "pages fetched:", result.pagesFetched);
 
-        var form = doc.querySelector("#incomings_form");
-        var formAction = form
-          ? buildAbsoluteUrl(form.getAttribute("action") || form.action || "")
-          : "";
         if (!formAction) {
           setStatus("Авто-метка: не найдена форма #incomings_form", "error");
           saveAttackCount(currentCount);
@@ -218,6 +214,71 @@ javascript:(function () {
       .catch(function (error) {
         console.warn(LOG_PREFIX, "autoLabel fetch error", error);
         setStatus("Авто-метка: не удалось загрузить страницу атак", "error");
+      });
+  }
+
+  function fetchAllAttackCommandInputs() {
+    var firstUrl = buildAttacksUrl();
+    return fetchDocument(firstUrl)
+      .then(function (firstDoc) {
+        var form = firstDoc.querySelector("#incomings_form");
+        var formAction = form
+          ? buildAbsoluteUrl(form.getAttribute("action") || form.action || "")
+          : "";
+
+        var allInputs = Array.from(
+          firstDoc.querySelectorAll('input[name^="command_ids["]'),
+        );
+
+        var pageNumbers = parseAttackPageNumbers(firstDoc);
+        if (pageNumbers.length <= 1) {
+          return { inputs: allInputs, formAction: formAction, pagesFetched: 1 };
+        }
+
+        var maxPage = Math.max.apply(null, pageNumbers);
+        var fetchPromises = [];
+        for (var p = 1; p <= maxPage; p++) {
+          fetchPromises.push(fetchAttackPageInputs(p));
+        }
+
+        return Promise.all(fetchPromises).then(function (pageResults) {
+          pageResults.forEach(function (pageInputs) {
+            allInputs = allInputs.concat(pageInputs);
+          });
+          return { inputs: allInputs, formAction: formAction, pagesFetched: maxPage + 1 };
+        });
+      });
+  }
+
+  function parseAttackPageNumbers(doc) {
+    var pages = [];
+    var links = doc.querySelectorAll("a.paged-nav-item");
+    links.forEach(function (link) {
+      var href = link.getAttribute("href") || "";
+      var m = href.match(/[?&]page=(\d+)/);
+      if (m) {
+        var num = Number(m[1]);
+        if (Number.isFinite(num) && pages.indexOf(num) === -1) {
+          pages.push(num);
+        }
+      }
+    });
+    return pages;
+  }
+
+  function fetchAttackPageInputs(pageNum) {
+    var url = buildAttacksUrl();
+    try {
+      var parsed = new URL(url);
+      parsed.searchParams.set("page", String(pageNum));
+      url = parsed.toString();
+    } catch (e) {}
+    return fetchDocument(url)
+      .then(function (doc) {
+        return Array.from(doc.querySelectorAll('input[name^="command_ids["]'));
+      })
+      .catch(function () {
+        return [];
       });
   }
 
