@@ -19435,6 +19435,10 @@
         const incomingId = cleanText(incoming.id) || `nearest_${rowIndex}`;
         const villageText =
           cleanText(row.villageCoord || row.villageName) || "?";
+        const villageHref = buildVillageInfoUrlByCoordOrId(villageText, row.villageId);
+        const villageLinkHtml = villageHref
+          ? `<a class="smm-village-coord smm-route-link" href="${escapeHtml(villageHref)}" target="_blank" rel="noopener noreferrer">${escapeHtml(villageText)}</a>`
+          : `<span class="smm-village-coord">${escapeHtml(villageText)}</span>`;
         const targetCoord =
           cleanText(incoming.targetCoord || incoming.target) || "?";
         const incomingEtaMs = toFiniteEpochMs(
@@ -19520,7 +19524,7 @@
       : ""
   }
   <td class="smm-slice-village">
-    <span class="smm-village-coord">${escapeHtml(villageText)}</span>
+    ${villageLinkHtml}
     <span class="smm-row-scale-wrap">
       <input class="smm-row-scale" type="range" min="1" max="100" step="1" value="100">
       <span class="smm-row-scale-label">100%</span>
