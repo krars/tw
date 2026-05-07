@@ -19460,6 +19460,10 @@
         const contextText = contextBits.length
           ? contextBits.join(" · ")
           : "двор";
+        const targetHref = buildVillageInfoUrlByCoordOrId(targetCoord, null);
+        const contextLinkHtml = targetHref
+          ? `<a class="smm-route-link" href="${escapeHtml(targetHref)}" target="_blank" rel="noopener noreferrer">${escapeHtml(contextText)}</a>`
+          : escapeHtml(contextText);
         const favoriteComment =
           cleanText(entry && entry.favoriteComment) ||
           cleanText(incoming && incoming.favoriteComment) ||
@@ -19517,7 +19521,7 @@
         )}" data-selected-departure-ms="${escapeHtml(departureMs || "")}" data-action="slice" data-default-sigil="${escapeHtml(
           defaultSigilPercent,
         )}">
-  <td class="smm-nearest-context">${escapeHtml(contextText)}</td>
+  <td class="smm-nearest-context">${contextLinkHtml}</td>
   ${
     hasCommentColumn
       ? `<td class="smm-nearest-comment">${escapeHtml(favoriteComment)}</td>`
