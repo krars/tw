@@ -11,6 +11,7 @@ javascript:(function () {
   var WITHDRAW_ALL_BUTTON_CLASS = "scriptmm-wt-village-withdraw-all";
   var WITHDRAW_ALL_INLINE_BUTTON_CLASS = "scriptmm-wt-village-withdraw-all-inline";
   var WITHDRAW_ROW_BUTTON_CLASS = "scriptmm-wt-village-withdraw-row";
+  var ATTACK_COUNT_KEY = "__scriptmm_wt_village_attack_count";
   var FETCH_COOLDOWN_MS = 12000;
   var RENDER_EVERY_MS = 1000;
   var WITHDRAW_REQUEST_DELAY_MS = 330;
@@ -48,13 +49,17 @@ javascript:(function () {
   if (!isSupportedVillagePage()) {
     console.warn(
       LOG_PREFIX,
-      "Скрипт нужно запускать на странице деревни: Обзор, Площадь, информация о деревне или отчёт.",
+      "Скрипт нужно запускать на странице деревни: Обзор, Площадь, информация о деревне, атаки или отчёт.",
     );
     return;
   }
 
   injectStyles();
   installStatusPanel();
+
+  if (isIncomingsPage()) {
+    autoLabelNewAttacks();
+  }
 
   if (isWatchtowerPage()) {
     refresh(true);
@@ -77,7 +82,22 @@ javascript:(function () {
   }
 
   function isSupportedVillagePage() {
-    return isWatchtowerPage() || isInfoVillagePage() || isReportPage();
+    return isWatchtowerPage() || isInfoVillagePage() || isReportPage() || isIncomingsPage();
+  }
+
+  function isIncomingsPage() {
+    var screen = getCurrentScreen();
+    if (screen !== "overview_villages") {
+      return false;
+    }
+    try {
+      var url = new URL(window.location.href);
+      var mode = cleanText(url.searchParams.get("mode"));
+      var subtype = cleanText(url.searchParams.get("subtype"));
+      return mode === "incomings" && (subtype === "attacks" || subtype === "all" || !subtype);
+    } catch (e) {
+      return false;
+    }
   }
 
   function isWatchtowerPage() {
@@ -108,6 +128,47 @@ javascript:(function () {
     } catch (e) {
       return "";
     }
+  }
+
+  function autoLabelNewAttacks() {
+    var rows = Array.from(
+      document.querySelectorAll("#incomings_table tr.row_a, #incomings_table tr.row_b"),
+    );
+    var currentCount = rows.length;
+    if (currentCount <= 0) {
+      return;
+    }
+
+    var storedCount = 0;
+    try {
+      storedCount = Number(localStorage.getItem(ATTACK_COUNT_KEY)) || 0;
+    } catch (e) {}
+
+    if (currentCount > storedCount) {
+      setStatus(
+        "Новых атак: " + (currentCount - storedCount) + " (было " + storedCount + ", стало " + currentCount + "). Помечаю...",
+        "loading",
+      );
+
+      var selectAllCheckbox = document.querySelector("#select_all, input.selectAll");
+      if (selectAllCheckbox) {
+        selectAllCheckbox.checked = true;
+        selectAllCheckbox.click();
+      }
+
+      var labelButton = document.querySelector('input[type="submit"][name="label"]');
+      if (labelButton) {
+        window.setTimeout(function () {
+          labelButton.click();
+        }, 200);
+      }
+    } else {
+      setStatus("Новых атак нет (всего " + currentCount + ")", "ok");
+    }
+
+    try {
+      localStorage.setItem(ATTACK_COUNT_KEY, String(currentCount));
+    } catch (e) {}
   }
 
   function refresh(force) {
