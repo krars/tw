@@ -19460,7 +19460,8 @@
         const contextText = contextBits.length
           ? contextBits.join(" · ")
           : "двор";
-        const targetHref = buildVillageInfoUrlByCoordOrId(targetCoord, null);
+        const targetVillageId = resolveVillageIdByCoord(targetCoord);
+        const targetHref = buildVillageInfoUrlByCoordOrId(targetCoord, targetVillageId);
         const contextLinkHtml = targetHref
           ? `<a class="smm-route-link" href="${escapeHtml(targetHref)}" target="_blank" rel="noopener noreferrer">${escapeHtml(contextText)}</a>`
           : escapeHtml(contextText);
