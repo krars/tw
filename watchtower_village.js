@@ -310,9 +310,8 @@ javascript:(function () {
     state.inFlight = true;
     setStatus("Обновляю данные Сторожевой Башни...", "loading");
 
-    fetchAttacksDocument()
-      .then(function (doc) {
-        var parsed = parseAttacksDocument(doc);
+    fetchAllAttacksParsed()
+      .then(function (parsed) {
         state.attacksById = parsed;
         state.fetchedAtMs = Date.now();
         renderLabels();
@@ -334,8 +333,45 @@ javascript:(function () {
       });
   }
 
-  function fetchAttacksDocument() {
+  function fetchAllAttacksParsed() {
+    var firstUrl = buildAttacksUrl();
+    return fetchDocument(firstUrl)
+      .then(function (firstDoc) {
+        var merged = parseAttacksDocument(firstDoc);
+
+        var pageNumbers = parseAttackPageNumbers(firstDoc);
+        if (pageNumbers.length <= 1) {
+          return merged;
+        }
+
+        var maxPage = Math.max.apply(null, pageNumbers);
+        var fetchPromises = [];
+        for (var p = 1; p <= maxPage; p++) {
+          fetchPromises.push(
+            fetchAttackPage(p).then(function (doc) {
+              return parseAttacksDocument(doc);
+            })
+          );
+        }
+
+        return Promise.all(fetchPromises).then(function (pageMaps) {
+          pageMaps.forEach(function (pageMap) {
+            pageMap.forEach(function (value, key) {
+              merged.set(key, value);
+            });
+          });
+          return merged;
+        });
+      });
+  }
+
+  function fetchAttackPage(pageNum) {
     var url = buildAttacksUrl();
+    try {
+      var parsed = new URL(url);
+      parsed.searchParams.set("page", String(pageNum));
+      url = parsed.toString();
+    } catch (e) {}
     return fetchDocument(url);
   }
 
