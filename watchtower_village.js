@@ -57,7 +57,7 @@ javascript:(function () {
   injectStyles();
   installStatusPanel();
 
-  if (isIncomingsPage()) {
+  if (isWatchtowerPage() || isIncomingsPage()) {
     autoLabelNewAttacks();
   }
 
@@ -131,45 +131,99 @@ javascript:(function () {
   }
 
   function autoLabelNewAttacks() {
-    var rows = Array.from(
-      document.querySelectorAll("#incomings_table tr.row_a, #incomings_table tr.row_b"),
-    );
-    var currentCount = rows.length;
-    if (currentCount <= 0) {
-      return;
-    }
-
     var storedCount = 0;
     try {
       storedCount = Number(localStorage.getItem(ATTACK_COUNT_KEY)) || 0;
     } catch (e) {}
 
-    if (currentCount > storedCount) {
-      var newCount = currentCount - storedCount;
-      setStatus(
-        "Новых атак: " + newCount + " (было " + storedCount + ", стало " + currentCount + "). Помечаю...",
-        "loading",
-      );
-      console.log(LOG_PREFIX, "autoLabel: new attacks detected", newCount);
+    setStatus("Проверяю новые атаки...", "loading");
 
-      var selectAllCheckbox = document.querySelector("#select_all, input.selectAll");
-      if (selectAllCheckbox && !selectAllCheckbox.checked) {
-        selectAllCheckbox.click();
-      }
+    fetchDocument(buildAttacksUrl())
+      .then(function (doc) {
+        var commandInputs = Array.from(
+          doc.querySelectorAll('input[name^="command_ids["]'),
+        );
+        var currentCount = commandInputs.length;
+        if (currentCount <= 0) {
+          setStatus("Атак не найдено", "muted");
+          return;
+        }
 
-      var labelButton = document.querySelector('input[type="submit"][name="label"]');
-      if (labelButton) {
-        window.setTimeout(function () {
-          console.log(LOG_PREFIX, "autoLabel: clicking label button");
-          labelButton.click();
-        }, 600);
-      }
-    } else {
-      setStatus("Новых атак нет (всего " + currentCount + ")", "ok");
-    }
+        if (currentCount <= storedCount) {
+          setStatus("Новых атак нет (всего " + currentCount + ")", "ok");
+          saveAttackCount(currentCount);
+          return;
+        }
 
+        var newCount = currentCount - storedCount;
+        setStatus(
+          "Новых атак: " + newCount + " (было " + storedCount + ", стало " + currentCount + "). Помечаю...",
+          "loading",
+        );
+        console.log(LOG_PREFIX, "autoLabel: new attacks", newCount);
+
+        var form = doc.querySelector("#incomings_form");
+        var formAction = form
+          ? buildAbsoluteUrl(form.getAttribute("action") || form.action || "")
+          : "";
+        if (!formAction) {
+          setStatus("Авто-метка: не найдена форма #incomings_form", "error");
+          saveAttackCount(currentCount);
+          return;
+        }
+
+        var params = new URLSearchParams();
+        commandInputs.forEach(function (input) {
+          var name = input.getAttribute("name") || "";
+          var value = input.getAttribute("value") || "true";
+          if (name) {
+            params.set(name, value);
+          }
+        });
+        var checkboxNames = commandInputs.map(function (input) {
+          var m = (input.getAttribute("name") || "").match(/command_ids\[(\d+)\]/);
+          return m ? "id_" + m[1] : null;
+        }).filter(Boolean);
+        checkboxNames.forEach(function (cbName) {
+          params.set(cbName, "on");
+        });
+        params.set("label", "Метка");
+
+        fetch(formAction, {
+          method: "POST",
+          credentials: "include",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+          },
+          body: params.toString(),
+        })
+          .then(function (response) {
+            if (response.ok) {
+              setStatus(
+                "Помечено атак: " + currentCount + " (новых " + newCount + ")",
+                "ok",
+              );
+              console.log(LOG_PREFIX, "autoLabel: done, labeled", currentCount);
+            } else {
+              setStatus("Авто-метка: ошибка HTTP " + response.status, "error");
+            }
+            saveAttackCount(currentCount);
+          })
+          .catch(function (error) {
+            console.warn(LOG_PREFIX, "autoLabel submit error", error);
+            setStatus("Авто-метка: ошибка отправки формы", "error");
+            saveAttackCount(currentCount);
+          });
+      })
+      .catch(function (error) {
+        console.warn(LOG_PREFIX, "autoLabel fetch error", error);
+        setStatus("Авто-метка: не удалось загрузить страницу атак", "error");
+      });
+  }
+
+  function saveAttackCount(count) {
     try {
-      localStorage.setItem(ATTACK_COUNT_KEY, String(currentCount));
+      localStorage.setItem(ATTACK_COUNT_KEY, String(count));
     } catch (e) {}
   }
 
