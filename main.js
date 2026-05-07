@@ -662,10 +662,9 @@
     try {
       const doc = await fetchDocument(sourceUrl);
       const parsed = parseVillageGroupsFromDocument(doc);
-      state.villageGroupOptions = mergeVillageGroupOptions(
-        state.villageGroupOptions,
-        parsed.options,
-      );
+      if (parsed.options.length > 1) {
+        state.villageGroupOptions = normalizeVillageGroupOptions(parsed.options);
+      }
       ensureVillageGroupExists(getSelectedVillageGroupId());
       saveVillageGroupOptions();
       saveSelectedVillageGroupId();
@@ -744,13 +743,12 @@
 
   const syncVillageGroupsFromPage = () => {
     const parsed = parseVillageGroupsFromDocument(document);
-    const merged = mergeVillageGroupOptions(
-      state.villageGroupOptions,
-      parsed.options,
-    );
-    state.villageGroupOptions = merged;
+    const hasPageGroups = parsed.options.length > 1;
+    if (hasPageGroups) {
+      state.villageGroupOptions = normalizeVillageGroupOptions(parsed.options);
+    }
     const currentSelected = getSelectedVillageGroupId();
-    if (!merged.some((option) => option.id === currentSelected)) {
+    if (!state.villageGroupOptions.some((option) => option.id === currentSelected)) {
       state.selectedVillageGroupId = normalizeVillageGroupId(
         parsed.selectedId || currentSelected || "0",
       );
