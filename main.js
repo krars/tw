@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.10.53";
+  const VERSION = "0.10.54";
   const LOG_PREFIX = "[ScriptMM]";
   const DEBUG_VERBOSE_LOGS = false;
   const MULTI_TAB_PRESENCE_KEY = "scriptmm.active_instances.v1";
@@ -294,6 +294,7 @@
     multiTabLastWarningAtMs: 0,
     selectedVillageGroupId: "0",
     villageGroupOptions: [{ id: "0", label: "все" }],
+    villageGroupsServerLoaded: false,
     villageGroupReloadPromise: null,
     forumThreadSigilCacheKey: null,
     forumThreadSigilPercent: null,
@@ -646,9 +647,10 @@
 
   const ensureVillageGroupsLoaded = async ({ force = false } = {}) => {
     syncVillageGroupsFromPage();
-    const currentOptions = getVillageGroupOptionsForUi();
-    if (!force && currentOptions.length > 1) {
-      return currentOptions;
+    const needServerFetch =
+      force || !state.villageGroupsServerLoaded;
+    if (!needServerFetch) {
+      return getVillageGroupOptionsForUi();
     }
 
     const sourceUrl = buildGameUrl({
@@ -665,6 +667,7 @@
       if (parsed.options.length > 1) {
         state.villageGroupOptions = normalizeVillageGroupOptions(parsed.options);
       }
+      state.villageGroupsServerLoaded = true;
       ensureVillageGroupExists(getSelectedVillageGroupId());
       saveVillageGroupOptions();
       saveSelectedVillageGroupId();
